@@ -1,0 +1,12 @@
+-- id: spending_breakdown
+-- desc: Spending or income breakdown by account sub-category for a time period.
+--       Returns each matching account with its total and transaction count.
+--       Note: income accounts return negative sums (beancount convention).
+-- params:
+--   account_pattern  regex matched against account path  e.g. ^Expenses:Food
+--   start            period start date inclusive         e.g. 2026-01-01
+--   end              period end date exclusive           e.g. 2026-02-01
+SELECT account, sum(position) AS amount, count(*) AS count
+WHERE account ~ '{account_pattern}'
+  AND date >= {start} AND date < {end}
+GROUP BY account ORDER BY sum(position) DESC

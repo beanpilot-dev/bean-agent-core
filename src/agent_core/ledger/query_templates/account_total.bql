@@ -1,0 +1,7 @@
+-- id: account_total
+-- desc: Single aggregate sum for an account pattern with no date filter (all-time).
+--       Use for net worth, total fixed asset value, or any balance that accumulates over time.
+-- params:
+--   account_pattern  regex matched against account path  e.g. ^(Assets:|Liabilities:)
+SELECT sum(position) AS total
+WHERE account ~ '{account_pattern}'

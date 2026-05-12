@@ -1,0 +1,12 @@
+-- id: large_transactions
+-- desc: Top N individual transactions by amount for an account pattern in a period.
+--       Use for identifying one-off large expenses or unusual spending events.
+-- params:
+--   account_pattern  regex matched against account path  e.g. ^Expenses
+--   start            period start date inclusive         e.g. 2026-01-01
+--   end              period end date exclusive           e.g. 2026-02-01
+--   limit            max rows to return                  e.g. 10
+SELECT date, payee, narration, account, position
+WHERE account ~ '{account_pattern}'
+  AND date >= {start} AND date < {end}
+ORDER BY position DESC LIMIT {limit}

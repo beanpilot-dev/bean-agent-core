@@ -1,0 +1,11 @@
+-- id: period_total
+-- desc: Single aggregate sum for an account pattern over a date range.
+--       Use for scalars: total income this month, total expenses last month, etc.
+--       Income accounts return negative sums (beancount convention).
+-- params:
+--   account_pattern  regex matched against account path  e.g. ^Expenses
+--   start            period start date inclusive         e.g. 2026-01-01
+--   end              period end date exclusive           e.g. 2026-02-01
+SELECT sum(position) AS total
+WHERE account ~ '{account_pattern}'
+  AND date >= {start} AND date < {end}

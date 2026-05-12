@@ -1,0 +1,15 @@
+-- id: narration_search
+-- desc: Search transactions by narration or payee keyword within an account pattern.
+--       Useful when accounts lack category granularity (e.g. all food is in Expenses:Daily).
+--       Use regex in keyword: '外卖|餐|饭' matches multiple terms.
+-- params:
+--   keyword          regex matched against narration      e.g. 外卖|餐|饭
+--   account_pattern  regex matched against account path  e.g. ^Expenses  (use .* for all)
+--   start            period start date inclusive         e.g. 2026-01-01
+--   end              period end date exclusive           e.g. 2026-02-01
+--   limit            max rows to return                  e.g. 50
+SELECT date, payee, narration, account, position
+WHERE account ~ '{account_pattern}'
+  AND narration ~ '{keyword}'
+  AND date >= {start} AND date < {end}
+ORDER BY date DESC LIMIT {limit}
