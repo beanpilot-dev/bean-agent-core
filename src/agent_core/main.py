@@ -13,9 +13,11 @@ import logging
 import os
 import shutil
 import uuid
+from pathlib import Path
 
 import click
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -29,6 +31,11 @@ from agent_core.context import (
     agent_workspace,
     conv_whitelist,
 )
+
+# Load environment from project root (agent-core/).  .env.local overrides .env.
+_project_root = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_project_root / ".env")
+load_dotenv(_project_root / ".env.local", override=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
