@@ -9,8 +9,15 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from agent_core.context import agent_model, agent_repo_url, agent_token, agent_workspace, conv_whitelist
+from agent_core.context import (
+    agent_model,
+    agent_repo_url,
+    agent_token,
+    agent_workspace,
+    conv_whitelist,
+)
 from agent_core.ledger import analytics, ingestion, mutations, prices, report, state, workspace
+from agent_core.tracing import get_tracing_manager
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +535,16 @@ class PersonalFinanceAgent:
         conversation_meta: dict | None = None,
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
+
+        tracing = get_tracing_manager()
+        conversation_id = conversation_meta.get("id") if conversation_meta else None
+
+        trace_metadata = {
+            "conversation_id": conversation_id,
+            "conversation_name": conversation_meta.get("name") if conversation_meta else None,
+            "conversation_tag": conversation_meta.get("tag") if conversation_meta else None,
+        }
+
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             system_content = f"{SYSTEM_PROMPT}\n\nToday's date: {today}"
@@ -549,19 +566,37 @@ class PersonalFinanceAgent:
 
             system = SystemMessage(content=system_content)
             messages = [system] + prior + [HumanMessage(content=query)]
-            result = await self.graph.ainvoke({"messages": messages})
+
+            with tracing.trace(task="agent-turn", **trace_metadata) as handler:
+                config = {"callbacks": [handler]} if tracing.enabled else {}
+                result = await self.graph.ainvoke({"messages": messages}, config=config)
+
             response = result["messages"][-1].content
             updated_history = result["messages"][1:]  # exclude SystemMessage
             require_input = self._requires_user_input(result)
+
+            trace_id = tracing.get_trace_id()
+            trace_url = tracing.get_trace_url()
+
             yield {
                 "is_task_complete": not require_input,
                 "require_user_input": require_input,
                 "content": response,
             }
-            # Final internal chunk carrying updated history for the caller to persist.
+            # Final internal chunk carrying updated history + trace info for the caller to persist.
             # Filtered out before sending to the SSE client.
-            yield {"type": "history_snapshot", "messages": updated_history}
+            yield {
+                "type": "history_snapshot",
+                "messages": updated_history,
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+            }
         except Exception as e:
             logger.exception("Agent error")
             yield {"is_task_complete": True, "require_user_input": False, "content": f"Error: {e}"}
-            yield {"type": "history_snapshot", "messages": prior}
+            yield {
+                "type": "history_snapshot",
+                "messages": prior,
+                "trace_id": tracing.get_trace_id() if tracing else None,
+                "trace_url": tracing.get_trace_url() if tracing else None,
+            }
