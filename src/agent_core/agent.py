@@ -1,16 +1,17 @@
 import logging
 import os
+import time
 from datetime import datetime
 from typing import AsyncGenerator
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, messages_to_dict
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent_core.context import (
-    agent_model,
     agent_repo_url,
     agent_token,
     agent_workspace,
@@ -478,14 +479,14 @@ TOOLS = [
 class PersonalFinanceAgent:
 
     def __init__(self):
-        self.llm = ChatOpenAI(model=agent_model.get()).bind_tools(TOOLS)
         self.graph = self._build_graph()
 
     def _build_graph(self):
         tool_node = ToolNode(TOOLS)
 
-        async def call_model(state: MessagesState):
-            response = await self.llm.ainvoke(state["messages"])
+        async def call_model(state: MessagesState, config: RunnableConfig):
+            llm = config["configurable"]["llm"]
+            response = await llm.ainvoke(state["messages"])
             return {"messages": [response]}
 
         builder = StateGraph(MessagesState)
@@ -533,9 +534,12 @@ class PersonalFinanceAgent:
         query: str | list,
         prior: list,
         conversation_meta: dict | None = None,
+        api_key: str | None = None,
+        model: str = "gpt-4o",
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
 
+        start_time = time.monotonic()
         tracing = get_tracing_manager()
         conversation_id = conversation_meta.get("id") if conversation_meta else None
 
@@ -544,6 +548,12 @@ class PersonalFinanceAgent:
             "conversation_name": conversation_meta.get("name") if conversation_meta else None,
             "conversation_tag": conversation_meta.get("tag") if conversation_meta else None,
         }
+
+        llm = ChatOpenAI(
+            model=model,
+            api_key=api_key or "none",
+            base_url=os.environ.get("OPENAI_BASE_URL"),
+        ).bind_tools(TOOLS)
 
         try:
             today = datetime.now().strftime("%Y-%m-%d")
@@ -568,7 +578,10 @@ class PersonalFinanceAgent:
             messages = [system] + prior + [HumanMessage(content=query)]
 
             with tracing.trace(task="agent-turn", **trace_metadata) as handler:
-                config = {"callbacks": [handler]} if tracing.enabled else {}
+                config = {
+                    "callbacks": [handler] if tracing.enabled else [],
+                    "configurable": {"llm": llm},
+                }
                 result = await self.graph.ainvoke({"messages": messages}, config=config)
 
             response = result["messages"][-1].content
@@ -578,25 +591,36 @@ class PersonalFinanceAgent:
             trace_id = tracing.get_trace_id()
             trace_url = tracing.get_trace_url()
 
+            # Extract token usage from LLM response metadata
+            total_tokens = 0
+            for msg in result["messages"]:
+                rmeta = getattr(msg, "response_metadata", None)
+                if isinstance(rmeta, dict):
+                    tu = rmeta.get("token_usage", {})
+                    total_tokens += tu.get("total_tokens", 0)
+
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+
             yield {
                 "is_task_complete": not require_input,
                 "require_user_input": require_input,
                 "content": response,
             }
-            # Final internal chunk carrying updated history + trace info for the caller to persist.
-            # Filtered out before sending to the SSE client.
             yield {
                 "type": "history_snapshot",
-                "messages": updated_history,
+                "messages": messages_to_dict(updated_history),
                 "trace_id": trace_id,
                 "trace_url": trace_url,
+                "usage": {"tokens": total_tokens, "duration_ms": duration_ms},
             }
         except Exception as e:
             logger.exception("Agent error")
+            duration_ms = int((time.monotonic() - start_time) * 1000)
             yield {"is_task_complete": True, "require_user_input": False, "content": f"Error: {e}"}
             yield {
                 "type": "history_snapshot",
-                "messages": prior,
+                "messages": messages_to_dict(prior),
                 "trace_id": tracing.get_trace_id() if tracing else None,
                 "trace_url": tracing.get_trace_url() if tracing else None,
+                "usage": {"tokens": 0, "duration_ms": duration_ms},
             }

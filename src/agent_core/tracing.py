@@ -286,11 +286,11 @@ class TracingManager:
                 trace=self._trace,
                 trace_level=self._config["trace_level"],
             )
-
-            yield self._handler
         except Exception as e:
             logger.warning("LangFuse trace error: %s — falling back to noop", e)
             self._handler = _NoopCallback()
+
+        try:
             yield self._handler
         finally:
             self.flush()
