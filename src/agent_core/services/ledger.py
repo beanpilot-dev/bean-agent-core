@@ -4,8 +4,12 @@ Pure Python business logic with no LLM, no ContextVar dependencies.
 All methods accept workspace and other parameters explicitly.
 
 Write operations use a preview→confirm split:
-  - preview_*  → returns Preview (stashed in ProposalStore)
-  - confirm_*  → retrieves from ProposalStore, executes, returns CommitResult
+  - preview_*  → validates and returns Preview (proposal_id is informational)
+  - confirm_*  → accepts full payload, calls preview_* internally for re-validation,
+                  then executes and returns CommitResult
+
+The LLM carries the full payload both times; agent-core is stateless so
+proposal_id cannot survive across requests. confirm_* always re-validates.
 
 Domain errors (invalid account, bad syntax) return InvariantViolation /
 ValidationFailed for the Tool Layer to route back to the LLM.
@@ -15,6 +19,7 @@ System errors (disk full, git failure) raise exceptions.
 import logging
 import os
 import re
+import uuid
 from datetime import date
 
 from .types import (
@@ -23,7 +28,6 @@ from .types import (
     InvariantViolation,
     PreflightResult,
     Preview,
-    ProposalStore,
     QueryResult,
     ValidationFailed,
 )
@@ -40,7 +44,7 @@ class LedgerServiceError(Exception):
 # Beancount CLI helpers (lightweight local copy)
 # ---------------------------------------------------------------------------
 
-class _Beancount:
+class Beancount:
 
     @staticmethod
     def _bean_bin(workspace: str, name: str) -> str:
@@ -58,7 +62,7 @@ class _Beancount:
         import subprocess
         main = os.path.join(workspace, "data", "main.beancount")
         result = subprocess.run(
-            [_Beancount._bean_bin(workspace, "bean-check"), main],
+            [Beancount._bean_bin(workspace, "bean-check"), main],
             cwd=workspace, capture_output=True, text=True,
         )
         return result.returncode == 0, result.stdout + result.stderr
@@ -67,7 +71,7 @@ class _Beancount:
     def bean_format(workspace: str, file_path: str) -> None:
         import subprocess
         result = subprocess.run(
-            [_Beancount._bean_bin(workspace, "bean-format"), file_path],
+            [Beancount._bean_bin(workspace, "bean-format"), file_path],
             cwd=workspace, capture_output=True, text=True,
         )
         if result.returncode == 0 and result.stdout:
@@ -85,7 +89,7 @@ class _Beancount:
         import subprocess
         main = os.path.join(workspace, "data", "main.beancount")
         result = subprocess.run(
-            [_Beancount._bean_bin(workspace, "bean-query"), "-f", "csv", main, bql],
+            [Beancount._bean_bin(workspace, "bean-query"), "-f", "csv", main, bql],
             cwd=workspace, capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -159,14 +163,12 @@ class LedgerService:
     """Deterministic Beancount read/write operations.
 
     Write operations follow preview→confirm split:
-      - preview_* returns Preview (proposal_id in result)
-      - confirm_* takes proposal_id, retrieves stashed data from ProposalStore
+      - preview_* returns Preview (validates, proposal_id is informational)
+      - confirm_* accepts full payload, calls preview_* internally for re-validation,
+        then executes directly
 
     All read operations are stateless (static).
     """
-
-    def __init__(self, proposals: ProposalStore):
-        self._proposals = proposals
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -179,7 +181,7 @@ class LedgerService:
 
     @staticmethod
     def get_accounts(workspace: str) -> list[str]:
-        rows, err = _Beancount.run_bql_rows(
+        rows, err = Beancount.run_bql_rows(
             workspace, "SELECT DISTINCT account ORDER BY account"
         )
         if err:
@@ -237,7 +239,7 @@ class LedgerService:
         commit_message: str,
         whitelist: list[str] | None = None,
     ) -> Preview | InvariantViolation:
-        """Validate and stash a transaction proposal. Returns Preview with proposal_id."""
+        """Validate a transaction proposal. Returns Preview with proposal_id."""
         target = _ensure_agent_sidecar(workspace)
 
         violation = self.validate_accounts(workspace, transaction_text, whitelist)
@@ -245,13 +247,7 @@ class LedgerService:
             return violation
 
         accounts = LedgerService._extract_accounts(transaction_text)
-
-        pid = self._proposals.create("commit", {
-            "transaction_text": transaction_text,
-            "commit_message": commit_message,
-            "target_file": target,
-            "accounts_validated": accounts,
-        })
+        pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
             proposal_id=pid,
@@ -264,31 +260,25 @@ class LedgerService:
             },
             message=(
                 "All accounts validated. Show this preview to the user and "
-                "call confirm_commit with proposal_id after approval."
+                "call confirm_commit with the same transaction_text and "
+                "commit_message after approval."
             ),
         )
 
     def confirm_commit(
         self,
         workspace: str,
-        proposal_id: str,
+        transaction_text: str,
+        commit_message: str,
         github_token: str | None = None,
+        whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
-        """Execute a previously previewed commit. Retrieves proposal from store."""
-        proposal = self._proposals.get(proposal_id)
-        if not proposal:
-            return InvariantViolation(
-                invariant="PROPOSAL_NOT_FOUND",
-                severity="HARD",
-                provided=proposal_id,
-                remediation="The preview may have expired. Run preview_commit again.",
-            )
+        """Validate and execute a transaction commit. Re-runs preview internally."""
+        preview = self.preview_commit(workspace, transaction_text, commit_message, whitelist)
+        if not isinstance(preview, Preview):
+            return preview
 
-        data = proposal["data"]
-        txn_text = data["transaction_text"]
-        commit_msg = data["commit_message"]
-        target = data["target_file"]
-
+        target = preview.preview["target_file"]
         target_path = os.path.join(workspace, target)
         backup_path = target_path + ".bak"
 
@@ -298,9 +288,9 @@ class LedgerService:
             f.write(original)
 
         with open(target_path, "a") as f:
-            f.write(f"\n{txn_text}\n")
+            f.write(f"\n{transaction_text}\n")
 
-        is_clean, check_output = _Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
@@ -311,22 +301,20 @@ class LedgerService:
             )
 
         os.remove(backup_path)
-        _Beancount.bean_format(workspace, target_path)
+        Beancount.bean_format(workspace, target_path)
 
-        git = GitService.commit_and_push(workspace, commit_msg, github_token)
+        git = GitService.commit_and_push(workspace, commit_message, github_token)
         if not git["ok"]:
             return DependencyUnavailable(
                 error=f"Written but git commit failed: {git['error']}",
             )
 
-        self._proposals.remove(proposal_id)
-
         return CommitResult(
             outcome="Transaction recorded, validated, and committed",
             result={
                 "target_file": target,
-                "commit_message": commit_msg,
-                "transaction": txn_text,
+                "commit_message": commit_message,
+                "transaction": transaction_text,
             },
             push_status=git["push"],
         )
@@ -343,7 +331,7 @@ class LedgerService:
         open_date: str,
         display_name: str | None = None,
     ) -> Preview | InvariantViolation:
-        """Validate and stash an open-account proposal."""
+        """Validate an open-account proposal. Returns Preview with proposal_id."""
         if not _ACCOUNT_NAME_RE.match(account_name):
             return InvariantViolation(
                 invariant="ACCOUNT_NAME_FORMAT",
@@ -369,14 +357,7 @@ class LedgerService:
         if display_name:
             directive_lines.append(f'  name: "{display_name}"')
         directive_text = "\n".join(directive_lines)
-
-        pid = self._proposals.create("open_account", {
-            "account_name": account_name,
-            "currency": currency,
-            "open_date": open_date,
-            "display_name": display_name,
-            "directive_text": directive_text,
-        })
+        pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
             proposal_id=pid,
@@ -387,28 +368,26 @@ class LedgerService:
                 "currency": currency,
                 "open_date": open_date,
             },
-            message="Call confirm_open with proposal_id after user approval.",
+            message=(
+                "Call confirm_open with the same account details after user approval."
+            ),
         )
 
     def confirm_open(
         self,
         workspace: str,
-        proposal_id: str,
+        account_name: str,
+        currency: str | None,
+        open_date: str,
+        display_name: str | None = None,
         github_token: str | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
-        """Execute a previously previewed open-account."""
-        proposal = self._proposals.get(proposal_id)
-        if not proposal:
-            return InvariantViolation(
-                invariant="PROPOSAL_NOT_FOUND",
-                severity="HARD",
-                provided=proposal_id,
-                remediation="Run preview_open again.",
-            )
+        """Validate and execute an open-account. Re-runs preview internally."""
+        preview = self.preview_open(workspace, account_name, currency, open_date, display_name)
+        if not isinstance(preview, Preview):
+            return preview
 
-        data = proposal["data"]
-        account_name = data["account_name"]
-        directive_text = data["directive_text"]
+        directive_text = preview.preview["directive"]
         directive_lines = directive_text.split("\n")
 
         _ensure_agent_sidecar(workspace)
@@ -441,7 +420,7 @@ class LedgerService:
         with open(main_path, "w") as f:
             f.write(new_content)
 
-        is_clean, check_output = _Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace)
         if not is_clean:
             with open(main_path, "w") as f:
                 f.write(original)
@@ -450,7 +429,7 @@ class LedgerService:
                 remediation="Fix the account directive and try again.",
             )
 
-        _Beancount.bean_format(workspace, main_path)
+        Beancount.bean_format(workspace, main_path)
         git = GitService.commit_and_push(
             workspace, f"chore(accounts): open {account_name}", github_token,
         )
@@ -459,14 +438,12 @@ class LedgerService:
                 error=f"Written but git commit failed: {git['error']}",
             )
 
-        self._proposals.remove(proposal_id)
-
         return CommitResult(
             outcome=f"Account '{account_name}' opened and committed",
             result={
                 "account": account_name,
-                "currency": data["currency"],
-                "open_date": data["open_date"],
+                "currency": currency,
+                "open_date": open_date,
                 "file": "data/agent_inc/main.beancount",
             },
             push_status=git["push"],
@@ -615,13 +592,7 @@ class LedgerService:
             return violation
 
         advisory = self._detect_value_change(old_block, new_transaction_text)
-
-        pid = self._proposals.create("update_transaction", {
-            "rel_path": rel_path,
-            "old_block": old_block,
-            "new_transaction_text": new_transaction_text,
-            "commit_message": commit_message,
-        })
+        pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
             proposal_id=pid,
@@ -633,30 +604,31 @@ class LedgerService:
                 "commit_message": commit_message,
                 "advisory": advisory,
             },
-            message="Call confirm_update with proposal_id after user approval.",
+            message=(
+                "Call confirm_update with the same parameters after user approval."
+            ),
         )
 
     def confirm_update(
         self,
         workspace: str,
-        proposal_id: str,
+        target_date: str,
+        narration: str,
+        new_transaction_text: str,
+        commit_message: str,
         github_token: str | None = None,
+        whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
-        """Execute a previously previewed transaction update."""
-        proposal = self._proposals.get(proposal_id)
-        if not proposal:
-            return InvariantViolation(
-                invariant="PROPOSAL_NOT_FOUND",
-                severity="HARD",
-                provided=proposal_id,
-                remediation="Run preview_update again.",
-            )
+        """Validate and execute a transaction update. Re-runs preview internally."""
+        preview = self.preview_update(
+            workspace, target_date, narration, new_transaction_text,
+            commit_message, whitelist,
+        )
+        if not isinstance(preview, Preview):
+            return preview
 
-        data = proposal["data"]
-        rel_path = data["rel_path"]
-        old_block = data["old_block"]
-        new_text = data["new_transaction_text"]
-        commit_msg = data["commit_message"]
+        rel_path = preview.preview["file"]
+        old_block = preview.preview["found_block"]
 
         file_path = os.path.join(workspace, rel_path)
         backup_path = file_path + ".bak"
@@ -666,11 +638,11 @@ class LedgerService:
         with open(backup_path, "w") as f:
             f.write(original)
 
-        new_content = original.replace(old_block, new_text.strip(), 1)
+        new_content = original.replace(old_block, new_transaction_text.strip(), 1)
         with open(file_path, "w") as f:
             f.write(new_content)
 
-        is_clean, check_output = _Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace)
         if not is_clean:
             with open(file_path, "w") as f:
                 f.write(original)
@@ -684,22 +656,20 @@ class LedgerService:
             )
 
         os.remove(backup_path)
-        _Beancount.bean_format(workspace, file_path)
+        Beancount.bean_format(workspace, file_path)
 
-        git = GitService.commit_and_push(workspace, commit_msg, github_token)
+        git = GitService.commit_and_push(workspace, commit_message, github_token)
         if not git["ok"]:
             return DependencyUnavailable(
                 error=f"Written but git commit failed: {git['error']}",
             )
-
-        self._proposals.remove(proposal_id)
 
         return CommitResult(
             outcome="Transaction updated, validated, and committed",
             result={
                 "file": rel_path,
                 "old_block": old_block,
-                "new_block": new_text.strip(),
+                "new_block": new_transaction_text.strip(),
             },
             push_status=git["push"],
         )
@@ -716,7 +686,7 @@ class LedgerService:
         transactions_file: str | None = None,
         whitelist: list[str] | None = None,
     ) -> Preview | InvariantViolation:
-        """Validate and stash a bulk-commit proposal."""
+        """Validate a bulk-commit proposal. Returns Preview with proposal_id."""
         if transactions_file:
             try:
                 with open(transactions_file, encoding="utf-8") as f:
@@ -753,13 +723,7 @@ class LedgerService:
         if txn_count > 5:
             sample += f"\n... ({txn_count - 5} more)"
 
-        pid = self._proposals.create("bulk_commit", {
-            "transactions_text": transactions_text,
-            "commit_message": commit_message,
-            "target_file": target,
-            "transactions_file": transactions_file,
-            "transaction_count": txn_count,
-        })
+        pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
             proposal_id=pid,
@@ -776,25 +740,22 @@ class LedgerService:
     def confirm_bulk(
         self,
         workspace: str,
-        proposal_id: str,
+        transactions_text: str = "",
+        commit_message: str = "",
+        transactions_file: str | None = None,
         github_token: str | None = None,
+        whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
-        """Execute a previously previewed bulk commit."""
-        proposal = self._proposals.get(proposal_id)
-        if not proposal:
-            return InvariantViolation(
-                invariant="PROPOSAL_NOT_FOUND",
-                severity="HARD",
-                provided=proposal_id,
-                remediation="Run preview_bulk again.",
-            )
+        """Validate and execute a bulk commit. Re-runs preview internally."""
+        preview = self.preview_bulk(
+            workspace, transactions_text, commit_message,
+            transactions_file, whitelist,
+        )
+        if not isinstance(preview, Preview):
+            return preview
 
-        data = proposal["data"]
-        txn_text = data["transactions_text"]
-        commit_msg = data["commit_message"]
-        target = data["target_file"]
-        txn_count = data["transaction_count"]
-        staging_file = data.get("transactions_file")
+        target = preview.preview["target_file"]
+        txn_count = preview.preview["transaction_count"]
 
         target_path = os.path.join(workspace, target)
         backup_path = target_path + ".bak"
@@ -805,9 +766,9 @@ class LedgerService:
             f.write(original)
 
         with open(target_path, "a") as f:
-            f.write(f"\n{txn_text.strip()}\n")
+            f.write(f"\n{transactions_text.strip()}\n")
 
-        is_clean, check_output = _Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
@@ -818,18 +779,16 @@ class LedgerService:
             )
 
         os.remove(backup_path)
-        _Beancount.bean_format(workspace, target_path)
+        Beancount.bean_format(workspace, target_path)
 
-        git = GitService.commit_and_push(workspace, commit_msg, github_token)
+        git = GitService.commit_and_push(workspace, commit_message, github_token)
         if not git["ok"]:
             return DependencyUnavailable(
                 error=f"Written but git commit failed: {git['error']}",
             )
 
-        if staging_file and os.path.exists(staging_file):
-            os.remove(staging_file)
-
-        self._proposals.remove(proposal_id)
+        if transactions_file and os.path.exists(transactions_file):
+            os.remove(transactions_file)
 
         return CommitResult(
             outcome=f"{txn_count} transactions recorded and committed",
@@ -853,7 +812,7 @@ class LedgerService:
             f'SELECT sum(position) AS balance '
             f'WHERE account ~ "^{account}$" {date_clause}'
         )
-        rows, error = _Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
             return QueryResult(
                 status="DEPENDENCY_UNAVAILABLE", error=error,
@@ -891,7 +850,7 @@ class LedgerService:
             f"{where} ORDER BY date DESC LIMIT {limit}"
         )
 
-        rows, error = _Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
             return QueryResult(status="DEPENDENCY_UNAVAILABLE", error=error)
 
@@ -910,7 +869,7 @@ class LedgerService:
 
     @staticmethod
     def query_bql(workspace: str, bql: str) -> QueryResult:
-        rows, error = _Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
             return QueryResult(status="ERROR", error=error, bql=bql)
         return QueryResult(status="SUCCESS", count=len(rows), rows=rows)
@@ -952,7 +911,7 @@ class LedgerService:
         for key, value in params.items():
             bql = bql.replace(f"{{{key}}}", str(value))
 
-        rows, error = _Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
             return QueryResult(status="ERROR", error=error, bql=bql)
 
@@ -976,7 +935,7 @@ class LedgerService:
             )
 
         target = _ensure_agent_sidecar(workspace)
-        is_clean, check_output = _Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace)
         accounts = LedgerService.get_accounts(workspace)
 
         # Collect recent transactions

@@ -14,8 +14,6 @@ executes ledger operations in an ephemeral workspace. No persistent state.
 import json
 import logging
 import os
-import re
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -35,14 +33,9 @@ from agent_core.context import (
     agent_model,
     agent_repo_url,
     agent_request_id,
-    agent_token,
     agent_user_id,
-    agent_workspace,
-    conv_whitelist,
 )
-from agent_core.ledger import _beancount as bc
-from agent_core.ledger import state
-from agent_core.ledger import workspace as ws
+from agent_core.services.orchestrator import AgentOrchestrator
 
 # Load environment from project root (agent-core/).  .env.local overrides .env.
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -61,6 +54,7 @@ app.add_middleware(
 )
 
 _agent = PersonalFinanceAgent()
+_orchestrator = AgentOrchestrator(_agent)
 
 
 # ---------------------------------------------------------------------------
@@ -111,16 +105,6 @@ def _error_envelope(
     )
 
 
-def _repo_error_to_envelope(exc: Exception) -> JSONResponse:
-    """Map common repository errors to standard error responses."""
-    msg = str(exc).lower()
-    if "not found" in msg or "remote:" in msg and "not found" in msg:
-        return _error_envelope("REPO_UNREACHABLE", str(exc), 502)
-    if "authentication" in msg or "auth" in msg or "401" in msg:
-        return _error_envelope("REPO_AUTH_FAILED", str(exc), 401)
-    return _error_envelope("REPO_UNREACHABLE", str(exc), 502)
-
-
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -164,29 +148,6 @@ class AccountsRequest(BaseModel):
     request_id: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Accounts helper
-# ---------------------------------------------------------------------------
-
-def _get_raw_open_directives(workspace_path: str) -> list[str]:
-    """Return all open directives from ledger .beancount files."""
-    directives: list[str] = []
-    data_dir = os.path.join(workspace_path, "data")
-    try:
-        for dirpath, _dirnames, filenames in os.walk(data_dir):
-            for fname in sorted(filenames):
-                if not fname.endswith(".beancount"):
-                    continue
-                try:
-                    with open(os.path.join(dirpath, fname)) as f:
-                        for line in f:
-                            if re.match(r"\d{4}-\d{2}-\d{2}\s+open\s+", line):
-                                directives.append(line.strip())
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return directives
 
 
 # ---------------------------------------------------------------------------
@@ -245,27 +206,29 @@ async def agent_chat(req: ChatRequest):
     )
 
     async def event_stream():
-        ws_tok = agent_workspace.set(workspace_path)
         repo_tok = agent_repo_url.set(req.repo.url)
-        gh_tok = agent_token.set(req.repo.token)
         model_tok = agent_model.set(req.model)
-        wl_tok = conv_whitelist.set(req.conversation.account_whitelist)
         api_tok = agent_api_key.set(req.api_key)
         uid_tok = agent_user_id.set(req.user_id)
         rid_tok = agent_request_id.set(req.request_id)
 
         try:
-            async for chunk in _agent.stream(
+            async for chunk in _orchestrator.run(
+                workspace_path=workspace_path,
+                repo_url=req.repo.url,
+                token=req.repo.token,
+                user_id=req.user_id,
+                request_id=req.request_id,
+                api_key=req.api_key,
+                model=req.model,
                 query=req.query,
-                prior=req.messages,
                 conversation_meta={
                     "id": req.conversation.id,
                     "name": "agent-chat",
                     "tag": req.conversation.tag,
-                    "workspace": workspace_path,
+                    "account_whitelist": req.conversation.account_whitelist,
                 },
-                api_key=req.api_key,
-                model=req.model,
+                messages=req.messages,
             ):
                 if chunk.get("type") == "history_snapshot":
                     yield f"data: {json.dumps(chunk, default=str)}\n\n"
@@ -278,15 +241,11 @@ async def agent_chat(req: ChatRequest):
             yield f"data: {json.dumps(fatal)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            conv_whitelist.reset(wl_tok)
             agent_request_id.reset(rid_tok)
             agent_user_id.reset(uid_tok)
             agent_api_key.reset(api_tok)
             agent_model.reset(model_tok)
-            agent_token.reset(gh_tok)
             agent_repo_url.reset(repo_tok)
-            agent_workspace.reset(ws_tok)
-            shutil.rmtree(workspace_path, ignore_errors=True)
 
     return StreamingResponse(
         event_stream(),
@@ -316,34 +275,21 @@ async def agent_stats(req: StatsRequest):
     if not tag:
         return _error_envelope("INVALID_REQUEST", "conversation.tag is required", 400)
 
-    try:
-        ws.ensure_workspace(workspace_path, req.repo.url, req.repo.token)
-    except Exception as e:
-        return _repo_error_to_envelope(e)
-
-    # Query spending by account for the given tag
-    tag_clean = tag.lstrip("#")
-    bql = (
-        f'SELECT account, sum(position) AS total '
-        f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
+    result = await _orchestrator.run_stats(
+        workspace_path=workspace_path,
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        tag=tag,
     )
-    rows, error = bc.run_bql_rows(workspace_path, bql)
 
-    if error is not None:
-        # Fallback: search narration for the tag text
-        bql = (
-            f'SELECT account, sum(position) AS total '
-            f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
-        )
-        rows, error = bc.run_bql_rows(workspace_path, bql)
-
-    shutil.rmtree(workspace_path, ignore_errors=True)
-
-    if error is not None:
+    if result.get("status") == "error":
+        error = result.get("error", {})
         return JSONResponse(
             content={
                 "status": "error",
-                "error": {"code": "INTERNAL_ERROR", "message": error},
+                "error": error,
                 "tag": tag,
                 "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
             },
@@ -353,7 +299,7 @@ async def agent_stats(req: StatsRequest):
     return {
         "status": "ok",
         "tag": tag,
-        "rows": rows,
+        "rows": result.get("rows", []),
         "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
     }
 
@@ -374,31 +320,25 @@ async def agent_accounts(req: AccountsRequest):
         json.dumps(sanitize_payload(req.model_dump())),
     )
 
-    try:
-        ws.ensure_workspace(workspace_path, req.repo.url, req.repo.token)
-    except Exception as e:
-        return _repo_error_to_envelope(e)
+    result = await _orchestrator.run_accounts(
+        workspace_path=workspace_path,
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+    )
 
-    # Check sidecar include
-    if not state._check_sidecar_include(workspace_path):
-        shutil.rmtree(workspace_path, ignore_errors=True)
-        return _error_envelope(
-            "SETUP_REQUIRED",
-            "Sidecar include directive is missing from data/main.beancount. "
-            'Add: include "agent_inc/main.beancount"',
-            400,
+    if result.get("status") == "error":
+        error = result.get("error", {})
+        return JSONResponse(
+            content={"status": "error", "error": error},
+            status_code=400 if error.get("code") == "SETUP_REQUIRED" else 500,
         )
-
-    try:
-        accounts = state.get_accounts(workspace_path)
-        raw_accounts = _get_raw_open_directives(workspace_path)
-    finally:
-        shutil.rmtree(workspace_path, ignore_errors=True)
 
     return {
         "status": "ok",
-        "accounts": accounts,
-        "raw_accounts": raw_accounts,
+        "accounts": result.get("accounts", []),
+        "raw_accounts": result.get("raw_accounts", []),
         "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
     }
 

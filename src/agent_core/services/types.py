@@ -3,9 +3,6 @@
 Every service method returns a concrete ServiceResult subclass so the
 caller (Tool Layer or API Layer) can pattern-match on the type rather
 than inspecting string dict keys.
-
-ProposalStore holds in-flight preview state across the preview→confirm
-split — one store per request lifecycle, owned by the orchestrator.
 """
 
 import uuid

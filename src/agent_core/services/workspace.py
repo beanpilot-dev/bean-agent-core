@@ -112,12 +112,8 @@ class GitService:
             if token:
                 askpass = GitService._configure_git_askpass(workspace, token)
 
-            url = repo_url
-            if token and not askpass:
-                url = repo_url.replace("https://", f"https://x-token:{token}@", 1)
-
             logger.info("Cloning %s into %s", repo_url, workspace)
-            rc, _, err = GitService._run_git(["git", "clone", url, "."], cwd=workspace)
+            rc, _, err = GitService._run_git(["git", "clone", repo_url, "."], cwd=workspace)
             if rc != 0:
                 raise GitService._classify_clone_error(err)
 

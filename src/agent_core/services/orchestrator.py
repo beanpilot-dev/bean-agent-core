@@ -15,7 +15,6 @@ the Agent layer for LLM reasoning.
 import logging
 import os
 import time
-import uuid
 from typing import AsyncGenerator
 
 from .ledger import LedgerService
@@ -32,8 +31,8 @@ class OrchestratorError(Exception):
 class AgentOrchestrator:
     """Full lifecycle orchestrator for agent requests.
 
-    Creates a per-request ProposalStore for preview→confirm state and
-    a LedgerService instance that uses it.
+    Creates a per-request LedgerService that handles write operations
+    with preview→confirm split (confirm always re-validates internally).
 
     Usage from API layer:
         orchestrator = AgentOrchestrator(agent)
@@ -48,6 +47,7 @@ class AgentOrchestrator:
     async def run(
         self,
         *,
+        workspace_path: str,
         repo_url: str,
         token: str | None,
         user_id: str,
@@ -60,7 +60,6 @@ class AgentOrchestrator:
         use_cache: bool = True,
     ) -> AsyncGenerator[dict, None]:
         """Run the full agent lifecycle and yield SSE chunks."""
-        workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
         start_time = time.monotonic()
 
         try:
@@ -85,14 +84,17 @@ class AgentOrchestrator:
 
             if conversation_meta is None:
                 conversation_meta = {}
-            conversation_meta.setdefault("workspace", workspace_path)
 
+            whitelist = conversation_meta.get("account_whitelist")
             async for chunk in self._agent.stream(
                 query=query,
                 prior=messages,
                 conversation_meta=conversation_meta,
                 api_key=api_key,
                 model=model,
+                workspace=workspace_path,
+                token=token,
+                whitelist=whitelist,
             ):
                 yield chunk
 
@@ -123,6 +125,7 @@ class AgentOrchestrator:
     async def run_stats(
         self,
         *,
+        workspace_path: str,
         repo_url: str,
         token: str | None,
         user_id: str,
@@ -131,7 +134,6 @@ class AgentOrchestrator:
     ) -> dict:
         """Run a lightweight stats query (no LLM)."""
         start_time = time.monotonic()
-        workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
 
         try:
             GitService.clone(workspace_path, repo_url, token)
@@ -141,13 +143,13 @@ class AgentOrchestrator:
                 f'SELECT account, sum(position) AS total '
                 f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
             )
-            rows, error = LedgerService._Beancount.run_bql_rows(workspace_path, bql)
+            rows, error = LedgerService.Beancount.run_bql_rows(workspace_path, bql)
             if error:
                 bql = (
                     f'SELECT account, sum(position) AS total '
                     f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
                 )
-                rows, error = LedgerService._Beancount.run_bql_rows(
+                rows, error = LedgerService.Beancount.run_bql_rows(
                     workspace_path, bql,
                 )
 
@@ -182,6 +184,7 @@ class AgentOrchestrator:
     async def run_accounts(
         self,
         *,
+        workspace_path: str,
         repo_url: str,
         token: str | None,
         user_id: str,
@@ -189,13 +192,11 @@ class AgentOrchestrator:
     ) -> dict:
         """Run account listing (no LLM)."""
         start_time = time.monotonic()
-        workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
 
         try:
             GitService.clone(workspace_path, repo_url, token)
 
             if not PreflightService.check_setup(workspace_path):
-                GitService.destroy(workspace_path)
                 return {
                     "status": "error",
                     "error": {

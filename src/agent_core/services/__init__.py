@@ -8,11 +8,10 @@ The service layer contains all operations that do not require an LLM:
   - External price fetching (PriceService)
   - LLM orchestration and streaming (AgentOrchestrator)
   - Typed return values (Preview, CommitResult, InvariantViolation, etc.)
-  - Per-request proposal state (ProposalStore)
 
 Services accept explicit parameters (workspace path, token, etc.) — they do
 NOT depend on ContextVars. Write operations use a preview→confirm split
-with ProposalStore for in-flight state.
+where confirm_* re-runs preview validation internally.
 
 The tool layer (agent.py) wraps services for LLM consumption.
 """
