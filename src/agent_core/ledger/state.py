@@ -1,7 +1,5 @@
 """Ledger read capabilities: preflight, account queries, transaction search."""
 
-import csv
-import io
 import json
 import logging
 import os
@@ -73,21 +71,12 @@ def get_agent_target_file(workspace: str) -> str:
 
 def get_accounts(workspace: str) -> list[str]:
     """Return all accounts currently defined in the ledger."""
-    main = os.path.join(workspace, "data", "main.beancount")
-    import subprocess
-    result = subprocess.run(
-        [bc._bean_bin(workspace, "bean-query"), main,
-         "SELECT DISTINCT account ORDER BY account"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
+    rows, error = bc.run_bql_rows(
+        workspace, "SELECT DISTINCT account ORDER BY account"
     )
-    accounts = []
-    for line in result.stdout.splitlines()[2:]:  # skip header + separator
-        line = line.strip()
-        if line and not line.startswith("-"):
-            accounts.append(line)
-    return accounts
+    if error:
+        return []
+    return [r["account"] for r in rows]
 
 
 def get_recent_transactions(workspace: str, target_file: str) -> str:
@@ -98,7 +87,7 @@ def get_recent_transactions(workspace: str, target_file: str) -> str:
             lines = f.readlines()
     except OSError:
         return ""
-    txn_lines = [i for i, l in enumerate(lines) if re.match(r"^\d{4}-\d{2}-\d{2} ", l)]
+    txn_lines = [i for i, line in enumerate(lines) if re.match(r"^\d{4}-\d{2}-\d{2} ", line)]
     start = txn_lines[-5] if len(txn_lines) >= 5 else (txn_lines[0] if txn_lines else 0)
     return "".join(lines[start:]).strip()
 
@@ -145,9 +134,8 @@ def get_balance(workspace: str, account: str, as_of_date: str | None = None) -> 
     rows, error = bc.run_bql_rows(workspace, bql)
     if error is not None:
         return json.dumps({
-            "status": "DEPENDENCY_UNAVAILABLE",
+            "status": "ERROR",
             "error": error,
-            "retryable": True,
         })
 
     balance_raw = rows[0].get("balance", "").strip() if rows else ""
@@ -189,9 +177,8 @@ def find_transactions(
     rows, error = bc.run_bql_rows(workspace, bql)
     if error is not None:
         return json.dumps({
-            "status": "DEPENDENCY_UNAVAILABLE",
+            "status": "ERROR",
             "error": error,
-            "retryable": True,
         })
 
     return json.dumps({
@@ -257,30 +244,38 @@ def find_transaction_block(
 ) -> list[tuple[str, str, str]]:
     """Search all beancount files for a transaction matching date + narration.
 
-    Searches user's data/YYYY.beancount files and agent's data/agent_inc/YYYY-MM.beancount files.
+    Uses bean-query to validate the transaction exists across ALL included
+    files, then walks data/ for .beancount files to extract raw blocks.
+
     Returns a list of (rel_path, file_content, raw_block) tuples.
     Empty list = not found; more than one = ambiguous.
     """
+    escaped_narration = narration.replace('"', '\\"')
+    bql = (
+        f'SELECT DISTINCT date, narration '
+        f'WHERE date = {date} AND narration ~ "{escaped_narration}"'
+    )
+    rows, error = bc.run_bql_rows(workspace, bql)
+    if error or not rows:
+        return []
+
     header_re = re.compile(
         rf"^{re.escape(date)}\s+[*!].*?{re.escape(narration)}",
         re.MULTILINE,
     )
 
     files_to_search: list[tuple[str, str]] = []
-
     data_dir = os.path.join(workspace, "data")
-    try:
-        for name in sorted(os.listdir(data_dir)):
-            if re.match(r"^\d{4}\.beancount$", name):
-                files_to_search.append((f"data/{name}", os.path.join(data_dir, name)))
-    except OSError:
-        pass
 
-    agent_dir = os.path.join(workspace, "data", "agent_inc")
     try:
-        for name in sorted(os.listdir(agent_dir)):
-            if re.match(r"^\d{4}-\d{2}\.beancount$", name):
-                files_to_search.append((f"data/agent_inc/{name}", os.path.join(agent_dir, name)))
+        for dirpath, _dirnames, filenames in os.walk(data_dir):
+            for fname in sorted(filenames):
+                if not fname.endswith(".beancount"):
+                    continue
+                files_to_search.append(
+                    (os.path.relpath(os.path.join(dirpath, fname), workspace),
+                     os.path.join(dirpath, fname))
+                )
     except OSError:
         pass
 

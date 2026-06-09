@@ -80,7 +80,7 @@ class DependencyUnavailable(ServiceResult):
 @dataclass
 class QueryResult(ServiceResult):
     """BQL query or transaction search result."""
-    status: Literal["SUCCESS", "DEPENDENCY_UNAVAILABLE", "ERROR"] = "SUCCESS"
+    status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
     count: int = 0
     rows: list[dict[str, Any]] = field(default_factory=list)
     filters_applied: dict[str, Any] | None = None

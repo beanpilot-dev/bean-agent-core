@@ -459,8 +459,20 @@ class LedgerService:
     ) -> list[tuple[str, str, str]]:
         """Search beancount files for a transaction matching date + narration.
 
+        Uses bean-query to validate the transaction exists across ALL included
+        files, then walks data/ for .beancount files to extract raw blocks.
+
         Returns list of (rel_path, file_content, raw_block) tuples.
         """
+        escaped_narration = narration.replace('"', '\\"')
+        bql = (
+            f'SELECT DISTINCT date, narration '
+            f'WHERE date = {target_date} AND narration ~ "{escaped_narration}"'
+        )
+        rows, error = Beancount.run_bql_rows(workspace, bql)
+        if error or not rows:
+            return []
+
         header_re = re.compile(
             rf"^{re.escape(target_date)}\s+[*!].*?{re.escape(narration)}",
             re.MULTILINE,
@@ -469,9 +481,12 @@ class LedgerService:
         data_dir = os.path.join(workspace, "data")
 
         try:
-            for name in sorted(os.listdir(data_dir)):
-                if re.match(r"^\d{4}\.beancount$", name):
-                    abs_path = os.path.join(data_dir, name)
+            for dirpath, _dirnames, filenames in os.walk(data_dir):
+                for fname in sorted(filenames):
+                    if not fname.endswith(".beancount"):
+                        continue
+                    abs_path = os.path.join(dirpath, fname)
+                    rel = os.path.relpath(abs_path, workspace)
                     try:
                         with open(abs_path) as f:
                             content = f.read()
@@ -485,29 +500,7 @@ class LedgerService:
                             rest[:end_match.start()].rstrip()
                             if end_match else rest.rstrip()
                         )
-                        results.append((f"data/{name}", content, raw))
-        except OSError:
-            pass
-
-        agent_dir = os.path.join(workspace, "data", "agent_inc")
-        try:
-            for name in sorted(os.listdir(agent_dir)):
-                if re.match(r"^\d{4}-\d{2}\.beancount$", name):
-                    abs_path = os.path.join(agent_dir, name)
-                    try:
-                        with open(abs_path) as f:
-                            content = f.read()
-                    except OSError:
-                        continue
-                    for m in header_re.finditer(content):
-                        block_start = m.start()
-                        rest = content[block_start:]
-                        end_match = re.search(r"\n[ \t]*\n", rest)
-                        raw = (
-                            rest[:end_match.start()].rstrip()
-                            if end_match else rest.rstrip()
-                        )
-                        results.append((f"data/agent_inc/{name}", content, raw))
+                        results.append((rel, content, raw))
         except OSError:
             pass
 
@@ -815,7 +808,7 @@ class LedgerService:
         rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
             return QueryResult(
-                status="DEPENDENCY_UNAVAILABLE", error=error,
+                status="ERROR", error=error,
             )
         balance_raw = rows[0].get("balance", "").strip() if rows else ""
         return QueryResult(
@@ -852,7 +845,7 @@ class LedgerService:
 
         rows, error = Beancount.run_bql_rows(workspace, bql)
         if error:
-            return QueryResult(status="DEPENDENCY_UNAVAILABLE", error=error)
+            return QueryResult(status="ERROR", error=error)
 
         return QueryResult(
             status="SUCCESS",
