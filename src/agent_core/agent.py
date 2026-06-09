@@ -190,7 +190,7 @@ class PersonalFinanceAgent:
                         "engineer_llm": base_llm.bind_tools(INGESTION_TOOLS),
                         "qa_llm": ChatOpenAI(**base_llm_kwargs),
                         "planner_llm": ChatOpenAI(**base_llm_kwargs).with_structured_output(
-                            PlannerOutput
+                            PlannerOutput, method="function_calling"
                         ),
                         "synthesizer_llm": ChatOpenAI(**base_llm_kwargs),
                         "router_system_prompt": SYSTEM_PROMPT,
