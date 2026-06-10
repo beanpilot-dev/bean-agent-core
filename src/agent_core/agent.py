@@ -24,7 +24,6 @@ from typing import Any, AsyncGenerator
 from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
-    messages_to_dict,
 )
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
@@ -71,6 +70,15 @@ _PILLAR_MAP = {  # type: ignore[var-annotated]
     "synthesizer": "synthesizer",
     END: END,
 }
+
+
+def _serialize_history(messages) -> list[dict]:
+    role_map = {"human": "user", "ai": "assistant", "system": "system"}
+    return [
+        {"role": role_map.get(getattr(m, "type", "user"), "user"),
+         "content": getattr(m, "content", "")}
+        for m in messages
+    ]
 
 
 # ── PersonalFinanceAgent ──────────────────────────────────────────────────────
@@ -220,12 +228,12 @@ class PersonalFinanceAgent:
             if had_multiple and not require_input:
                 original = result.get("original_query", query)
                 final_msg = result["messages"][-1]
-                updated_history = messages_to_dict([
+                updated_history = _serialize_history([
                     HumanMessage(content=original),
                     final_msg,
                 ])
             else:
-                updated_history = messages_to_dict(result["messages"][1:])
+                updated_history = _serialize_history(result["messages"][1:])
 
             trace_id = tracing.get_trace_id()
             trace_url = tracing.get_trace_url()
@@ -257,7 +265,10 @@ class PersonalFinanceAgent:
             yield {"is_task_complete": True, "require_user_input": False, "content": f"Error: {e}"}
             yield {
                 "type": "history_snapshot",
-                "messages": messages_to_dict(prior),
+                "messages": (
+                    prior if prior and all(isinstance(m, dict) for m in prior)
+                    else _serialize_history(prior)
+                ),
                 "trace_id": tracing.get_trace_id() if tracing else None,
                 "trace_url": tracing.get_trace_url() if tracing else None,
                 "usage": {"tokens": 0, "duration_ms": duration_ms},

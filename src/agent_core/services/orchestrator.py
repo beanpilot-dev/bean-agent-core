@@ -79,6 +79,7 @@ class AgentOrchestrator:
             try:
                 PreflightService.validate(workspace_path)
             except SetupRequiredError as e:
+                logger.error("Preflight validation failed: SETUP_REQUIRED — %s", e)
                 yield {"type": "fatal", "code": "SETUP_REQUIRED", "message": str(e)}
                 return
 
