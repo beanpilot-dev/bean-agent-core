@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent_core.agent import PersonalFinanceAgent
+from agent_core.config import WORKSPACE_TTL_SECONDS
 from agent_core.context import (
     agent_api_key,
     agent_model,
@@ -36,6 +37,7 @@ from agent_core.context import (
     agent_user_id,
 )
 from agent_core.services.orchestrator import AgentOrchestrator
+from agent_core.services.workspace import CachedWorkspaceManager
 
 # Load environment from project root (agent-core/).  .env.local overrides .env.
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -54,7 +56,13 @@ app.add_middleware(
 )
 
 _agent = PersonalFinanceAgent()
-_orchestrator = AgentOrchestrator(_agent)
+_cache_manager = CachedWorkspaceManager(ttl_seconds=WORKSPACE_TTL_SECONDS)
+_orchestrator = AgentOrchestrator(_agent, _cache_manager)
+
+try:
+    _cache_manager.cleanup_expired()
+except Exception:
+    logger.warning("Cache cleanup at startup failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +268,6 @@ async def agent_chat(req: ChatRequest):
 
 @app.post("/agent/stats")
 async def agent_stats(req: StatsRequest):
-    workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
     start_time = time.monotonic()
 
     logger.info(
@@ -276,7 +283,6 @@ async def agent_stats(req: StatsRequest):
         return _error_envelope("INVALID_REQUEST", "conversation.tag is required", 400)
 
     result = await _orchestrator.run_stats(
-        workspace_path=workspace_path,
         repo_url=req.repo.url,
         token=req.repo.token,
         user_id=req.user_id,
@@ -310,7 +316,6 @@ async def agent_stats(req: StatsRequest):
 
 @app.post("/agent/accounts")
 async def agent_accounts(req: AccountsRequest):
-    workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
     start_time = time.monotonic()
 
     logger.info(
@@ -321,7 +326,6 @@ async def agent_accounts(req: AccountsRequest):
     )
 
     result = await _orchestrator.run_accounts(
-        workspace_path=workspace_path,
         repo_url=req.repo.url,
         token=req.repo.token,
         user_id=req.user_id,

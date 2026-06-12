@@ -13,13 +13,17 @@ the Agent layer for LLM reasoning.
 """
 
 import logging
-import os
 import time
 from typing import AsyncGenerator
 
 from .ledger import LedgerService
 from .preflight import PreflightService, SetupRequiredError
-from .workspace import GitService, GitServiceError
+from .workspace import (
+    CachedWorkspaceManager,
+    CacheLockTimeoutError,
+    GitService,
+    GitServiceError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +44,10 @@ class AgentOrchestrator:
             yield format_sse(chunk)
     """
 
-    def __init__(self, agent):
+    def __init__(self, agent, cache_manager: CachedWorkspaceManager):
         """agent: PersonalFinanceAgent instance (from agent.py)."""
         self._agent = agent
+        self._cache_manager = cache_manager
 
     async def run(
         self,
@@ -57,7 +62,6 @@ class AgentOrchestrator:
         query: str,
         conversation_meta: dict | None,
         messages: list[dict],
-        use_cache: bool = True,
     ) -> AsyncGenerator[dict, None]:
         """Run the full agent lifecycle and yield SSE chunks."""
         start_time = time.monotonic()
@@ -68,13 +72,8 @@ class AgentOrchestrator:
                 user_id, request_id, repo_url,
             )
 
-            if use_cache and token:
-                cache_path = GitService.cache_path(repo_url)
-                GitService.ensure_cached(repo_url, token)
-                GitService.copy(cache_path, workspace_path)
-            else:
-                os.makedirs(workspace_path, exist_ok=True)
-                GitService.clone(workspace_path, repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            GitService.copy(cache_path, workspace_path)
 
             try:
                 PreflightService.validate(workspace_path)
@@ -98,6 +97,10 @@ class AgentOrchestrator:
                 whitelist=whitelist,
             ):
                 yield chunk
+
+        except CacheLockTimeoutError as e:
+            logger.error("Cache lock timeout in run(): %s", e)
+            yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
 
         except GitServiceError as e:
             logger.exception("Git error during orchestration")
@@ -126,7 +129,6 @@ class AgentOrchestrator:
     async def run_stats(
         self,
         *,
-        workspace_path: str,
         repo_url: str,
         token: str | None,
         user_id: str,
@@ -137,21 +139,21 @@ class AgentOrchestrator:
         start_time = time.monotonic()
 
         try:
-            GitService.clone(workspace_path, repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
 
             tag_clean = tag.lstrip("#")
             bql = (
                 f'SELECT account, sum(position) AS total '
                 f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
             )
-            rows, error = LedgerService.Beancount.run_bql_rows(workspace_path, bql)
+            rows, error = LedgerService.Beancount.run_bql_rows(cache_path, bql)
             if error:
                 bql = (
                     f'SELECT account, sum(position) AS total '
                     f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
                 )
                 rows, error = LedgerService.Beancount.run_bql_rows(
-                    workspace_path, bql,
+                    cache_path, bql,
                 )
 
             if error:
@@ -171,6 +173,13 @@ class AgentOrchestrator:
                 "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
             }
 
+        except CacheLockTimeoutError as e:
+            logger.error("Cache lock timeout in run_stats(): %s", e)
+            return {
+                "status": "error",
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }
+
         except GitServiceError as e:
             code = (
                 "REPO_AUTH_FAILED"
@@ -179,13 +188,9 @@ class AgentOrchestrator:
             )
             return {"status": "error", "error": {"code": code, "message": str(e)}}
 
-        finally:
-            GitService.destroy(workspace_path)
-
     async def run_accounts(
         self,
         *,
-        workspace_path: str,
         repo_url: str,
         token: str | None,
         user_id: str,
@@ -195,9 +200,9 @@ class AgentOrchestrator:
         start_time = time.monotonic()
 
         try:
-            GitService.clone(workspace_path, repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
 
-            if not PreflightService.check_setup(workspace_path):
+            if not PreflightService.check_setup(cache_path):
                 return {
                     "status": "error",
                     "error": {
@@ -210,8 +215,8 @@ class AgentOrchestrator:
                     },
                 }
 
-            accounts = PreflightService.list_accounts(workspace_path)
-            raw = PreflightService.get_raw_open_directives(workspace_path)
+            accounts = PreflightService.list_accounts(cache_path)
+            raw = PreflightService.get_raw_open_directives(cache_path)
             return {
                 "status": "ok",
                 "accounts": accounts,
@@ -221,6 +226,13 @@ class AgentOrchestrator:
                 },
             }
 
+        except CacheLockTimeoutError as e:
+            logger.error("Cache lock timeout in run_accounts(): %s", e)
+            return {
+                "status": "error",
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }
+
         except GitServiceError as e:
             code = (
                 "REPO_AUTH_FAILED"
@@ -228,6 +240,3 @@ class AgentOrchestrator:
                 else "REPO_UNREACHABLE"
             )
             return {"status": "error", "error": {"code": code, "message": str(e)}}
-
-        finally:
-            GitService.destroy(workspace_path)

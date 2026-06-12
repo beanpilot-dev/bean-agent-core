@@ -9,7 +9,10 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+from filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +31,6 @@ class RepoAuthFailedError(GitServiceError):
 
 class PushRejectedError(GitServiceError):
     """Push failed — remote conflict or permission issue."""
-
-
-def _workspace_cache_path(repo_url: str) -> str:
-    """Derive a stable cache path from the repo URL."""
-    repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:16]
-    return f"/tmp/bean_cache/{repo_hash}"
 
 
 class GitService:
@@ -93,11 +90,6 @@ class GitService:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def cache_path(repo_url: str) -> str:
-        """Return the stable cache path for a repo URL."""
-        return _workspace_cache_path(repo_url)
 
     @staticmethod
     def clone(workspace: str, repo_url: str, token: str | None = None) -> str:
@@ -244,18 +236,169 @@ class GitService:
             shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(workspace, target, symlinks=True)
 
-    @staticmethod
-    def ensure_cached(repo_url: str, token: str | None = None) -> str:
-        """Ensure a stable cache exists at cache_path(repo_url).
 
-        Returns the cache path. On first call: full clone. Subsequent calls:
-        git fetch + reset --hard.
+# ---------------------------------------------------------------------------
+# CachedWorkspaceManager — TTL-based repo clone cache
+# ---------------------------------------------------------------------------
+
+
+class CacheLockTimeoutError(Exception):
+    """Could not acquire cache lock within the timeout window."""
+
+
+class CachedWorkspaceManager:
+    """TTL-based cache for git workspace clones with per-user keying.
+
+    Caches clones in /tmp/bean_cache/{sha256(user_id:repo_url)[:16]}/ with
+    sibling .meta timestamp files for TTL eviction and .lock files for
+    concurrent-request safety.
+
+    write operations (/chat):   acquire() + GitService.copy() to temp workspace
+    read-only operations:       acquire() — use the returned cache path directly
+
+    Token is never persisted — passed fresh on every acquire() call.
+    """
+
+    CACHE_ROOT = "/tmp/bean_cache"
+
+    def __init__(self, ttl_seconds: int):
+        self._ttl_seconds = ttl_seconds
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(user_id: str, repo_url: str) -> str:
+        raw = f"{user_id}:{repo_url}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def _cache_path(self, key: str) -> str:
+        return f"{self.CACHE_ROOT}/{key}"
+
+    def _meta_path(self, key: str) -> str:
+        return f"{self.CACHE_ROOT}/{key}.meta"
+
+    def _is_valid(self, key: str) -> bool:
+        if self._ttl_seconds == 0:
+            return False
+        if self._ttl_seconds == -1:
+            return os.path.isdir(os.path.join(self._cache_path(key), ".git"))
+        meta = Path(self._meta_path(key))
+        if not meta.exists():
+            return False
+        cache_dir = self._cache_path(key)
+        if not os.path.isdir(os.path.join(cache_dir, ".git")):
+            return False
+        age = time.time() - meta.stat().st_mtime
+        return age < self._ttl_seconds
+
+    def _touch(self, key: str) -> None:
+        meta = Path(self._meta_path(key))
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(str(time.time()))
+
+    @staticmethod
+    def _refresh(cache_path: str, token: str | None) -> None:
+        """Pull latest, falling back to fetch+reset on fast-forward failure."""
+        askpass = None
+        try:
+            if token:
+                askpass = GitService._configure_git_askpass(cache_path, token)
+            rc, _, err = GitService._run_git(
+                ["git", "pull", "--ff-only"], cwd=cache_path
+            )
+            if rc != 0:
+                logger.warning(
+                    "git pull --ff-only failed for %s, falling back to fetch+reset: %s",
+                    cache_path, err,
+                )
+                GitService.fetch_reset(cache_path, token)
+        finally:
+            GitService._cleanup_askpass(askpass)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def acquire(
+        self, user_id: str, repo_url: str, token: str | None = None
+    ) -> str:
+        """Get a fresh cache workspace path for (user_id, repo_url).
+
+        Under a per-cache-key file lock:
+        - If the entry is missing or TTL-expired: fresh clone.
+        - Otherwise: git pull --ff-only (fallback: fetch+reset).
+        - Updates the .meta access timestamp.
+
+        Returns the cache directory path. The caller must NOT mutate this
+        directory — for write operations, use GitService.copy() to create
+        a per-request workspace first.
         """
-        cache = _workspace_cache_path(repo_url)
-        if os.path.isdir(os.path.join(cache, ".git")):
-            GitService.fetch_reset(cache, token)
-        else:
-            if os.path.exists(cache):
-                shutil.rmtree(cache, ignore_errors=True)
-            GitService.clone(cache, repo_url, token)
-        return cache
+        key = self._cache_key(user_id, repo_url)
+        cache_path = self._cache_path(key)
+        lock_path = f"{cache_path}.lock"
+
+        os.makedirs(self.CACHE_ROOT, exist_ok=True)
+
+        lock = FileLock(lock_path, timeout=30)
+        try:
+            with lock:
+                if not self._is_valid(key):
+                    logger.info(
+                        "Cache miss or expired for key=%s, cloning %s", key, repo_url,
+                    )
+                    if os.path.exists(cache_path):
+                        shutil.rmtree(cache_path, ignore_errors=True)
+                    GitService.clone(cache_path, repo_url, token)
+                else:
+                    logger.info("Cache hit for key=%s, refreshing", key)
+                    self._refresh(cache_path, token)
+                self._touch(key)
+        except TimeoutError:
+            raise CacheLockTimeoutError(
+                f"Timed out waiting for cache lock on key={key} (cache_path={cache_path})"
+            )
+
+        return cache_path
+
+    def cleanup_expired(self) -> None:
+        """Remove all expired cache entries from /tmp/bean_cache/.
+
+        An entry is removed if its .meta timestamp is past TTL.
+        Also removes orphaned cache dirs without a .meta file.
+        TTL=0 removes everything. TTL=-1 removes nothing.
+        """
+        cache_root = Path(self.CACHE_ROOT)
+        if not cache_root.is_dir():
+            return
+
+        if self._ttl_seconds == 0:
+            logger.info("TTL=0, removing all cached workspaces")
+            for entry in cache_root.iterdir():
+                if entry.is_dir():
+                    shutil.rmtree(str(entry), ignore_errors=True)
+                elif entry.name.endswith(".meta") or entry.name.endswith(".lock"):
+                    entry.unlink(missing_ok=True)
+            return
+
+        if self._ttl_seconds == -1:
+            return
+
+        now = time.time()
+        for entry in sorted(cache_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            key = entry.name
+            meta = Path(self._meta_path(key))
+            if not meta.exists():
+                logger.info("Removing orphaned cache dir %s (no .meta)", key)
+                shutil.rmtree(str(entry), ignore_errors=True)
+                continue
+            if now - meta.stat().st_mtime >= self._ttl_seconds:
+                logger.info(
+                    "Removing expired cache dir %s (age=%.0fs)",
+                    key, now - meta.stat().st_mtime,
+                )
+                shutil.rmtree(str(entry), ignore_errors=True)
+                meta.unlink(missing_ok=True)
