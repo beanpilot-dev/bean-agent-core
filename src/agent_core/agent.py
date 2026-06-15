@@ -15,6 +15,7 @@ Tool definitions, persona prompts, and sub-graph builders live in the
 workflow/ module. This module owns only graph assembly and streaming.
 """
 
+import json
 import logging
 import os
 import time
@@ -24,6 +25,7 @@ from typing import Any, AsyncGenerator
 from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
@@ -82,6 +84,15 @@ def _serialize_history(messages) -> list[dict]:
     ]
 
 
+def _has_preview_status(payload: Any) -> bool:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(payload, dict) and payload.get("status") == "PREVIEW"
+
+
 # ── PersonalFinanceAgent ──────────────────────────────────────────────────────
 
 
@@ -118,23 +129,20 @@ class PersonalFinanceAgent:
         messages = result.get("messages", [])
 
         for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+
             content = getattr(msg, "content", "") or ""
-            if isinstance(content, str) and '"status": "PREVIEW"' in content:
+            if _has_preview_status(content):
                 return True
             if isinstance(content, list):
                 for part in content:
-                    if isinstance(part, dict) and '"status": "PREVIEW"' in str(part):
+                    if _has_preview_status(part):
+                        return True
+                    if isinstance(part, dict) and _has_preview_status(part.get("text")):
                         return True
 
-        last_content = str(messages[-1].content) if messages else ""
-        confirmation_phrases = [
-            "please confirm",
-            "approve",
-            "shall i record",
-            "confirm this",
-            "do you want me to proceed",
-        ]
-        return any(phrase in last_content.lower() for phrase in confirmation_phrases)
+        return False
 
     async def stream(
         self,
