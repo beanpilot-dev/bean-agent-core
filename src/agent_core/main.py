@@ -37,7 +37,7 @@ from agent_core.context import (
     agent_user_id,
 )
 from agent_core.services.orchestrator import AgentOrchestrator
-from agent_core.services.workspace import CachedWorkspaceManager
+from agent_core.services.workspace import CachedWorkspaceManager, GitService
 
 # Load environment from project root (agent-core/).  .env.local overrides .env.
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -55,9 +55,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_git_service = GitService.from_environment(
+    os.environ.get("AGENT_MODE", ""),
+    os.environ.get("LOCAL_REPO_URL", ""),
+)
 _agent = PersonalFinanceAgent()
-_cache_manager = CachedWorkspaceManager(ttl_seconds=WORKSPACE_TTL_SECONDS)
-_orchestrator = AgentOrchestrator(_agent, _cache_manager)
+_cache_manager = CachedWorkspaceManager(_git_service, ttl_seconds=WORKSPACE_TTL_SECONDS)
+_orchestrator = AgentOrchestrator(_agent, _cache_manager, _git_service)
 
 try:
     _cache_manager.cleanup_expired()
@@ -119,7 +123,7 @@ def _error_envelope(
 
 class RepoInfo(BaseModel):
     url: str
-    token: str | None = None
+    token: str
 
 
 class ChatConversationMeta(BaseModel):

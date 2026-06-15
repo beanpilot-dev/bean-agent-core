@@ -29,6 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
 from agent_core.workflow import (
     ANALYTICS_TOOLS,
@@ -143,7 +144,9 @@ class PersonalFinanceAgent:
         api_key: str | None = None,
         model: str = "gpt-4o",
         workspace: str = "",
+        repo_url: str = "",
         token: str | None = None,
+        git_service: GitService | None = None,
         whitelist: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
@@ -205,7 +208,9 @@ class PersonalFinanceAgent:
                         "today": today,
                         "conversation_context": conv_ctx,
                         "workspace": workspace,
+                        "repo_url": repo_url,
                         "token": token,
+                        "git_service": git_service,
                         "whitelist": whitelist,
                     },
                 }

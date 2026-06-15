@@ -16,13 +16,14 @@ import logging
 import time
 from typing import AsyncGenerator
 
-from .ledger import LedgerService
+from .ledger import Beancount
 from .preflight import PreflightService, SetupRequiredError
 from .workspace import (
     CachedWorkspaceManager,
     CacheLockTimeoutError,
     GitService,
     GitServiceError,
+    RepoAuthFailedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 class OrchestratorError(Exception):
     """Unrecoverable orchestration error."""
+
+
+def _git_error_code(error: GitServiceError) -> str:
+    return "REPO_AUTH_FAILED" if isinstance(error, RepoAuthFailedError) else "REPO_UNREACHABLE"
 
 
 class AgentOrchestrator:
@@ -44,10 +49,16 @@ class AgentOrchestrator:
             yield format_sse(chunk)
     """
 
-    def __init__(self, agent, cache_manager: CachedWorkspaceManager):
+    def __init__(
+        self,
+        agent,
+        cache_manager: CachedWorkspaceManager,
+        git_service: GitService,
+    ):
         """agent: PersonalFinanceAgent instance (from agent.py)."""
         self._agent = agent
         self._cache_manager = cache_manager
+        self._git_service = git_service
 
     async def run(
         self,
@@ -67,13 +78,14 @@ class AgentOrchestrator:
         start_time = time.monotonic()
 
         try:
+            self._git_service.validate_request_credentials(repo_url, token)
             logger.info(
                 "orchestrator setup user_id=%s request_id=%s repo=%s",
                 user_id, request_id, repo_url,
             )
 
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
-            GitService.copy(cache_path, workspace_path)
+            self._git_service.copy(cache_path, workspace_path)
 
             try:
                 PreflightService.validate(workspace_path)
@@ -93,7 +105,9 @@ class AgentOrchestrator:
                 api_key=api_key,
                 model=model,
                 workspace=workspace_path,
+                repo_url=repo_url,
                 token=token,
+                git_service=self._git_service,
                 whitelist=whitelist,
             ):
                 yield chunk
@@ -104,12 +118,7 @@ class AgentOrchestrator:
 
         except GitServiceError as e:
             logger.exception("Git error during orchestration")
-            code = (
-                "REPO_AUTH_FAILED"
-                if "auth" in str(e).lower()
-                else "REPO_UNREACHABLE"
-            )
-            yield {"type": "fatal", "code": code, "message": str(e)}
+            yield {"type": "fatal", "code": _git_error_code(e), "message": str(e)}
 
         except Exception as e:
             logger.exception("Orchestrator error")
@@ -124,7 +133,7 @@ class AgentOrchestrator:
             }
 
         finally:
-            GitService.destroy(workspace_path)
+            self._git_service.destroy(workspace_path)
 
     async def run_stats(
         self,
@@ -139,6 +148,7 @@ class AgentOrchestrator:
         start_time = time.monotonic()
 
         try:
+            self._git_service.validate_request_credentials(repo_url, token)
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
 
             tag_clean = tag.lstrip("#")
@@ -146,13 +156,13 @@ class AgentOrchestrator:
                 f'SELECT account, sum(position) AS total '
                 f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
             )
-            rows, error = LedgerService.Beancount.run_bql_rows(cache_path, bql)
+            rows, error = Beancount.run_bql_rows(cache_path, bql)
             if error:
                 bql = (
                     f'SELECT account, sum(position) AS total '
                     f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
                 )
-                rows, error = LedgerService.Beancount.run_bql_rows(
+                rows, error = Beancount.run_bql_rows(
                     cache_path, bql,
                 )
 
@@ -181,12 +191,10 @@ class AgentOrchestrator:
             }
 
         except GitServiceError as e:
-            code = (
-                "REPO_AUTH_FAILED"
-                if "auth" in str(e).lower()
-                else "REPO_UNREACHABLE"
-            )
-            return {"status": "error", "error": {"code": code, "message": str(e)}}
+            return {
+                "status": "error",
+                "error": {"code": _git_error_code(e), "message": str(e)},
+            }
 
     async def run_accounts(
         self,
@@ -200,6 +208,7 @@ class AgentOrchestrator:
         start_time = time.monotonic()
 
         try:
+            self._git_service.validate_request_credentials(repo_url, token)
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
 
             if not PreflightService.check_setup(cache_path):
@@ -234,9 +243,7 @@ class AgentOrchestrator:
             }
 
         except GitServiceError as e:
-            code = (
-                "REPO_AUTH_FAILED"
-                if "auth" in str(e).lower()
-                else "REPO_UNREACHABLE"
-            )
-            return {"status": "error", "error": {"code": code, "message": str(e)}}
+            return {
+                "status": "error",
+                "error": {"code": _git_error_code(e), "message": str(e)},
+            }

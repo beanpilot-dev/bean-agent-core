@@ -40,6 +40,20 @@ class LedgerServiceError(Exception):
     """Unrecoverable ledger operation failure."""
 
 
+def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
+    if not git["ok"]:
+        return DependencyUnavailable(
+            error=f"Written but git commit failed: {git['error']}",
+        )
+    push = git.get("push")
+    if isinstance(push, str) and push.startswith("PUSH_FAILED"):
+        return DependencyUnavailable(
+            error=f"Git commit succeeded locally but push failed: {push}",
+            retryable=True,
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Beancount CLI helpers (lightweight local copy)
 # ---------------------------------------------------------------------------
@@ -270,6 +284,8 @@ class LedgerService:
         workspace: str,
         transaction_text: str,
         commit_message: str,
+        repo_url: str,
+        git_service: GitService,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
@@ -303,11 +319,11 @@ class LedgerService:
         os.remove(backup_path)
         Beancount.bean_format(workspace, target_path)
 
-        git = GitService.commit_and_push(workspace, commit_message, github_token)
-        if not git["ok"]:
-            return DependencyUnavailable(
-                error=f"Written but git commit failed: {git['error']}",
-            )
+        git = git_service.commit_and_push(
+            workspace, commit_message, repo_url, github_token
+        )
+        if dependency_error := _git_dependency_error(git):
+            return dependency_error
 
         return CommitResult(
             outcome="Transaction recorded, validated, and committed",
@@ -379,6 +395,8 @@ class LedgerService:
         account_name: str,
         currency: str | None,
         open_date: str,
+        repo_url: str,
+        git_service: GitService,
         display_name: str | None = None,
         github_token: str | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
@@ -430,13 +448,14 @@ class LedgerService:
             )
 
         Beancount.bean_format(workspace, main_path)
-        git = GitService.commit_and_push(
-            workspace, f"chore(accounts): open {account_name}", github_token,
+        git = git_service.commit_and_push(
+            workspace,
+            f"chore(accounts): open {account_name}",
+            repo_url,
+            github_token,
         )
-        if not git["ok"]:
-            return DependencyUnavailable(
-                error=f"Written but git commit failed: {git['error']}",
-            )
+        if dependency_error := _git_dependency_error(git):
+            return dependency_error
 
         return CommitResult(
             outcome=f"Account '{account_name}' opened and committed",
@@ -609,6 +628,8 @@ class LedgerService:
         narration: str,
         new_transaction_text: str,
         commit_message: str,
+        repo_url: str,
+        git_service: GitService,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
@@ -651,11 +672,11 @@ class LedgerService:
         os.remove(backup_path)
         Beancount.bean_format(workspace, file_path)
 
-        git = GitService.commit_and_push(workspace, commit_message, github_token)
-        if not git["ok"]:
-            return DependencyUnavailable(
-                error=f"Written but git commit failed: {git['error']}",
-            )
+        git = git_service.commit_and_push(
+            workspace, commit_message, repo_url, github_token
+        )
+        if dependency_error := _git_dependency_error(git):
+            return dependency_error
 
         return CommitResult(
             outcome="Transaction updated, validated, and committed",
@@ -735,6 +756,8 @@ class LedgerService:
         workspace: str,
         transactions_text: str = "",
         commit_message: str = "",
+        repo_url: str = "",
+        git_service: GitService | None = None,
         transactions_file: str | None = None,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
@@ -774,11 +797,13 @@ class LedgerService:
         os.remove(backup_path)
         Beancount.bean_format(workspace, target_path)
 
-        git = GitService.commit_and_push(workspace, commit_message, github_token)
-        if not git["ok"]:
-            return DependencyUnavailable(
-                error=f"Written but git commit failed: {git['error']}",
-            )
+        if git_service is None:
+            return DependencyUnavailable(error="Git service is not configured")
+        git = git_service.commit_and_push(
+            workspace, commit_message, repo_url, github_token
+        )
+        if dependency_error := _git_dependency_error(git):
+            return dependency_error
 
         if transactions_file and os.path.exists(transactions_file):
             os.remove(transactions_file)

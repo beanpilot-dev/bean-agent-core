@@ -7,9 +7,12 @@ configured via GIT_ASKPASS to prevent credential leaks into .git/config.
 import hashlib
 import logging
 import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 import time
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 from filelock import FileLock
@@ -33,31 +36,79 @@ class PushRejectedError(GitServiceError):
     """Push failed — remote conflict or permission issue."""
 
 
-class GitService:
+class GitService(ABC):
     """Deterministic Git operations for ledger workspaces.
 
-    All methods accept token and repo_url explicitly — no ContextVar dependency.
+    Deployment mode is selected once by ``from_environment``. Git operations
+    never inspect environment variables or infer mode from missing credentials.
     """
+
+    @classmethod
+    def from_environment(cls, mode: str, local_repo_url: str) -> "GitService":
+        mode = mode.strip().lower()
+        local_repo_url = local_repo_url.strip()
+        if mode == "cloud":
+            return CloudGitService()
+        if mode == "local":
+            if not local_repo_url:
+                raise ValueError("LOCAL_REPO_URL is required when AGENT_MODE=local")
+            repo_path = Path(local_repo_url).expanduser().resolve()
+            if not repo_path.is_dir():
+                raise ValueError(f"LOCAL_REPO_URL does not exist: {repo_path}")
+            if not (
+                (repo_path / ".git").is_dir()
+                or (repo_path / "HEAD").is_file() and (repo_path / "objects").is_dir()
+            ):
+                raise ValueError(f"LOCAL_REPO_URL is not a Git repository: {repo_path}")
+            return LocalGitService(str(repo_path))
+        raise ValueError("AGENT_MODE must be either 'local' or 'cloud'")
+
+    @abstractmethod
+    def validate_request_credentials(self, repo_url: str, token: str | None) -> None:
+        """Validate request credentials before orchestration starts."""
+
+    @abstractmethod
+    def _resolve_credentials(
+        self, repo_url: str, token: str | None
+    ) -> tuple[str, str | None]:
+        """Return the repository URL and token used by Git operations."""
+
+    def effective_repo_url(self, repo_url: str, token: str | None) -> str:
+        """Return the repository URL selected by the constructed service."""
+        effective_url, _ = self._resolve_credentials(repo_url, token)
+        return effective_url
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
+    def _run_git(
+        args: list[str], cwd: str, askpass: Path | None = None
+    ) -> tuple[int, str, str]:
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        if askpass:
+            env["GIT_ASKPASS"] = str(askpass)
         result = subprocess.run(
             args, cwd=cwd, capture_output=True, text=True, env=env
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
 
     @staticmethod
-    def _configure_git_askpass(workspace: str, token: str) -> Path:
+    def _configure_git_askpass(_workspace: str, token: str) -> Path:
         """Write a GIT_ASKPASS helper script so the token never touches URL or .git/config."""
-        askpass = Path(workspace) / ".git-askpass"
-        askpass.write_text(f"#!/bin/sh\necho '{token}'\n")
+        fd, askpass_name = tempfile.mkstemp(prefix="agent-git-askpass-")
+        os.close(fd)
+        askpass = Path(askpass_name)
+        quoted_token = shlex.quote(token)
+        askpass.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  *Username*) echo "oauth2" ;;\n'
+            f"  *) echo {quoted_token} ;;\n"
+            "esac\n"
+        )
         askpass.chmod(0o700)
-        os.environ["GIT_ASKPASS"] = str(askpass)
         return askpass
 
     @staticmethod
@@ -91,33 +142,34 @@ class GitService:
     # Public API
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def clone(workspace: str, repo_url: str, token: str | None = None) -> str:
+    def clone(self, workspace: str, repo_url: str, token: str | None = None) -> str:
         """Clone repo_url into workspace.
 
         Returns a status string: "CLONED" or raises GitServiceError.
         """
         os.makedirs(workspace, exist_ok=True)
+        effective_url, effective_token = self._resolve_credentials(repo_url, token)
         askpass = None
 
         try:
-            if token:
-                askpass = GitService._configure_git_askpass(workspace, token)
+            if effective_token:
+                askpass = self._configure_git_askpass(workspace, effective_token)
 
-            logger.info("Cloning %s into %s", repo_url, workspace)
-            rc, _, err = GitService._run_git(["git", "clone", repo_url, "."], cwd=workspace)
+            logger.info("Cloning %s into %s", effective_url, workspace)
+            rc, _, err = self._run_git(
+                ["git", "clone", effective_url, "."], cwd=workspace, askpass=askpass
+            )
             if rc != 0:
-                raise GitService._classify_clone_error(err)
+                raise self._classify_clone_error(err)
 
-            GitService._configure_git_identity(workspace)
+            self._configure_git_identity(workspace)
             logger.info("Clone complete: %s", workspace)
             return "CLONED"
         finally:
-            GitService._cleanup_askpass(askpass)
+            self._cleanup_askpass(askpass)
 
-    @staticmethod
     def ensure_workspace(
-        workspace: str, repo_url: str, token: str | None = None
+        self, workspace: str, repo_url: str, token: str | None = None
     ) -> str:
         """Ensure workspace is a valid git repo and up to date.
 
@@ -129,42 +181,45 @@ class GitService:
         is_git_repo = os.path.isdir(os.path.join(workspace, ".git"))
 
         if not is_git_repo:
-            return GitService.clone(workspace, repo_url, token)
+            return self.clone(workspace, repo_url, token)
 
         # Pull latest
         logger.info("Pulling latest for %s", workspace)
+        _, effective_token = self._resolve_credentials(repo_url, token)
         askpass = None
         try:
-            if token:
-                askpass = GitService._configure_git_askpass(workspace, token)
-            rc, out, err = GitService._run_git(
-                ["git", "pull", "--ff-only"], cwd=workspace
+            if effective_token:
+                askpass = self._configure_git_askpass(workspace, effective_token)
+            rc, out, err = self._run_git(
+                ["git", "pull", "--ff-only"], cwd=workspace, askpass=askpass
             )
             if rc != 0:
                 logger.warning("git pull failed: %s", err)
                 return f"PULL_FAILED: {err}"
             return f"PULLED: {out or 'already up to date'}"
         finally:
-            GitService._cleanup_askpass(askpass)
+            self._cleanup_askpass(askpass)
 
-    @staticmethod
-    def fetch_reset(workspace: str, token: str | None = None) -> str:
+    def fetch_reset(
+        self, workspace: str, repo_url: str, token: str | None = None
+    ) -> str:
         """Fetch origin and reset hard to origin/HEAD. Fast cache refresh.
 
         Returns status string or raises GitServiceError.
         """
+        _, effective_token = self._resolve_credentials(repo_url, token)
         askpass = None
         try:
-            if token:
-                askpass = GitService._configure_git_askpass(workspace, token)
+            if effective_token:
+                askpass = self._configure_git_askpass(workspace, effective_token)
 
-            rc, _, err = GitService._run_git(
-                ["git", "fetch", "origin"], cwd=workspace
+            rc, _, err = self._run_git(
+                ["git", "fetch", "origin"], cwd=workspace, askpass=askpass
             )
             if rc != 0:
-                raise GitService._classify_clone_error(err)
+                raise self._classify_clone_error(err)
 
-            rc2, _, err2 = GitService._run_git(
+            rc2, _, err2 = self._run_git(
                 ["git", "reset", "--hard", "origin/HEAD"], cwd=workspace
             )
             if rc2 != 0:
@@ -172,17 +227,17 @@ class GitService:
 
             return "REFRESHED"
         finally:
-            GitService._cleanup_askpass(askpass)
+            self._cleanup_askpass(askpass)
 
-    @staticmethod
-    def push(workspace: str, token: str | None = None) -> str:
+    def push(self, workspace: str, repo_url: str, token: str | None = None) -> str:
         """Push committed changes. Returns status string."""
+        _, effective_token = self._resolve_credentials(repo_url, token)
         askpass = None
         try:
-            if token:
-                askpass = GitService._configure_git_askpass(workspace, token)
-            rc, out, err = GitService._run_git(
-                ["git", "push"], cwd=workspace
+            if effective_token:
+                askpass = self._configure_git_askpass(workspace, effective_token)
+            rc, out, err = self._run_git(
+                ["git", "push"], cwd=workspace, askpass=askpass
             )
             if rc != 0:
                 raise PushRejectedError(f"Push failed: {err}")
@@ -190,11 +245,10 @@ class GitService:
             logger.info("Push: %s", status)
             return f"PUSHED: {status}"
         finally:
-            GitService._cleanup_askpass(askpass)
+            self._cleanup_askpass(askpass)
 
-    @staticmethod
     def commit_and_push(
-        workspace: str, message: str, token: str | None = None
+        self, workspace: str, message: str, repo_url: str, token: str | None = None
     ) -> dict:
         """Stage data/, commit, and push. Returns result dict.
 
@@ -217,7 +271,7 @@ class GitService:
 
         logger.info("git commit ok: %s", message)
         try:
-            push_status = GitService.push(workspace, token=token)
+            push_status = self.push(workspace, repo_url, token)
         except PushRejectedError as e:
             logger.warning("git push failed: %s", e)
             return {"ok": True, "error": None, "push": f"PUSH_FAILED: {e}"}
@@ -235,6 +289,39 @@ class GitService:
         if os.path.exists(target):
             shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(workspace, target, symlinks=True)
+
+
+class CloudGitService(GitService):
+    """Git service for OAuth-authenticated cloud repositories."""
+
+    def validate_request_credentials(self, repo_url: str, token: str | None) -> None:
+        if not repo_url.strip():
+            raise RepoAuthFailedError("Cloud repository URL is required")
+        if not repo_url.startswith("https://"):
+            raise RepoAuthFailedError("Cloud repository URL must use HTTPS")
+        if not token or not token.strip():
+            raise RepoAuthFailedError("Cloud repository OAuth token is required")
+
+    def _resolve_credentials(
+        self, repo_url: str, token: str | None
+    ) -> tuple[str, str | None]:
+        self.validate_request_credentials(repo_url, token)
+        return repo_url, token
+
+
+class LocalGitService(GitService):
+    """Git service for a repository path selected at startup."""
+
+    def __init__(self, local_repo_url: str):
+        self._local_repo_url = local_repo_url
+
+    def validate_request_credentials(self, repo_url: str, token: str | None) -> None:
+        return None
+
+    def _resolve_credentials(
+        self, repo_url: str, token: str | None
+    ) -> tuple[str, str | None]:
+        return self._local_repo_url, None
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +348,8 @@ class CachedWorkspaceManager:
 
     CACHE_ROOT = "/tmp/bean_cache"
 
-    def __init__(self, ttl_seconds: int):
+    def __init__(self, git_service: GitService, ttl_seconds: int):
+        self._git_service = git_service
         self._ttl_seconds = ttl_seconds
 
     # ------------------------------------------------------------------
@@ -298,24 +386,26 @@ class CachedWorkspaceManager:
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text(str(time.time()))
 
-    @staticmethod
-    def _refresh(cache_path: str, token: str | None) -> None:
+    def _refresh(self, cache_path: str, repo_url: str, token: str | None) -> None:
         """Pull latest, falling back to fetch+reset on fast-forward failure."""
+        _, effective_token = self._git_service._resolve_credentials(repo_url, token)
         askpass = None
         try:
-            if token:
-                askpass = GitService._configure_git_askpass(cache_path, token)
-            rc, _, err = GitService._run_git(
-                ["git", "pull", "--ff-only"], cwd=cache_path
+            if effective_token:
+                askpass = self._git_service._configure_git_askpass(
+                    cache_path, effective_token
+                )
+            rc, _, err = self._git_service._run_git(
+                ["git", "pull", "--ff-only"], cwd=cache_path, askpass=askpass
             )
             if rc != 0:
                 logger.warning(
                     "git pull --ff-only failed for %s, falling back to fetch+reset: %s",
                     cache_path, err,
                 )
-                GitService.fetch_reset(cache_path, token)
+                self._git_service.fetch_reset(cache_path, repo_url, token)
         finally:
-            GitService._cleanup_askpass(askpass)
+            self._git_service._cleanup_askpass(askpass)
 
     # ------------------------------------------------------------------
     # Public API
@@ -335,7 +425,8 @@ class CachedWorkspaceManager:
         directory — for write operations, use GitService.copy() to create
         a per-request workspace first.
         """
-        key = self._cache_key(user_id, repo_url)
+        effective_repo_url = self._git_service.effective_repo_url(repo_url, token)
+        key = self._cache_key(user_id, effective_repo_url)
         cache_path = self._cache_path(key)
         lock_path = f"{cache_path}.lock"
 
@@ -350,10 +441,10 @@ class CachedWorkspaceManager:
                     )
                     if os.path.exists(cache_path):
                         shutil.rmtree(cache_path, ignore_errors=True)
-                    GitService.clone(cache_path, repo_url, token)
+                    self._git_service.clone(cache_path, repo_url, token)
                 else:
                     logger.info("Cache hit for key=%s, refreshing", key)
-                    self._refresh(cache_path, token)
+                    self._refresh(cache_path, repo_url, token)
                 self._touch(key)
         except TimeoutError:
             raise CacheLockTimeoutError(

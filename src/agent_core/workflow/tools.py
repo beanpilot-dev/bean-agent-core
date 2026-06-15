@@ -11,6 +11,7 @@ from agent_core.services import (
     LedgerService,
     PriceService,
 )
+from agent_core.services.workspace import GitService
 
 _ledger = LedgerService()
 _prices = PriceService()
@@ -376,9 +377,13 @@ def tool_confirm_commit(
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
+    repo_url: str = c.get("repo_url", "")
     token = c.get("token")
+    git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
-    result = _ledger.confirm_commit(ws, transaction_text, commit_message, token, whitelist)
+    result = _ledger.confirm_commit(
+        ws, transaction_text, commit_message, repo_url, git_service, token, whitelist
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -435,9 +440,18 @@ def tool_confirm_open(
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
+    repo_url: str = c.get("repo_url", "")
     token = c.get("token")
+    git_service: GitService = c["git_service"]
     result = _ledger.confirm_open(
-        ws, account_name, currency or None, open_date, display_name or None, token,
+        ws,
+        account_name,
+        currency or None,
+        open_date,
+        repo_url,
+        git_service,
+        display_name or None,
+        token,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -506,10 +520,20 @@ def tool_confirm_update(
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
+    repo_url: str = c.get("repo_url", "")
     token = c.get("token")
+    git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
     result = _ledger.confirm_update(
-        ws, date, narration, new_transaction_text, commit_message, token, whitelist,
+        ws,
+        date,
+        narration,
+        new_transaction_text,
+        commit_message,
+        repo_url,
+        git_service,
+        token,
+        whitelist,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -578,10 +602,19 @@ def tool_confirm_bulk(
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
+    repo_url: str = c.get("repo_url", "")
     token = c.get("token")
+    git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
     result = _ledger.confirm_bulk(
-        ws, transactions_text, commit_message, transactions_file or None, token, whitelist,
+        ws,
+        transactions_text,
+        commit_message,
+        repo_url,
+        git_service,
+        transactions_file or None,
+        token,
+        whitelist,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
