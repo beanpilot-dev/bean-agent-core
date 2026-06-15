@@ -103,7 +103,16 @@ class IngestionService:
             stdout = proc.stdout
             stderr = proc.stderr[:4096] if proc.stderr else ""
 
-            if proc.returncode != 0 or not stage:
+            if proc.returncode != 0:
+                return SandboxResult(
+                    status="ERROR",
+                    exit_code=proc.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                    error=stderr.strip() or f"Script exited with status {proc.returncode}.",
+                )
+
+            if not stage:
                 max_out = 200 * 1024
                 if len(stdout) > max_out:
                     stdout = stdout[:max_out] + "\n... [truncated]"

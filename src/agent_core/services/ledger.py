@@ -763,9 +763,21 @@ class LedgerService:
         whitelist: list[str] | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute a bulk commit. Re-runs preview internally."""
+        if transactions_file:
+            try:
+                with open(transactions_file, encoding="utf-8") as f:
+                    transactions_text = f.read()
+            except OSError as e:
+                return InvariantViolation(
+                    invariant="STAGING_ERROR",
+                    severity="HARD",
+                    provided=transactions_file,
+                    remediation=f"Cannot read staging file: {e}",
+                )
+
         preview = self.preview_bulk(
             workspace, transactions_text, commit_message,
-            transactions_file, whitelist,
+            None, whitelist,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -918,7 +930,7 @@ class LedgerService:
         try:
             with open(template_path) as f:
                 lines = [
-                    line for line in f if not re.match(r"^--\s*\w+:", line)
+                    line for line in f if not line.lstrip().startswith("--")
                 ]
             bql = "".join(lines).strip()
         except FileNotFoundError:

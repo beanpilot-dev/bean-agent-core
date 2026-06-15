@@ -13,6 +13,7 @@ the Agent layer for LLM reasoning.
 """
 
 import logging
+import tempfile
 import time
 from typing import AsyncGenerator
 
@@ -146,24 +147,27 @@ class AgentOrchestrator:
     ) -> dict:
         """Run a lightweight stats query (no LLM)."""
         start_time = time.monotonic()
+        workspace_path: str | None = None
 
         try:
             self._git_service.validate_request_credentials(repo_url, token)
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_stats_")
+            self._git_service.copy(cache_path, workspace_path)
 
             tag_clean = tag.lstrip("#")
             bql = (
                 f'SELECT account, sum(position) AS total '
                 f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
             )
-            rows, error = Beancount.run_bql_rows(cache_path, bql)
+            rows, error = Beancount.run_bql_rows(workspace_path, bql)
             if error:
                 bql = (
                     f'SELECT account, sum(position) AS total '
                     f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
                 )
                 rows, error = Beancount.run_bql_rows(
-                    cache_path, bql,
+                    workspace_path, bql,
                 )
 
             if error:
@@ -195,6 +199,9 @@ class AgentOrchestrator:
                 "status": "error",
                 "error": {"code": _git_error_code(e), "message": str(e)},
             }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
 
     async def run_accounts(
         self,
@@ -206,12 +213,15 @@ class AgentOrchestrator:
     ) -> dict:
         """Run account listing (no LLM)."""
         start_time = time.monotonic()
+        workspace_path: str | None = None
 
         try:
             self._git_service.validate_request_credentials(repo_url, token)
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_accounts_")
+            self._git_service.copy(cache_path, workspace_path)
 
-            if not PreflightService.check_setup(cache_path):
+            if not PreflightService.check_setup(workspace_path):
                 return {
                     "status": "error",
                     "error": {
@@ -224,8 +234,8 @@ class AgentOrchestrator:
                     },
                 }
 
-            accounts = PreflightService.list_accounts(cache_path)
-            raw = PreflightService.get_raw_open_directives(cache_path)
+            accounts = PreflightService.list_accounts(workspace_path)
+            raw = PreflightService.get_raw_open_directives(workspace_path)
             return {
                 "status": "ok",
                 "accounts": accounts,
@@ -247,3 +257,6 @@ class AgentOrchestrator:
                 "status": "error",
                 "error": {"code": _git_error_code(e), "message": str(e)},
             }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
