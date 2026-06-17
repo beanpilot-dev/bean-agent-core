@@ -18,6 +18,7 @@ import time
 from typing import AsyncGenerator
 
 from .ledger import Beancount
+from .onboarding import OnboardingService, SetupOperation
 from .preflight import PreflightService, SetupRequiredError
 from .workspace import (
     CachedWorkspaceManager,
@@ -264,3 +265,135 @@ class AgentOrchestrator:
         finally:
             if workspace_path:
                 self._git_service.destroy(workspace_path)
+
+    async def run_onboarding_discovery(
+        self,
+        *,
+        repo_url: str,
+        token: str | None,
+        user_id: str,
+        request_id: str | None,
+        entry_path: str | None,
+        expected_head_sha: str | None,
+    ) -> dict:
+        """Run deterministic onboarding discovery (no LLM, no mutation)."""
+        workspace_path: str | None = None
+        try:
+            self._git_service.validate_request_credentials(repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_onboarding_discover_")
+            self._git_service.copy(cache_path, workspace_path)
+            return OnboardingService.discover(
+                workspace_path,
+                entry_path=entry_path,
+                expected_head_sha=expected_head_sha,
+            )
+        except CacheLockTimeoutError:
+            logger.error("Cache lock timeout in run_onboarding_discovery()")
+            return {
+                "status": "error",
+                "discovery_status": "invalid_request",
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "Onboarding discovery is unavailable",
+                },
+            }
+        except GitServiceError as e:
+            code = _git_error_code(e)
+            return {
+                "status": "error",
+                "discovery_status": (
+                    "repo_auth_failed" if code == "REPO_AUTH_FAILED" else "repo_unreachable"
+                ),
+                "error": {"code": code, "message": _safe_git_message(code)},
+            }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
+
+    async def run_onboarding_setup_preview(
+        self,
+        *,
+        repo_url: str,
+        token: str | None,
+        user_id: str,
+        request_id: str | None,
+        operation: SetupOperation,
+        entry_path: str | None,
+        sidecar_main_path: str | None,
+        sidecar_write_dir: str | None,
+    ) -> dict:
+        """Build deterministic onboarding setup preview without mutation."""
+        workspace_path: str | None = None
+        try:
+            self._git_service.validate_request_credentials(repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_onboarding_preview_")
+            self._git_service.copy(cache_path, workspace_path)
+            return OnboardingService.preview_setup(
+                workspace_path,
+                operation=operation,
+                entry_path=entry_path,
+                sidecar_main_path=sidecar_main_path,
+                sidecar_write_dir=sidecar_write_dir,
+            )
+        except GitServiceError as e:
+            code = _git_error_code(e)
+            return {
+                "status": "error",
+                "code": code,
+                "message": _safe_git_message(code),
+            }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
+
+    async def run_onboarding_setup_confirm(
+        self,
+        *,
+        repo_url: str,
+        token: str | None,
+        user_id: str,
+        request_id: str | None,
+        operation: SetupOperation,
+        expected_head_sha: str,
+        entry_path: str | None,
+        sidecar_main_path: str | None,
+        sidecar_write_dir: str | None,
+    ) -> dict:
+        """Apply deterministic onboarding setup after explicit confirmation."""
+        workspace_path: str | None = None
+        try:
+            self._git_service.validate_request_credentials(repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_onboarding_confirm_")
+            self._git_service.copy(cache_path, workspace_path)
+            return OnboardingService.confirm_setup(
+                workspace_path,
+                operation=operation,
+                expected_head_sha=expected_head_sha,
+                repo_url=repo_url,
+                git_service=self._git_service,
+                token=token,
+                entry_path=entry_path,
+                sidecar_main_path=sidecar_main_path,
+                sidecar_write_dir=sidecar_write_dir,
+            )
+        except GitServiceError as e:
+            code = _git_error_code(e)
+            return {
+                "status": "error",
+                "code": code,
+                "message": _safe_git_message(code),
+            }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
+
+
+def _safe_git_message(code: str) -> str:
+    if code == "REPO_AUTH_FAILED":
+        return "Repository authorization failed"
+    if code == "REPO_UNREACHABLE":
+        return "Repository is unreachable"
+    return "Repository setup request failed"

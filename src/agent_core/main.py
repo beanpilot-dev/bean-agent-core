@@ -160,6 +160,25 @@ class AccountsRequest(BaseModel):
     request_id: str | None = None
 
 
+class OnboardingDiscoveryRequest(BaseModel):
+    repo: RepoInfo
+    user_id: str
+    request_id: str | None = None
+    entry_path: str | None = None
+    expected_head_sha: str | None = None
+
+
+class OnboardingSetupRequest(BaseModel):
+    repo: RepoInfo
+    user_id: str
+    request_id: str | None = None
+    operation: str
+    entry_path: str | None = None
+    sidecar_main_path: str | None = None
+    sidecar_write_dir: str | None = None
+    expected_head_sha: str | None = None
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +361,103 @@ async def agent_accounts(req: AccountsRequest):
         "raw_accounts": result.get("raw_accounts", []),
         "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /agent/onboarding/discover — deterministic repo discovery, JSON
+# ---------------------------------------------------------------------------
+
+@app.post("/agent/onboarding/discover")
+async def agent_onboarding_discover(req: OnboardingDiscoveryRequest):
+    start_time = time.monotonic()
+    logger.info(
+        "agent-onboarding-discover user_id=%s request_id=%s has_entry_path=%s "
+        "has_expected_head=%s",
+        req.user_id,
+        req.request_id,
+        bool(req.entry_path),
+        bool(req.expected_head_sha),
+    )
+    result = await _orchestrator.run_onboarding_discovery(
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        entry_path=req.entry_path,
+        expected_head_sha=req.expected_head_sha,
+    )
+    status_code = 200 if result.get("status") != "error" else 400
+    result["request_id"] = req.request_id
+    result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    return JSONResponse(content=result, status_code=status_code)
+
+
+def _valid_setup_operation(operation: str) -> bool:
+    return operation in {"initialize_ledger", "install_sidecar"}
+
+
+@app.post("/agent/onboarding/setup/preview")
+async def agent_onboarding_setup_preview(req: OnboardingSetupRequest):
+    start_time = time.monotonic()
+    if not _valid_setup_operation(req.operation):
+        return _error_envelope("INVALID_REQUEST", "Unsupported setup operation", 400)
+    logger.info(
+        "agent-onboarding-setup-preview user_id=%s request_id=%s operation=%s",
+        req.user_id,
+        req.request_id,
+        req.operation,
+    )
+    result = await _orchestrator.run_onboarding_setup_preview(
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        operation=req.operation,  # type: ignore[arg-type]
+        entry_path=req.entry_path,
+        sidecar_main_path=req.sidecar_main_path,
+        sidecar_write_dir=req.sidecar_write_dir,
+    )
+    result["request_id"] = req.request_id
+    result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    return JSONResponse(
+        content=result,
+        status_code=200 if result.get("status") == "preview" else 400,
+    )
+
+
+@app.post("/agent/onboarding/setup/confirm")
+async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
+    start_time = time.monotonic()
+    if not _valid_setup_operation(req.operation):
+        return _error_envelope("INVALID_REQUEST", "Unsupported setup operation", 400)
+    if not req.expected_head_sha:
+        return _error_envelope("INVALID_REQUEST", "expected_head_sha is required", 400)
+    logger.info(
+        "agent-onboarding-setup-confirm user_id=%s request_id=%s operation=%s "
+        "has_expected_head=%s",
+        req.user_id,
+        req.request_id,
+        req.operation,
+        bool(req.expected_head_sha),
+    )
+    result = await _orchestrator.run_onboarding_setup_confirm(
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        operation=req.operation,  # type: ignore[arg-type]
+        expected_head_sha=req.expected_head_sha,
+        entry_path=req.entry_path,
+        sidecar_main_path=req.sidecar_main_path,
+        sidecar_write_dir=req.sidecar_write_dir,
+    )
+    result["request_id"] = req.request_id
+    result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    success_statuses = {"success", "stale", "validation_failed"}
+    return JSONResponse(
+        content=result,
+        status_code=200 if result.get("status") in success_statuses else 400,
+    )
 
 
 # ---------------------------------------------------------------------------
