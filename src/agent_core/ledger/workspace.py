@@ -24,8 +24,16 @@ def _authenticated_url(repo_url: str, token: str) -> str:
 
 def _configure_git_identity(workspace: str) -> None:
     """Set a default git identity if none configured (needed inside containers)."""
-    subprocess.run(["git", "config", "user.email", "agent@local"], cwd=workspace, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Finance Agent"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "agent@local"],
+        cwd=workspace,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Finance Agent"],
+        cwd=workspace,
+        capture_output=True,
+    )
 
 
 def ensure_workspace(workspace: str, repo_url: str | None = None, token: str | None = None) -> str:
@@ -45,7 +53,7 @@ def ensure_workspace(workspace: str, repo_url: str | None = None, token: str | N
             logger.info("No BEAN_REPO set — using local workspace as-is.")
             return "LOCAL"
         url = _authenticated_url(repo_url, token) if token else repo_url
-        logger.info("Cloning %s into %s", repo_url, workspace)
+        logger.info("Cloning repository into workspace")
         rc, _, err = _run_git(["git", "clone", url, "."], cwd=workspace, token=None)
         if rc != 0:
             raise RuntimeError(f"git clone failed: {err}")
@@ -57,10 +65,10 @@ def ensure_workspace(workspace: str, repo_url: str | None = None, token: str | N
     logger.info("Pulling latest from remote.")
     rc, out, err = _run_git(["git", "pull", "--ff-only"], cwd=workspace, token=token)
     if rc != 0:
-        logger.warning("git pull failed (non-fatal): %s", err)
+        logger.warning("git pull failed (non-fatal)")
         return f"PULL_FAILED: {err}"
     status = out or "already up to date"
-    logger.info("Pull: %s", status)
+    logger.info("Pull complete")
     return f"PULLED: {status}"
 
 
@@ -68,10 +76,10 @@ def push(workspace: str, token: str | None = None) -> str:
     """Push committed changes to remote. Returns a status string."""
     rc, out, err = _run_git(["git", "push"], cwd=workspace, token=token)
     if rc != 0:
-        logger.warning("git push failed: %s", err)
+        logger.warning("git push failed")
         return f"PUSH_FAILED: {err}"
     status = out or "ok"
-    logger.info("Push: %s", status)
+    logger.info("Push complete")
     return f"PUSHED: {status}"
 
 
@@ -94,13 +102,13 @@ def commit_and_push(
         cwd=workspace, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        logger.error("git commit failed: %s", result.stderr.strip())
+        logger.error("git commit failed")
         return {"ok": False, "error": result.stderr.strip(), "push": None}
 
-    logger.info("git commit ok: %s", message)
+    logger.info("git commit ok")
     push_status = push(workspace, token=token)
     if push_status.startswith("PUSH_FAILED"):
-        logger.warning("git push failed — commit is local only: %s", push_status)
+        logger.warning("git push failed — commit is local only")
     else:
-        logger.info("git push ok: %s", push_status)
+        logger.info("git push ok")
     return {"ok": True, "error": None, "push": push_status}

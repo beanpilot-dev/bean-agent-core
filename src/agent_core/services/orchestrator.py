@@ -81,8 +81,8 @@ class AgentOrchestrator:
         try:
             self._git_service.validate_request_credentials(repo_url, token)
             logger.info(
-                "orchestrator setup user_id=%s request_id=%s repo=%s",
-                user_id, request_id, repo_url,
+                "orchestrator setup user_id=%s request_id=%s",
+                user_id, request_id,
             )
 
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
@@ -114,15 +114,19 @@ class AgentOrchestrator:
                 yield chunk
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run(): %s", e)
+            logger.error("Cache lock timeout in run()")
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
 
         except GitServiceError as e:
-            logger.exception("Git error during orchestration")
+            logger.error(
+                "Git error during orchestration code=%s error_type=%s",
+                _git_error_code(e),
+                type(e).__name__,
+            )
             yield {"type": "fatal", "code": _git_error_code(e), "message": str(e)}
 
         except Exception as e:
-            logger.exception("Orchestrator error")
+            logger.error("Orchestrator error error_type=%s", type(e).__name__)
             duration_ms = int((time.monotonic() - start_time) * 1000)
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
             yield {
@@ -188,7 +192,7 @@ class AgentOrchestrator:
             }
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run_stats(): %s", e)
+            logger.error("Cache lock timeout in run_stats()")
             return {
                 "status": "error",
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
@@ -246,7 +250,7 @@ class AgentOrchestrator:
             }
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run_accounts(): %s", e)
+            logger.error("Cache lock timeout in run_accounts()")
             return {
                 "status": "error",
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},

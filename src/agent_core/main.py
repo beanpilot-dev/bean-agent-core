@@ -168,24 +168,15 @@ class AccountsRequest(BaseModel):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Log sanitized request body on any unhandled exception."""
-    body_str = None
-    try:
-        raw_body = await request.body()
-        if raw_body:
-            body_dict = json.loads(raw_body)
-            body_str = json.dumps(sanitize_payload(body_dict))
-    except Exception:
-        body_str = "<unparseable>"
-
+    """Log metadata-only details on unhandled exceptions."""
     logger.error(
-        "Unhandled exception for %s %s — body: %s",
+        "Unhandled exception for %s %s request_id=%s error_type=%s",
         request.method,
         request.url.path,
-        body_str,
-        exc_info=True,
+        request.headers.get("x-request-id"),
+        type(exc).__name__,
     )
-    return _error_envelope("INTERNAL_ERROR", str(exc), 500)
+    return _error_envelope("INTERNAL_ERROR", "Internal agent-core error", 500)
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +201,15 @@ async def agent_chat(req: ChatRequest):
     workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
 
     logger.info(
-        "agent-chat user_id=%s request_id=%s conv_id=%s sanitized_body=%s",
+        "agent-chat user_id=%s request_id=%s conv_id=%s message_count=%s "
+        "has_tag=%s whitelist_count=%s model=%s",
         req.user_id,
         req.request_id,
         req.conversation.id,
-        json.dumps(sanitize_payload(req.model_dump())),
+        len(req.messages),
+        bool(req.conversation.tag),
+        len(req.conversation.account_whitelist or []),
+        req.model,
     )
 
     async def event_stream():
@@ -248,7 +243,7 @@ async def agent_chat(req: ChatRequest):
                     yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
-            logger.exception("agent-chat error")
+            logger.error("agent-chat error error_type=%s", type(e).__name__)
             fatal = {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
             yield f"data: {json.dumps(fatal)}\n\n"
             yield "data: [DONE]\n\n"
@@ -275,11 +270,10 @@ async def agent_stats(req: StatsRequest):
     start_time = time.monotonic()
 
     logger.info(
-        "agent-stats user_id=%s request_id=%s tag=%s sanitized_body=%s",
+        "agent-stats user_id=%s request_id=%s has_tag=%s",
         req.user_id,
         req.request_id,
-        req.conversation.tag,
-        json.dumps(sanitize_payload(req.model_dump())),
+        bool(req.conversation.tag),
     )
 
     tag = req.conversation.tag
@@ -323,10 +317,9 @@ async def agent_accounts(req: AccountsRequest):
     start_time = time.monotonic()
 
     logger.info(
-        "agent-accounts user_id=%s request_id=%s sanitized_body=%s",
+        "agent-accounts user_id=%s request_id=%s",
         req.user_id,
         req.request_id,
-        json.dumps(sanitize_payload(req.model_dump())),
     )
 
     result = await _orchestrator.run_accounts(
@@ -374,8 +367,7 @@ async def agent_run(req: AgentRunRequest):
     """DEPRECATED — use POST /agent/chat instead. Forwards internally."""
     logger.warning(
         "Deprecated /agent/run called; forward to /agent/chat. "
-        "repo_url=%s model=%s",
-        req.repo_url,
+        "model=%s",
         req.model,
     )
     chat_req = ChatRequest(

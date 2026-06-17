@@ -155,7 +155,7 @@ class GitService(ABC):
             if effective_token:
                 askpass = self._configure_git_askpass(workspace, effective_token)
 
-            logger.info("Cloning %s into %s", effective_url, workspace)
+            logger.info("Cloning repository into workspace")
             rc, _, err = self._run_git(
                 ["git", "clone", effective_url, "."], cwd=workspace, askpass=askpass
             )
@@ -163,7 +163,7 @@ class GitService(ABC):
                 raise self._classify_clone_error(err)
 
             self._configure_git_identity(workspace)
-            logger.info("Clone complete: %s", workspace)
+            logger.info("Clone complete")
             return "CLONED"
         finally:
             self._cleanup_askpass(askpass)
@@ -184,7 +184,7 @@ class GitService(ABC):
             return self.clone(workspace, repo_url, token)
 
         # Pull latest
-        logger.info("Pulling latest for %s", workspace)
+        logger.info("Pulling latest")
         _, effective_token = self._resolve_credentials(repo_url, token)
         askpass = None
         try:
@@ -194,7 +194,7 @@ class GitService(ABC):
                 ["git", "pull", "--ff-only"], cwd=workspace, askpass=askpass
             )
             if rc != 0:
-                logger.warning("git pull failed: %s", err)
+                logger.warning("git pull failed")
                 return f"PULL_FAILED: {err}"
             return f"PULLED: {out or 'already up to date'}"
         finally:
@@ -242,7 +242,7 @@ class GitService(ABC):
             if rc != 0:
                 raise PushRejectedError(f"Push failed: {err}")
             status = out or "ok"
-            logger.info("Push: %s", status)
+            logger.info("Push complete")
             return f"PUSHED: {status}"
         finally:
             self._cleanup_askpass(askpass)
@@ -266,14 +266,14 @@ class GitService(ABC):
             cwd=workspace, capture_output=True, text=True,
         )
         if result.returncode != 0:
-            logger.error("git commit failed: %s", result.stderr.strip())
+            logger.error("git commit failed")
             return {"ok": False, "error": result.stderr.strip(), "push": None}
 
-        logger.info("git commit ok: %s", message)
+        logger.info("git commit ok")
         try:
             push_status = self.push(workspace, repo_url, token)
         except PushRejectedError as e:
-            logger.warning("git push failed: %s", e)
+            logger.warning("git push failed")
             return {"ok": True, "error": None, "push": f"PUSH_FAILED: {e}"}
 
         return {"ok": True, "error": None, "push": push_status}
@@ -399,10 +399,7 @@ class CachedWorkspaceManager:
                 ["git", "pull", "--ff-only"], cwd=cache_path, askpass=askpass
             )
             if rc != 0:
-                logger.warning(
-                    "git pull --ff-only failed for %s, falling back to fetch+reset: %s",
-                    cache_path, err,
-                )
+                logger.warning("git pull --ff-only failed, falling back to fetch+reset")
                 self._git_service.fetch_reset(cache_path, repo_url, token)
         finally:
             self._git_service._cleanup_askpass(askpass)
@@ -436,9 +433,7 @@ class CachedWorkspaceManager:
         try:
             with lock:
                 if not self._is_valid(key):
-                    logger.info(
-                        "Cache miss or expired for key=%s, cloning %s", key, repo_url,
-                    )
+                    logger.info("Cache miss or expired for key=%s", key)
                     if os.path.exists(cache_path):
                         shutil.rmtree(cache_path, ignore_errors=True)
                     self._git_service.clone(cache_path, repo_url, token)
