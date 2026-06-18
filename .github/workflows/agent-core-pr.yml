@@ -1,53 +1,65 @@
 name: Agent Core PR Build
 
 on:
-pull_request:
-branches:
-- main
-types:
-- opened
-- reopened
-- synchronize
-- ready_for_review
-paths:
-- "src/**"
-- "tests/**"
-- "requirements.txt"
-- "pyproject.toml"
-- "Dockerfile"
-- ".github/workflows/agent-core-pr.yml"
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - "Dockerfile"
+      - ".github/workflows/agent-core-pr.yml"
 
 permissions:
-contents: read
+  contents: read
 
 concurrency:
-group: agent-core-pr-${{ github.event.pull_request.number }}
-cancel-in-progress: true
+  group: agent-core-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
-IMAGE_NAME: beanpilot-agent-core
+  IMAGE_NAME: beanpilot-agent-core
 
 jobs:
-validate:
-name: Lint, test, and build agent-core
-if: github.event.pull_request.draft == false
-runs-on: ubuntu-latest
+  validate:
+    name: Lint, test, and build agent-core
+    if: github.event.pull_request.draft == false
+    runs-on: [self-hosted, linux, x64, saas-dev]
 
-```
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Lint and test in Python 3.13
-    run: |
-      docker run --rm \
-        -e AGENT_MODE=cloud \
-        -v "$PWD:/workspace" \
-        -w /workspace \
-        python:3.13-slim \
-        sh -lc "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* && pip install -r requirements.txt && pip install -e '.[dev]' && ruff check src && pytest"
+      - name: Lint and test in Python 3.13
+        run: |
+          docker run --rm \
+            -e AGENT_MODE=cloud \
+            -e HOME=/tmp \
+            -e RUFF_CACHE_DIR=/tmp/ruff-cache \
+            -e UV_CACHE_DIR=/tmp/uv-cache \
+            -e PYTEST_ADDOPTS="-o cache_dir=/tmp/pytest-cache" \
+            -e VIRTUAL_ENV=/tmp/.venv \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            python:3.13-slim \
+            sh -lc '
+              apt-get update
+              apt-get install -y --no-install-recommends git
+              rm -rf /var/lib/apt/lists/*
 
-  - name: Build Docker image
-    run: |
-      docker build -t "${IMAGE_NAME}:pr-${{ github.event.pull_request.number }}" .
-```
+              pip install uv
+              uv sync --locked --extra dev
+              uv run ruff check src
+              uv run pytest
+            '
+
+      - name: Build Docker image
+        run: |
+          docker build -t "${IMAGE_NAME}:pr-${{ github.event.pull_request.number }}" .
