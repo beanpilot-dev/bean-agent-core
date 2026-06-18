@@ -204,7 +204,7 @@ async def _clerk_node(state: PillarState, config: RunnableConfig) -> dict:
 
     preflight_text = ""
     if workspace:
-        result = _ledger.preflight_report(workspace)
+        result = _ledger.preflight_report(workspace, cfg.get("ledger_config"))
         preflight_data = dataclasses.asdict(result)
         accounts = preflight_data.get("accounts", [])
         recent = preflight_data.get("recent", "")

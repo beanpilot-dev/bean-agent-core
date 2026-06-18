@@ -30,7 +30,8 @@ def tool_preflight(config: Annotated[RunnableConfig, InjectedToolArg] = None) ->
     Always call this before recording any transaction."""
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
-    result = _ledger.preflight_report(ws)
+    ledger_config = c.get("ledger_config")
+    result = _ledger.preflight_report(ws, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -51,7 +52,8 @@ def tool_account_balance(
     and balance containing the amount(s).
     """
     ws = config.get("configurable", {}).get("workspace", "")
-    result = _ledger.get_balance(ws, account, as_of_date or None)
+    ledger_config = config.get("configurable", {}).get("ledger_config")
+    result = _ledger.get_balance(ws, account, as_of_date or None, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -79,6 +81,7 @@ def tool_find_transactions(
     matched transactions ordered by date descending.
     """
     ws = config.get("configurable", {}).get("workspace", "")
+    ledger_config = config.get("configurable", {}).get("ledger_config")
     result = _ledger.find_transactions(
         ws,
         account or None,
@@ -86,6 +89,7 @@ def tool_find_transactions(
         date_to or None,
         narration_contains or None,
         min(limit, 100),
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -136,7 +140,8 @@ def tool_query_template(
     Returns JSON with status SUCCESS (rows) or ERROR (error + bql that failed).
     """
     ws = config.get("configurable", {}).get("workspace", "")
-    result = _ledger.query_template(ws, template_name, params)
+    ledger_config = config.get("configurable", {}).get("ledger_config")
+    result = _ledger.query_template(ws, template_name, params, ledger_config=ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -187,7 +192,8 @@ def tool_query(
     Returns JSON with status SUCCESS (rows) or ERROR (error message).
     """
     ws = config.get("configurable", {}).get("workspace", "")
-    result = _ledger.query_bql(ws, bql)
+    ledger_config = config.get("configurable", {}).get("ledger_config")
+    result = _ledger.query_bql(ws, bql, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -206,8 +212,11 @@ def tool_query_report(
         month: Month to report as integer (e.g. 3 for March). Defaults to current month.
 
     Returns the absolute path to the generated HTML report file."""
-    ws = config.get("configurable", {}).get("workspace", "")
-    return report.run(ws, analytics.run(ws, year, month))
+    cfg = config.get("configurable", {})
+    ws = cfg.get("workspace", "")
+    ledger_config = cfg.get("ledger_config")
+    entry_path = getattr(ledger_config, "entry_path", "data/main.beancount")
+    return report.run(ws, analytics.run(ws, year, month, entry_path))
 
 
 @tool("ledger_fetch_price")
@@ -350,7 +359,10 @@ def tool_preview_commit(
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
-    result = _ledger.preview_commit(ws, transaction_text, commit_message, whitelist)
+    ledger_config = c.get("ledger_config")
+    result = _ledger.preview_commit(
+        ws, transaction_text, commit_message, whitelist, ledger_config
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -381,8 +393,16 @@ def tool_confirm_commit(
     token = c.get("token")
     git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
     result = _ledger.confirm_commit(
-        ws, transaction_text, commit_message, repo_url, git_service, token, whitelist
+        ws,
+        transaction_text,
+        commit_message,
+        repo_url,
+        git_service,
+        token,
+        whitelist,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -410,8 +430,14 @@ def tool_preview_open(
     Returns a JSON string with status PREVIEW or INVARIANT_VIOLATION.
     """
     ws = config.get("configurable", {}).get("workspace", "")
+    ledger_config = config.get("configurable", {}).get("ledger_config")
     result = _ledger.preview_open(
-        ws, account_name, currency or None, open_date, display_name or None,
+        ws,
+        account_name,
+        currency or None,
+        open_date,
+        display_name or None,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -443,6 +469,7 @@ def tool_confirm_open(
     repo_url: str = c.get("repo_url", "")
     token = c.get("token")
     git_service: GitService = c["git_service"]
+    ledger_config = c.get("ledger_config")
     result = _ledger.confirm_open(
         ws,
         account_name,
@@ -452,6 +479,7 @@ def tool_confirm_open(
         git_service,
         display_name or None,
         token,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -487,8 +515,15 @@ def tool_preview_update(
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
     result = _ledger.preview_update(
-        ws, date, narration, new_transaction_text, commit_message, whitelist,
+        ws,
+        date,
+        narration,
+        new_transaction_text,
+        commit_message,
+        whitelist,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -524,6 +559,7 @@ def tool_confirm_update(
     token = c.get("token")
     git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
     result = _ledger.confirm_update(
         ws,
         date,
@@ -534,6 +570,7 @@ def tool_confirm_update(
         git_service,
         token,
         whitelist,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -571,8 +608,14 @@ def tool_preview_bulk(
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
     result = _ledger.preview_bulk(
-        ws, transactions_text, commit_message, transactions_file or None, whitelist,
+        ws,
+        transactions_text,
+        commit_message,
+        transactions_file or None,
+        whitelist,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
@@ -606,6 +649,7 @@ def tool_confirm_bulk(
     token = c.get("token")
     git_service: GitService = c["git_service"]
     whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
     result = _ledger.confirm_bulk(
         ws,
         transactions_text,
@@ -615,6 +659,7 @@ def tool_confirm_bulk(
         transactions_file or None,
         token,
         whitelist,
+        ledger_config,
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 

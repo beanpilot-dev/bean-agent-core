@@ -21,11 +21,14 @@ import os
 import re
 import uuid
 from datetime import date
+from pathlib import PurePosixPath
 
 from .types import (
+    DEFAULT_LEDGER_CONFIG,
     CommitResult,
     DependencyUnavailable,
     InvariantViolation,
+    LedgerConfig,
     PreflightResult,
     Preview,
     QueryResult,
@@ -38,6 +41,26 @@ logger = logging.getLogger(__name__)
 
 class LedgerServiceError(Exception):
     """Unrecoverable ledger operation failure."""
+
+
+def _cfg(ledger_config: LedgerConfig | None) -> LedgerConfig:
+    return ledger_config or DEFAULT_LEDGER_CONFIG
+
+
+def _repo_path(workspace: str, rel_path: str) -> str:
+    normalized = PurePosixPath(rel_path).as_posix().strip("/")
+    parts = PurePosixPath(normalized).parts
+    if not normalized or rel_path.startswith("/") or ".." in parts:
+        raise LedgerServiceError("Ledger path must stay inside the repository")
+    return os.path.join(workspace, *parts)
+
+
+def _include_line(entry_path: str, sidecar_main_path: str) -> str:
+    relative = os.path.relpath(
+        sidecar_main_path,
+        start=PurePosixPath(entry_path).parent.as_posix(),
+    ).replace(os.sep, "/")
+    return f'include "{relative}"'
 
 
 def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
@@ -72,9 +95,11 @@ class Beancount:
         return name
 
     @staticmethod
-    def bean_check(workspace: str) -> tuple[bool, str]:
+    def bean_check(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> tuple[bool, str]:
         import subprocess
-        main = os.path.join(workspace, "data", "main.beancount")
+        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
         result = subprocess.run(
             [Beancount._bean_bin(workspace, "bean-check"), main],
             cwd=workspace, capture_output=True, text=True,
@@ -97,11 +122,13 @@ class Beancount:
             )
 
     @staticmethod
-    def run_bql_rows(workspace: str, bql: str) -> tuple[list[dict], str | None]:
+    def run_bql_rows(
+        workspace: str, bql: str, ledger_config: LedgerConfig | None = None
+    ) -> tuple[list[dict], str | None]:
         import csv
         import io
         import subprocess
-        main = os.path.join(workspace, "data", "main.beancount")
+        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
         result = subprocess.run(
             [Beancount._bean_bin(workspace, "bean-query"), "-f", "csv", main, bql],
             cwd=workspace, capture_output=True, text=True,
@@ -124,26 +151,30 @@ _POSTING_ACCOUNT_RE = re.compile(
     re.MULTILINE,
 )
 _AMOUNT_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*\s+[A-Z][A-Z0-9\-]+")
-_CHECK_INCLUDE = 'include "agent_inc/main.beancount"'
-
-
 # ---------------------------------------------------------------------------
 # Sidecar helpers
 # ---------------------------------------------------------------------------
 
-def _check_sidecar_include(workspace: str) -> bool:
-    main = os.path.join(workspace, "data", "main.beancount")
+def _check_sidecar_include(
+    workspace: str, ledger_config: LedgerConfig | None = None
+) -> bool:
+    config = _cfg(ledger_config)
+    main = _repo_path(workspace, config.entry_path)
+    include = _include_line(config.entry_path, config.sidecar_main_path)
     try:
         with open(main) as f:
-            return _CHECK_INCLUDE in f.read()
+            return include in f.read()
     except OSError:
         return False
 
 
-def _ensure_agent_sidecar(workspace: str) -> str:
+def _ensure_agent_sidecar(
+    workspace: str, ledger_config: LedgerConfig | None = None
+) -> str:
+    config = _cfg(ledger_config)
     today = date.today()
     chunk_name = f"{today.year}-{today.month:02d}.beancount"
-    agent_dir = os.path.join(workspace, "data", "agent_inc")
+    agent_dir = _repo_path(workspace, config.sidecar_write_dir)
     os.makedirs(agent_dir, exist_ok=True)
 
     chunk_path = os.path.join(agent_dir, chunk_name)
@@ -153,7 +184,8 @@ def _ensure_agent_sidecar(workspace: str) -> str:
                 f"; Agent-generated transactions — {today.year}-{today.month:02d}\n"
             )
 
-    agg_path = os.path.join(agent_dir, "main.beancount")
+    agg_path = _repo_path(workspace, config.sidecar_main_path)
+    os.makedirs(os.path.dirname(agg_path), exist_ok=True)
     include_line = f'include "{chunk_name}"\n'
     if os.path.exists(agg_path):
         with open(agg_path) as f:
@@ -166,7 +198,7 @@ def _ensure_agent_sidecar(workspace: str) -> str:
             f.write("; Agent sidecar — auto-managed, do not edit manually\n")
             f.write(include_line)
 
-    return f"data/agent_inc/{chunk_name}"
+    return f"{config.sidecar_write_dir}/{chunk_name}"
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +226,11 @@ class LedgerService:
         })
 
     @staticmethod
-    def get_accounts(workspace: str) -> list[str]:
+    def get_accounts(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> list[str]:
         rows, err = Beancount.run_bql_rows(
-            workspace, "SELECT DISTINCT account ORDER BY account"
+            workspace, "SELECT DISTINCT account ORDER BY account", ledger_config
         )
         if err:
             raise LedgerServiceError(f"Failed to list accounts: {err}")
@@ -207,9 +241,10 @@ class LedgerService:
         workspace: str,
         transaction_text: str,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> InvariantViolation | None:
         used = LedgerService._extract_accounts(transaction_text)
-        valid = set(LedgerService.get_accounts(workspace))
+        valid = set(LedgerService.get_accounts(workspace, ledger_config))
 
         unknown = [a for a in used if a not in valid]
         if unknown:
@@ -252,11 +287,14 @@ class LedgerService:
         transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation:
         """Validate a transaction proposal. Returns Preview with proposal_id."""
-        target = _ensure_agent_sidecar(workspace)
+        target = _ensure_agent_sidecar(workspace, ledger_config)
 
-        violation = self.validate_accounts(workspace, transaction_text, whitelist)
+        violation = self.validate_accounts(
+            workspace, transaction_text, whitelist, ledger_config
+        )
         if violation:
             return violation
 
@@ -288,9 +326,12 @@ class LedgerService:
         git_service: GitService,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute a transaction commit. Re-runs preview internally."""
-        preview = self.preview_commit(workspace, transaction_text, commit_message, whitelist)
+        preview = self.preview_commit(
+            workspace, transaction_text, commit_message, whitelist, ledger_config
+        )
         if not isinstance(preview, Preview):
             return preview
 
@@ -306,7 +347,7 @@ class LedgerService:
         with open(target_path, "a") as f:
             f.write(f"\n{transaction_text}\n")
 
-        is_clean, check_output = Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
@@ -346,6 +387,7 @@ class LedgerService:
         currency: str | None,
         open_date: str,
         display_name: str | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation:
         """Validate an open-account proposal. Returns Preview with proposal_id."""
         if not _ACCOUNT_NAME_RE.match(account_name):
@@ -359,7 +401,7 @@ class LedgerService:
                 ),
             )
 
-        existing = self.get_accounts(workspace)
+        existing = self.get_accounts(workspace, ledger_config)
         if account_name in existing:
             return InvariantViolation(
                 invariant="ACCOUNT_ALREADY_EXISTS",
@@ -399,17 +441,21 @@ class LedgerService:
         git_service: GitService,
         display_name: str | None = None,
         github_token: str | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute an open-account. Re-runs preview internally."""
-        preview = self.preview_open(workspace, account_name, currency, open_date, display_name)
+        preview = self.preview_open(
+            workspace, account_name, currency, open_date, display_name, ledger_config
+        )
         if not isinstance(preview, Preview):
             return preview
 
         directive_text = preview.preview["directive"]
         directive_lines = directive_text.split("\n")
 
-        _ensure_agent_sidecar(workspace)
-        main_path = os.path.join(workspace, "data", "agent_inc", "main.beancount")
+        config = _cfg(ledger_config)
+        _ensure_agent_sidecar(workspace, config)
+        main_path = _repo_path(workspace, config.sidecar_main_path)
 
         try:
             with open(main_path) as f:
@@ -438,7 +484,7 @@ class LedgerService:
         with open(main_path, "w") as f:
             f.write(new_content)
 
-        is_clean, check_output = Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace, config)
         if not is_clean:
             with open(main_path, "w") as f:
                 f.write(original)
@@ -463,7 +509,7 @@ class LedgerService:
                 "account": account_name,
                 "currency": currency,
                 "open_date": open_date,
-                "file": "data/agent_inc/main.beancount",
+                "file": config.sidecar_main_path,
             },
             push_status=git["push"],
         )
@@ -474,7 +520,10 @@ class LedgerService:
 
     @staticmethod
     def find_transaction_block(
-        workspace: str, target_date: str, narration: str,
+        workspace: str,
+        target_date: str,
+        narration: str,
+        ledger_config: LedgerConfig | None = None,
     ) -> list[tuple[str, str, str]]:
         """Search beancount files for a transaction matching date + narration.
 
@@ -488,7 +537,7 @@ class LedgerService:
             f'SELECT DISTINCT date, narration '
             f'WHERE date = {target_date} AND narration ~ "{escaped_narration}"'
         )
-        rows, error = Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error or not rows:
             return []
 
@@ -497,10 +546,11 @@ class LedgerService:
             re.MULTILINE,
         )
         results: list[tuple[str, str, str]] = []
-        data_dir = os.path.join(workspace, "data")
+        data_dir = workspace
 
         try:
-            for dirpath, _dirnames, filenames in os.walk(data_dir):
+            for dirpath, dirnames, filenames in os.walk(data_dir):
+                dirnames[:] = [d for d in dirnames if d not in {".git", ".venv"}]
                 for fname in sorted(filenames):
                     if not fname.endswith(".beancount"):
                         continue
@@ -566,9 +616,12 @@ class LedgerService:
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation:
         """Find and validate a replacement transaction. Returns Preview."""
-        matches = self.find_transaction_block(workspace, target_date, narration)
+        matches = self.find_transaction_block(
+            workspace, target_date, narration, ledger_config
+        )
 
         if not matches:
             return InvariantViolation(
@@ -598,7 +651,7 @@ class LedgerService:
         rel_path, _, old_block = matches[0]
 
         violation = self.validate_accounts(
-            workspace, new_transaction_text, whitelist,
+            workspace, new_transaction_text, whitelist, ledger_config,
         )
         if violation:
             return violation
@@ -632,11 +685,12 @@ class LedgerService:
         git_service: GitService,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute a transaction update. Re-runs preview internally."""
         preview = self.preview_update(
             workspace, target_date, narration, new_transaction_text,
-            commit_message, whitelist,
+            commit_message, whitelist, ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -656,7 +710,7 @@ class LedgerService:
         with open(file_path, "w") as f:
             f.write(new_content)
 
-        is_clean, check_output = Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(file_path, "w") as f:
                 f.write(original)
@@ -699,6 +753,7 @@ class LedgerService:
         commit_message: str = "",
         transactions_file: str | None = None,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation:
         """Validate a bulk-commit proposal. Returns Preview with proposal_id."""
         if transactions_file:
@@ -720,10 +775,10 @@ class LedgerService:
                 remediation="Provide transactions_text or transactions_file.",
             )
 
-        target = _ensure_agent_sidecar(workspace)
+        target = _ensure_agent_sidecar(workspace, ledger_config)
 
         violation = self.validate_accounts(
-            workspace, transactions_text, whitelist,
+            workspace, transactions_text, whitelist, ledger_config,
         )
         if violation:
             return violation
@@ -761,6 +816,7 @@ class LedgerService:
         transactions_file: str | None = None,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute a bulk commit. Re-runs preview internally."""
         if transactions_file:
@@ -777,7 +833,7 @@ class LedgerService:
 
         preview = self.preview_bulk(
             workspace, transactions_text, commit_message,
-            None, whitelist,
+            None, whitelist, ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -796,7 +852,7 @@ class LedgerService:
         with open(target_path, "a") as f:
             f.write(f"\n{transactions_text.strip()}\n")
 
-        is_clean, check_output = Beancount.bean_check(workspace)
+        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
@@ -835,14 +891,17 @@ class LedgerService:
 
     @staticmethod
     def get_balance(
-        workspace: str, account: str, as_of_date: str | None = None,
+        workspace: str,
+        account: str,
+        as_of_date: str | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
         date_clause = f'AND date < "{as_of_date}"' if as_of_date else ""
         bql = (
             f'SELECT sum(position) AS balance '
             f'WHERE account ~ "^{account}$" {date_clause}'
         )
-        rows, error = Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error:
             return QueryResult(
                 status="ERROR", error=error,
@@ -863,6 +922,7 @@ class LedgerService:
         date_to: str | None = None,
         narration_contains: str | None = None,
         limit: int = 20,
+        ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
         filters = []
         if account:
@@ -880,7 +940,7 @@ class LedgerService:
             f"{where} ORDER BY date DESC LIMIT {limit}"
         )
 
-        rows, error = Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error:
             return QueryResult(status="ERROR", error=error)
 
@@ -898,8 +958,10 @@ class LedgerService:
         )
 
     @staticmethod
-    def query_bql(workspace: str, bql: str) -> QueryResult:
-        rows, error = Beancount.run_bql_rows(workspace, bql)
+    def query_bql(
+        workspace: str, bql: str, ledger_config: LedgerConfig | None = None
+    ) -> QueryResult:
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error:
             return QueryResult(status="ERROR", error=error, bql=bql)
         return QueryResult(status="SUCCESS", count=len(rows), rows=rows)
@@ -910,6 +972,7 @@ class LedgerService:
         template_name: str,
         params: dict,
         templates_dir: str | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
         if templates_dir is None:
             templates_dir = os.path.join(
@@ -941,7 +1004,7 @@ class LedgerService:
         for key, value in params.items():
             bql = bql.replace(f"{{{key}}}", str(value))
 
-        rows, error = Beancount.run_bql_rows(workspace, bql)
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error:
             return QueryResult(status="ERROR", error=error, bql=bql)
 
@@ -954,19 +1017,24 @@ class LedgerService:
         )
 
     @staticmethod
-    def preflight_report(workspace: str) -> PreflightResult:
-        if not _check_sidecar_include(workspace):
+    def preflight_report(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> PreflightResult:
+        config = _cfg(ledger_config)
+        if not _check_sidecar_include(workspace, config):
+            sidecar_include = _include_line(
+                config.entry_path, config.sidecar_main_path
+            )[9:-1]
             return PreflightResult(
                 status="SETUP_REQUIRED",
                 action=(
-                    'Add include "agent_inc/main.beancount" to '
-                    "data/main.beancount"
+                    f'Add include "{sidecar_include}" to {config.entry_path}'
                 ),
             )
 
-        target = _ensure_agent_sidecar(workspace)
-        is_clean, check_output = Beancount.bean_check(workspace)
-        accounts = LedgerService.get_accounts(workspace)
+        target = _ensure_agent_sidecar(workspace, config)
+        is_clean, check_output = Beancount.bean_check(workspace, config)
+        accounts = LedgerService.get_accounts(workspace, config)
 
         # Collect recent transactions
         recent = ""

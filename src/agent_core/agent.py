@@ -31,6 +31,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
 from agent_core.workflow import (
@@ -156,6 +157,7 @@ class PersonalFinanceAgent:
         token: str | None = None,
         git_service: GitService | None = None,
         whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
 
@@ -220,6 +222,7 @@ class PersonalFinanceAgent:
                         "token": token,
                         "git_service": git_service,
                         "whitelist": whitelist,
+                        "ledger_config": ledger_config,
                     },
                 }
                 result = await self.graph.ainvoke(

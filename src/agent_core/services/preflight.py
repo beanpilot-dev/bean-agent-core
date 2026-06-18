@@ -11,7 +11,7 @@ import os
 import re
 
 from .ledger import LedgerService, _check_sidecar_include
-from .types import PreflightResult
+from .types import DEFAULT_LEDGER_CONFIG, LedgerConfig, PreflightResult
 
 logger = logging.getLogger(__name__)
 
@@ -32,38 +32,47 @@ class PreflightService:
     """Fail-fast deterministic ledger validation."""
 
     @staticmethod
-    def validate(workspace: str) -> PreflightResult:
+    def validate(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> PreflightResult:
         """Run full preflight: sidecar check + bean-check + account listing.
 
         Returns PreflightResult. Raises SetupRequiredError if sidecar
         include is missing — this is a hard block, not a soft warning.
         """
-        if not _check_sidecar_include(workspace):
+        config = ledger_config or DEFAULT_LEDGER_CONFIG
+        if not _check_sidecar_include(workspace, config):
             msg = (
-                "Sidecar include directive is missing from data/main.beancount. "
-                'Add: include "agent_inc/main.beancount"'
+                f"Sidecar include directive is missing from {config.entry_path}."
             )
             raise SetupRequiredError(msg)
 
-        return LedgerService.preflight_report(workspace)
+        return LedgerService.preflight_report(workspace, config)
 
     @staticmethod
-    def check_setup(workspace: str) -> bool:
+    def check_setup(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> bool:
         """Return True if the sidecar include directive is present."""
-        return _check_sidecar_include(workspace)
+        return _check_sidecar_include(workspace, ledger_config)
 
     @staticmethod
-    def list_accounts(workspace: str) -> list[str]:
+    def list_accounts(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> list[str]:
         """Return all account names from the ledger."""
-        return LedgerService.get_accounts(workspace)
+        return LedgerService.get_accounts(workspace, ledger_config)
 
     @staticmethod
-    def get_raw_open_directives(workspace: str) -> list[str]:
+    def get_raw_open_directives(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> list[str]:
         """Return all open directives from ledger .beancount files."""
         directives: list[str] = []
-        data_dir = os.path.join(workspace, "data")
+        data_dir = workspace
         try:
-            for dirpath, _dirnames, filenames in os.walk(data_dir):
+            for dirpath, dirnames, filenames in os.walk(data_dir):
+                dirnames[:] = [d for d in dirnames if d not in {".git", ".venv"}]
                 for fname in sorted(filenames):
                     if not fname.endswith(".beancount"):
                         continue

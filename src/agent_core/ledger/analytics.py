@@ -179,7 +179,7 @@ def load_template(template_name: str) -> str:
     """Load a single template by name. Raises FileNotFoundError if not found."""
     path = os.path.join(_TEMPLATES_DIR, f"{template_name}.bql")
     with open(path) as f:
-        lines = [l for l in f if not re.match(r"^--\s*\w+:", l)]
+        lines = [line for line in f if not re.match(r"^--\s*\w+:", line)]
     return "".join(lines).strip()
 
 
@@ -337,13 +337,15 @@ def _run_manifest_entry(
 # Public API
 # ---------------------------------------------------------------------------
 
-def run(workspace: str, year: int = 0, month: int = 0) -> str:
+def run(
+    workspace: str, year: int = 0, month: int = 0, entry_path: str = "data/main.beancount"
+) -> str:
     """Run the monthly report manifest and return a JSON string."""
     now = datetime.now()
     y = year if year > 0 else now.year
     m = month if month > 0 else now.month
 
-    main_file = os.path.join(workspace, "data", "main.beancount")
+    main_file = os.path.join(workspace, entry_path)
     dates = _compute_dates(y, m)
     templates = _load_templates()
 

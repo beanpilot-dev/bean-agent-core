@@ -179,6 +179,11 @@ async def test_stats_and_accounts_json_endpoints(
         "repo": {"url": "ignored", "token": "ignored"},
         "user_id": "user",
         "request_id": "request",
+        "ledger": {
+            "entry_path": "books/root.beancount",
+            "sidecar_main_path": "books/agent_sidecar/main.beancount",
+            "sidecar_write_dir": "books/agent_sidecar",
+        },
     }
 
     transport = httpx.ASGITransport(app=main.app)
@@ -193,3 +198,7 @@ async def test_stats_and_accounts_json_endpoints(
     assert stats.json()["rows"] == [{"account": "Expenses:Food"}]
     assert accounts.status_code == 200
     assert accounts.json()["accounts"] == ["Assets:Cash"]
+    stats_config = main._orchestrator.run_stats.call_args.kwargs["ledger_config"]
+    accounts_config = main._orchestrator.run_accounts.call_args.kwargs["ledger_config"]
+    assert stats_config.entry_path == "books/root.beancount"
+    assert accounts_config.sidecar_write_dir == "books/agent_sidecar"

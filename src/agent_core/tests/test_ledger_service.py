@@ -15,6 +15,7 @@ from agent_core.services.types import (
     CommitResult,
     DependencyUnavailable,
     InvariantViolation,
+    LedgerConfig,
     Preview,
     QueryResult,
     ValidationFailed,
@@ -32,6 +33,37 @@ def git_service() -> Mock:
         "push": "PUSHED: ok",
     }
     return service
+
+
+@pytest.fixture
+def custom_ledger_workspace(tmp_path: Path) -> tuple[Path, LedgerConfig]:
+    books = tmp_path / "books"
+    sidecar = books / "agent_sidecar"
+    sidecar.mkdir(parents=True)
+    config = LedgerConfig(
+        entry_path="books/root.beancount",
+        sidecar_main_path="books/agent_sidecar/main.beancount",
+        sidecar_write_dir="books/agent_sidecar",
+    )
+    month = date.today().strftime("%Y-%m")
+    (books / "root.beancount").write_text(
+        'option "title" "Custom Ledger"\n'
+        'option "operating_currency" "CNY"\n'
+        'include "agent_sidecar/main.beancount"\n'
+    )
+    (sidecar / "main.beancount").write_text(
+        "2020-01-01 open Assets:Cash CNY\n"
+        "2020-01-01 open Expenses:Food:Dining CNY\n"
+        "2020-01-01 open Equity:Opening-Balances CNY\n"
+        f'include "{month}.beancount"\n'
+    )
+    (sidecar / f"{month}.beancount").write_text(
+        '2020-01-01 * "Opening balance"\n'
+        "  Assets:Cash              1000 CNY\n"
+        "  Expenses:Food:Dining        0 CNY\n"
+        "  Equity:Opening-Balances -1000 CNY\n"
+    )
+    return tmp_path, config
 
 
 def test_preview_commit_validates_accounts(ledger_workspace: Path) -> None:
@@ -72,6 +104,29 @@ def test_confirm_commit_writes_formats_and_pushes(
     assert "Dinner" in target.read_text()
     assert formatted == [str(target)]
     git_service.commit_and_push.assert_called_once()
+
+
+def test_confirm_commit_uses_configured_sidecar_paths(
+    custom_ledger_workspace: tuple[Path, LedgerConfig],
+    git_service: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, config = custom_ledger_workspace
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+
+    result = LedgerService().confirm_commit(
+        str(workspace),
+        TXN,
+        "record dinner",
+        "repo",
+        git_service,
+        ledger_config=config,
+    )
+
+    assert isinstance(result, CommitResult)
+    assert result.result["target_file"].startswith("books/agent_sidecar/")
+    assert "Dinner" in (workspace / result.result["target_file"]).read_text()
+    assert not (workspace / "data").exists()
 
 
 def test_confirm_commit_reverts_invalid_transaction(
@@ -253,7 +308,7 @@ def test_read_operations_return_typed_results(
 ) -> None:
     calls: list[str] = []
 
-    def fake_rows(_workspace: str, bql: str):
+    def fake_rows(_workspace: str, bql: str, *_args):
         calls.append(bql)
         if "sum(position)" in bql:
             return [{"balance": "123 CNY"}], None
@@ -280,7 +335,7 @@ def test_query_template_and_preflight_report(
     templates.mkdir()
     (templates / "test.bql").write_text("-- description: test\nSELECT {column}")
 
-    def fake_rows(_workspace: str, bql: str):
+    def fake_rows(_workspace: str, bql: str, *_args):
         if "DISTINCT account" in bql:
             return [{"account": "Assets:Cash"}], None
         return [{"bql": bql}], None
@@ -296,6 +351,22 @@ def test_query_template_and_preflight_report(
     assert queried.rows == [{"bql": "SELECT account"}]
     assert report.status == "CLEAN"
     assert "Assets:Cash" in report.accounts
+
+
+def test_preflight_and_queries_use_configured_entry_path(
+    custom_ledger_workspace: tuple[Path, LedgerConfig],
+) -> None:
+    workspace, config = custom_ledger_workspace
+
+    report = LedgerService.preflight_report(str(workspace), config)
+    accounts = LedgerService.get_accounts(str(workspace), config)
+    balance = LedgerService.get_balance(str(workspace), "Assets:Cash", ledger_config=config)
+
+    assert report.status == "CLEAN"
+    assert report.target is not None
+    assert report.target.startswith("books/agent_sidecar/")
+    assert "Assets:Cash" in accounts
+    assert "1000 CNY" in (balance.balance or "")
 
 
 def test_get_accounts_raises_on_bql_error(

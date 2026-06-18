@@ -37,6 +37,7 @@ from agent_core.context import (
     agent_user_id,
 )
 from agent_core.services.orchestrator import AgentOrchestrator
+from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import CachedWorkspaceManager, GitService
 
 # Load environment from project root (agent-core/).  .env.local overrides .env.
@@ -136,6 +137,12 @@ class StatsConversationMeta(BaseModel):
     tag: str
 
 
+class LedgerPayload(BaseModel):
+    entry_path: str
+    sidecar_main_path: str
+    sidecar_write_dir: str
+
+
 class ChatRequest(BaseModel):
     repo: RepoInfo
     user_id: str
@@ -145,6 +152,7 @@ class ChatRequest(BaseModel):
     query: str
     conversation: ChatConversationMeta = ChatConversationMeta()
     messages: list[dict] = []
+    ledger: LedgerPayload | None = None
 
 
 class StatsRequest(BaseModel):
@@ -152,12 +160,14 @@ class StatsRequest(BaseModel):
     user_id: str
     request_id: str | None = None
     conversation: StatsConversationMeta
+    ledger: LedgerPayload | None = None
 
 
 class AccountsRequest(BaseModel):
     repo: RepoInfo
     user_id: str
     request_id: str | None = None
+    ledger: LedgerPayload | None = None
 
 
 class OnboardingDiscoveryRequest(BaseModel):
@@ -177,6 +187,16 @@ class OnboardingSetupRequest(BaseModel):
     sidecar_main_path: str | None = None
     sidecar_write_dir: str | None = None
     expected_head_sha: str | None = None
+
+
+def _ledger_config(payload: LedgerPayload | None) -> LedgerConfig | None:
+    if payload is None:
+        return None
+    return LedgerConfig(
+        entry_path=payload.entry_path,
+        sidecar_main_path=payload.sidecar_main_path,
+        sidecar_write_dir=payload.sidecar_write_dir,
+    )
 
 
 
@@ -218,6 +238,10 @@ async def health():
 @app.post("/agent/chat")
 async def agent_chat(req: ChatRequest):
     workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
+    try:
+        ledger_config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
 
     logger.info(
         "agent-chat user_id=%s request_id=%s conv_id=%s message_count=%s "
@@ -255,6 +279,7 @@ async def agent_chat(req: ChatRequest):
                     "account_whitelist": req.conversation.account_whitelist,
                 },
                 messages=req.messages,
+                ledger_config=ledger_config,
             ):
                 if chunk.get("type") == "history_snapshot":
                     yield f"data: {json.dumps(chunk, default=str)}\n\n"
@@ -287,6 +312,10 @@ async def agent_chat(req: ChatRequest):
 @app.post("/agent/stats")
 async def agent_stats(req: StatsRequest):
     start_time = time.monotonic()
+    try:
+        ledger_config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
 
     logger.info(
         "agent-stats user_id=%s request_id=%s has_tag=%s",
@@ -305,6 +334,7 @@ async def agent_stats(req: StatsRequest):
         user_id=req.user_id,
         request_id=req.request_id,
         tag=tag,
+        ledger_config=ledger_config,
     )
 
     if result.get("status") == "error":
@@ -334,6 +364,10 @@ async def agent_stats(req: StatsRequest):
 @app.post("/agent/accounts")
 async def agent_accounts(req: AccountsRequest):
     start_time = time.monotonic()
+    try:
+        ledger_config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
 
     logger.info(
         "agent-accounts user_id=%s request_id=%s",
@@ -346,6 +380,7 @@ async def agent_accounts(req: AccountsRequest):
         token=req.repo.token,
         user_id=req.user_id,
         request_id=req.request_id,
+        ledger_config=ledger_config,
     )
 
     if result.get("status") == "error":

@@ -7,6 +7,7 @@ than inspecting string dict keys.
 
 import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 # ── Base ──────────────────────────────────────────────────────────────────────
@@ -102,6 +103,49 @@ class PreflightResult(ServiceResult):
     errors: str | None = None
     recent: str | None = None
     action: str | None = None
+
+
+# ── Ledger config ─────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class LedgerConfig:
+    """Per-request ledger layout supplied by srv.
+
+    Defaults preserve direct/local agent-core usability when the caller omits the
+    ledger object. The config is never persisted by agent-core.
+    """
+
+    entry_path: str = "data/main.beancount"
+    sidecar_main_path: str = "data/agent_inc/main.beancount"
+    sidecar_write_dir: str = "data/agent_inc"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entry_path", _normalize_repo_path(self.entry_path))
+        object.__setattr__(
+            self,
+            "sidecar_main_path",
+            _normalize_repo_path(self.sidecar_main_path),
+        )
+        object.__setattr__(
+            self,
+            "sidecar_write_dir",
+            _normalize_repo_path(self.sidecar_write_dir),
+        )
+
+        sidecar_parent = PurePosixPath(self.sidecar_main_path).parent.as_posix()
+        if sidecar_parent != self.sidecar_write_dir:
+            raise ValueError("sidecar_main_path must live inside sidecar_write_dir")
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = PurePosixPath(path).as_posix().strip("/")
+    parts = PurePosixPath(normalized).parts
+    if not normalized or path.startswith("/") or ".." in parts:
+        raise ValueError("ledger paths must be relative repository paths")
+    return normalized
+
+
+DEFAULT_LEDGER_CONFIG = LedgerConfig()
 
 
 # ── External data ─────────────────────────────────────────────────────────────

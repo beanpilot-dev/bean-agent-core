@@ -20,6 +20,7 @@ from typing import AsyncGenerator
 from .ledger import Beancount
 from .onboarding import OnboardingService, SetupOperation
 from .preflight import PreflightService, SetupRequiredError
+from .types import LedgerConfig
 from .workspace import (
     CachedWorkspaceManager,
     CacheLockTimeoutError,
@@ -75,6 +76,7 @@ class AgentOrchestrator:
         query: str,
         conversation_meta: dict | None,
         messages: list[dict],
+        ledger_config: LedgerConfig | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Run the full agent lifecycle and yield SSE chunks."""
         start_time = time.monotonic()
@@ -90,7 +92,7 @@ class AgentOrchestrator:
             self._git_service.copy(cache_path, workspace_path)
 
             try:
-                PreflightService.validate(workspace_path)
+                PreflightService.validate(workspace_path, ledger_config)
             except SetupRequiredError as e:
                 logger.error("Preflight validation failed: SETUP_REQUIRED — %s", e)
                 yield {"type": "fatal", "code": "SETUP_REQUIRED", "message": str(e)}
@@ -111,6 +113,7 @@ class AgentOrchestrator:
                 token=token,
                 git_service=self._git_service,
                 whitelist=whitelist,
+                ledger_config=ledger_config,
             ):
                 yield chunk
 
@@ -149,6 +152,7 @@ class AgentOrchestrator:
         user_id: str,
         request_id: str | None,
         tag: str,
+        ledger_config: LedgerConfig | None = None,
     ) -> dict:
         """Run a lightweight stats query (no LLM)."""
         start_time = time.monotonic()
@@ -165,14 +169,14 @@ class AgentOrchestrator:
                 f'SELECT account, sum(position) AS total '
                 f'WHERE tags("{tag_clean}") GROUP BY account ORDER BY total DESC'
             )
-            rows, error = Beancount.run_bql_rows(workspace_path, bql)
+            rows, error = Beancount.run_bql_rows(workspace_path, bql, ledger_config)
             if error:
                 bql = (
                     f'SELECT account, sum(position) AS total '
                     f'WHERE narration ~ "{tag}" GROUP BY account ORDER BY total DESC'
                 )
                 rows, error = Beancount.run_bql_rows(
-                    workspace_path, bql,
+                    workspace_path, bql, ledger_config,
                 )
 
             if error:
@@ -215,6 +219,7 @@ class AgentOrchestrator:
         token: str | None,
         user_id: str,
         request_id: str | None,
+        ledger_config: LedgerConfig | None = None,
     ) -> dict:
         """Run account listing (no LLM)."""
         start_time = time.monotonic()
@@ -226,21 +231,19 @@ class AgentOrchestrator:
             workspace_path = tempfile.mkdtemp(prefix="bean_accounts_")
             self._git_service.copy(cache_path, workspace_path)
 
-            if not PreflightService.check_setup(workspace_path):
+            if not PreflightService.check_setup(workspace_path, ledger_config):
                 return {
                     "status": "error",
                     "error": {
                         "code": "SETUP_REQUIRED",
                         "message": (
-                            "Sidecar include directive is missing. "
-                            'Add: include "agent_inc/main.beancount" to '
-                            "data/main.beancount"
+                            "Sidecar include directive is missing."
                         ),
                     },
                 }
 
-            accounts = PreflightService.list_accounts(workspace_path)
-            raw = PreflightService.get_raw_open_directives(workspace_path)
+            accounts = PreflightService.list_accounts(workspace_path, ledger_config)
+            raw = PreflightService.get_raw_open_directives(workspace_path, ledger_config)
             return {
                 "status": "ok",
                 "accounts": accounts,
