@@ -44,8 +44,8 @@ jobs:
             -e AGENT_MODE=cloud \
             -v "$PWD:/workspace" \
             -w /workspace \
-            python:3.13-slim \
-            sh -lc "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* && pip install -r requirements.txt && pip install -e '.[dev]' && ruff check src && pytest"
+            ghcr.io/astral-sh/uv:python3.13-bookworm-slim \
+            sh -lc "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* && uv sync --locked --extra dev && uv run ruff check src && uv run pytest"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
