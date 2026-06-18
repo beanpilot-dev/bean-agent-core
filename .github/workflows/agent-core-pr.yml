@@ -31,7 +31,7 @@ jobs:
   validate:
     name: Lint, test, and build agent-core
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, saas-dev]
 
     steps:
       - name: Checkout
@@ -45,6 +45,7 @@ jobs:
             -w /workspace \
             ghcr.io/astral-sh/uv:python3.13-bookworm-slim \
             sh -lc "apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* && uv sync --locked --extra dev && uv run ruff check src && uv run pytest"
+          sudo rm -rf .pytest_cache .ruff_cache
 
       - name: Build Docker image
         run: |
