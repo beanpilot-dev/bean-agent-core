@@ -26,9 +26,6 @@ jobs:
     name: Test, publish, and deploy agent-core to dev
     runs-on: [self-hosted, linux, x64, saas-dev]
     steps:
-      - name: Clean root-owned cache from previous run
-        run: sudo rm -rf .pytest_cache .ruff_cache || true
-
       - name: Checkout
         uses: actions/checkout@v4
 
