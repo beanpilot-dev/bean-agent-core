@@ -46,6 +46,7 @@ jobs:
             -e RUFF_CACHE_DIR=/tmp/ruff-cache \
             -e UV_CACHE_DIR=/tmp/uv-cache \
             -e PYTEST_ADDOPTS="-o cache_dir=/tmp/pytest-cache" \
+            -e VIRTUAL_ENV=/tmp/.venv \
             -v "$PWD:/workspace" \
             -w /workspace \
             python:3.13-slim \
