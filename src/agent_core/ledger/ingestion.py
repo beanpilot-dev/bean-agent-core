@@ -154,9 +154,9 @@ def run_python(
 
         if proc.returncode != 0 or not stage:
             # Non-staging path: return stdout inline (truncate if large)
-            _MAX_OUT = 200 * 1024
-            if len(stdout) > _MAX_OUT:
-                stdout = stdout[:_MAX_OUT] + "\n... [truncated]"
+            max_out = 200 * 1024
+            if len(stdout) > max_out:
+                stdout = stdout[:max_out] + "\n... [truncated]"
             return json.dumps({
                 "status": "SUCCESS",
                 "result": {
@@ -172,8 +172,8 @@ def run_python(
             f.write(stdout)
 
         txn_lines = [
-            l for l in stdout.splitlines()
-            if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", l)
+            line for line in stdout.splitlines()
+            if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", line)
         ]
         txn_count = len(txn_lines)
         sample = "\n".join(txn_lines[:5])

@@ -7,7 +7,7 @@ import re
 
 from . import _beancount as bc
 from . import workspace as ws
-from .state import get_agent_target_file, get_accounts, find_transaction_block
+from .state import find_transaction_block, get_accounts, get_agent_target_file
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,11 @@ def _extract_accounts(transaction_text: str) -> list[str]:
     return list({m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(transaction_text)})
 
 
-def _validate_accounts(workspace: str, transaction_text: str, whitelist: list[str] | None = None) -> dict | None:
+def _validate_accounts(
+    workspace: str,
+    transaction_text: str,
+    whitelist: list[str] | None = None,
+) -> dict | None:
     """Check all posting accounts exist in the ledger whitelist.
 
     Also enforces the per-conversation account whitelist when one is active.
@@ -387,7 +391,9 @@ def open_account(
             "invariant": "ACCOUNT_ALREADY_EXISTS",
             "severity": "HARD",
             "provided": account_name,
-            "remediation": f"Account '{account_name}' already exists. Use it directly in transactions.",
+            "remediation": (
+                f"Account '{account_name}' already exists. Use it directly in transactions."
+            ),
         })
 
     # Build the directive text
@@ -548,8 +554,8 @@ def bulk_commit_transactions(
 
     # Count transactions (lines starting with a date + flag)
     txn_lines = [
-        l for l in transactions_text.splitlines()
-        if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", l)
+        line for line in transactions_text.splitlines()
+        if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", line)
     ]
     txn_count = len(txn_lines)
 

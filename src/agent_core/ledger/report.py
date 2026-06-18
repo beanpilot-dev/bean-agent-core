@@ -103,7 +103,10 @@ def _compute_metrics(data: dict) -> Metrics:
 
     goal_target  = goal["target_cny"]
     goal_pct     = min(100.0, max(0.0, net_liquid / goal_target * 100)) if goal_target else 0.0
-    elapsed_pct  = goal["months_elapsed"] / goal["total_months"] * 100 if goal["total_months"] else 0.0
+    elapsed_pct = (
+        goal["months_elapsed"] / goal["total_months"] * 100
+        if goal["total_months"] else 0.0
+    )
     monthly_needed = (
         (goal_target - net_liquid) / goal["months_remaining"]
         if goal["months_remaining"] > 0 else 0.0
@@ -112,9 +115,18 @@ def _compute_metrics(data: dict) -> Metrics:
     prev_income_rows  = _query_rows(q, "prev_income")
     prev_expense_rows = _query_rows(q, "prev_expenses")
     prev_fixed_rows   = _query_rows(q, "prev_fixed")
-    prev_income   = _get_cny(prev_income_rows[0].get("prev_income", {}))   if prev_income_rows  else 0.0
-    prev_expenses = _get_cny(prev_expense_rows[0].get("prev_expenses", {})) if prev_expense_rows else 0.0
-    prev_fixed    = _get_cny(prev_fixed_rows[0].get("prev_fixed", {}))      if prev_fixed_rows   else 0.0
+    prev_income = (
+        _get_cny(prev_income_rows[0].get("prev_income", {}))
+        if prev_income_rows else 0.0
+    )
+    prev_expenses = (
+        _get_cny(prev_expense_rows[0].get("prev_expenses", {}))
+        if prev_expense_rows else 0.0
+    )
+    prev_fixed = (
+        _get_cny(prev_fixed_rows[0].get("prev_fixed", {}))
+        if prev_fixed_rows else 0.0
+    )
 
     return Metrics(
         income_cny=income_cny, expenses_cny=expenses_cny, fixed_cny=fixed_cny,
@@ -181,7 +193,12 @@ def _build_context(data: dict) -> dict:
     items.sort(key=lambda x: -x[1])
     max_val = max((v for _, v in items), default=1.0)
     outflow_bars = [
-        (label, value, value / max_val * 100, value / m.total_outflow * 100 if m.total_outflow else 0)
+        (
+            label,
+            value,
+            value / max_val * 100,
+            value / m.total_outflow * 100 if m.total_outflow else 0,
+        )
         for label, value in items
     ]
 
