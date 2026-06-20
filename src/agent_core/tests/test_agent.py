@@ -3,7 +3,7 @@
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent_core.agent import PersonalFinanceAgent
+from agent_core.agent import PersonalFinanceAgent, normalize_conversation_title
 
 
 @pytest.mark.parametrize(
@@ -108,3 +108,13 @@ def test_requires_user_input_ignores_quoted_preview_in_tool_text_block(text):
     }
 
     assert PersonalFinanceAgent._requires_user_input(result) is False
+
+
+def test_normalize_conversation_title_strips_markup_and_punctuation():
+    title = normalize_conversation_title(' "**Trip budget planning!**" ')
+
+    assert title == "Trip budget planning"
+
+
+def test_normalize_conversation_title_rejects_table_like_output():
+    assert normalize_conversation_title("| title |") == ""
