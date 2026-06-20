@@ -14,6 +14,7 @@ from langgraph.prebuilt import ToolNode
 
 from agent_core.services import LedgerService
 
+from .language import response_language_instruction
 from .state import PillarState
 from .tools import (
     ANALYTICS_TOOLS,
@@ -175,6 +176,10 @@ def _make_pillar_node(system_prompt: str, config_key: str):
             full_prompt += f"\n\nToday's date: {today}"
         if conv_ctx:
             full_prompt += f"\n\nCONVERSATION CONTEXT:\n{conv_ctx}"
+        full_prompt += (
+            "\n\nRESPONSE LANGUAGE:\n"
+            f"{response_language_instruction(state.get('preferred_language', 'auto'))}"
+        )
 
         messages: list = list(state["messages"])
         if messages and isinstance(messages[0], SystemMessage):
@@ -223,6 +228,10 @@ async def _clerk_node(state: PillarState, config: RunnableConfig) -> dict:
         full_prompt += f"\n\nCONVERSATION CONTEXT:\n{conv_ctx}"
     if preflight_text:
         full_prompt += preflight_text
+    full_prompt += (
+        "\n\nRESPONSE LANGUAGE:\n"
+        f"{response_language_instruction(state.get('preferred_language', 'auto'))}"
+    )
 
     messages: list = list(state["messages"])
     if messages and isinstance(messages[0], SystemMessage):

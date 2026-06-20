@@ -4,6 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agent_core.agent import PersonalFinanceAgent, normalize_conversation_title
+from agent_core.workflow.language import response_language_instruction
 
 
 @pytest.mark.parametrize(
@@ -108,6 +109,15 @@ def test_requires_user_input_ignores_quoted_preview_in_tool_text_block(text):
     }
 
     assert PersonalFinanceAgent._requires_user_input(result) is False
+
+
+def test_response_language_instruction_preserves_ledger_literals():
+    instruction = response_language_instruction("zh-CN")
+
+    assert "Simplified Chinese" in instruction
+    assert "Beancount syntax" in instruction
+    assert "account names" in instruction
+    assert "machine-readable codes" in instruction
 
 
 def test_normalize_conversation_title_strips_markup_and_punctuation():

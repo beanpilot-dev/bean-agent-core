@@ -48,6 +48,7 @@ from agent_core.workflow import (
     planner_node,
     route_condition,
 )
+from agent_core.workflow.language import response_language_instruction
 from agent_core.workflow.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -299,6 +300,7 @@ class PersonalFinanceAgent:
                         "original_query": "",
                         "pending_routes": [],
                         "had_multiple_tasks": False,
+                        "preferred_language": "auto",
                     },
                     config=config,
                 )
@@ -364,10 +366,15 @@ async def _synthesizer_node(state: AgentState, config: RunnableConfig) -> dict:
     llm = config.get("configurable", {}).get("synthesizer_llm")
     if llm is None:
         return {"messages": []}
+    prompt = (
+        SYNTHESIZER_PROMPT
+        + "\n\nRESPONSE LANGUAGE:\n"
+        + response_language_instruction(state.get("preferred_language", "auto"))
+    )
     messages = list(state["messages"])
     if messages and isinstance(messages[0], SystemMessage):
-        messages[0] = SystemMessage(content=SYNTHESIZER_PROMPT)
+        messages[0] = SystemMessage(content=prompt)
     else:
-        messages.insert(0, SystemMessage(content=SYNTHESIZER_PROMPT))
+        messages.insert(0, SystemMessage(content=prompt))
     response = await llm.ainvoke(messages)
     return {"messages": [response]}

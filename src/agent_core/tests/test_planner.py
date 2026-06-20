@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent_core.agent import validate_model_name
 from agent_core.workflow.planner import (
     PLANNER_JSON_INSTRUCTION,
+    PLANNER_PROMPT,
     PlannerOutput,
     parse_planner_output,
     planner_node,
@@ -24,22 +25,30 @@ class FakePlannerLLM:
 
 def test_parse_planner_output_accepts_structured_object():
     result = PlannerOutput.model_validate(
-        {"tasks": [{"route": "ANALYTICS", "task": "Summarize dining spend."}]}
+        {
+            "preferred_language": "en",
+            "tasks": [{"route": "ANALYTICS", "task": "Summarize dining spend."}],
+        }
     )
 
     parsed = parse_planner_output(result)
 
+    assert parsed.preferred_language == "en"
     assert parsed.tasks[0].route == "ANALYTICS"
     assert parsed.tasks[0].task == "Summarize dining spend."
 
 
 def test_parse_planner_output_accepts_json_message_text():
     result = AIMessage(
-        content='{"tasks":[{"route":"CHITCHAT","task":"Answer briefly."}]}'
+        content=(
+            '{"preferred_language":"zh-CN",'
+            '"tasks":[{"route":"CHITCHAT","task":"Answer briefly."}]}'
+        )
     )
 
     parsed = parse_planner_output(result)
 
+    assert parsed.preferred_language == "zh-CN"
     assert parsed.tasks[0].route == "CHITCHAT"
     assert parsed.tasks[0].task == "Answer briefly."
 
@@ -48,7 +57,10 @@ def test_parse_planner_output_accepts_json_message_text():
 async def test_planner_node_json_text_mode_adds_instruction_and_routes():
     llm = FakePlannerLLM(
         AIMessage(
-            content='{"tasks":[{"route":"ANALYTICS","task":"List available accounts."}]}'
+            content=(
+                '{"preferred_language":"en",'
+                '"tasks":[{"route":"ANALYTICS","task":"List available accounts."}]}'
+            )
         )
     )
 
@@ -60,13 +72,47 @@ async def test_planner_node_json_text_mode_adds_instruction_and_routes():
             "original_query": "",
             "pending_routes": [],
             "had_multiple_tasks": False,
+            "preferred_language": "auto",
         },
         {"configurable": {"planner_llm": llm, "planner_output_mode": "json_text"}},
     )
 
     assert result["route"] == "analytics"
     assert result["sub_task"] == "List available accounts."
+    assert result["preferred_language"] == "en"
     assert PLANNER_JSON_INSTRUCTION in llm.seen_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_planner_node_propagates_chinese_preferred_language():
+    llm = FakePlannerLLM(
+        AIMessage(
+            content=(
+                '{"preferred_language":"zh-CN",'
+                '"tasks":[{"route":"CHITCHAT","task":"用中文简要回答。"}]}'
+            )
+        )
+    )
+
+    result = await planner_node(
+        {
+            "messages": [HumanMessage(content="请告诉我这个月餐饮花了多少")],
+            "route": "",
+            "sub_task": "",
+            "original_query": "",
+            "pending_routes": [],
+            "had_multiple_tasks": False,
+            "preferred_language": "auto",
+        },
+        {"configurable": {"planner_llm": llm, "planner_output_mode": "json_text"}},
+    )
+
+    assert result["preferred_language"] == "zh-CN"
+
+
+def test_planner_prompt_mentions_dominant_language_boundary():
+    assert "dominant natural-language request language" in PLANNER_PROMPT
+    assert "account names" in PLANNER_PROMPT
 
 
 def test_validate_model_name_rejects_env_file_values():

@@ -19,6 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from pydantic import BaseModel, Field
 
+from .language import normalize_preferred_language
 from .state import AgentState
 
 PLANNER_WINDOW_SIZE = 4
@@ -42,12 +43,17 @@ Rules:
 - Strip out parts of the user's message that don't belong to the sub-task's pillar.
 - Include relevant details (amounts, dates, account names) so the pillar doesn't
   need the original message.
+- Infer preferred_language from the latest natural-language user request.
+- Use "zh-CN" for Simplified Chinese requests, "en" for English requests, and
+  "auto" only when the latest request language is unclear.
+- Choose the dominant natural-language request language, not account names,
+  commodities, Beancount snippets, file paths, tags, or code identifiers.
 
-Output a JSON object with a "tasks" key containing the list."""
+Output a JSON object with "preferred_language" and "tasks" keys."""
 
 PLANNER_JSON_INSTRUCTION = """Return only valid JSON. Do not include markdown fences,
 comments, or explanatory text. The JSON shape must be:
-{"tasks":[{"route":"CHITCHAT","task":"Answer this general question helpfully."}]}"""
+{"preferred_language":"en","tasks":[{"route":"CHITCHAT","task":"Answer helpfully."}]}"""
 
 
 class SubTask(BaseModel):
@@ -56,6 +62,7 @@ class SubTask(BaseModel):
 
 
 class PlannerOutput(BaseModel):
+    preferred_language: Literal["zh-CN", "en", "auto"] = "auto"
     tasks: list[SubTask]
 
 
@@ -103,7 +110,8 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     llm = config.get("configurable", {}).get("planner_llm")
     if llm is None:
         return {"route": "chitchat", "sub_task": "Error: planner LLM not configured.",
-                "pending_routes": [], "original_query": "", "had_multiple_tasks": False}
+                "pending_routes": [], "original_query": "", "had_multiple_tasks": False,
+                "preferred_language": "auto"}
     messages = state.get("messages", [])
 
     recent = [
@@ -130,8 +138,10 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     try:
         planner_output = parse_planner_output(result)
         tasks = planner_output.tasks
+        preferred_language = normalize_preferred_language(planner_output.preferred_language)
     except (json.JSONDecodeError, ValueError):
         tasks = []
+        preferred_language = "auto"
 
     valid = {"transaction", "analytics", "ingestion", "chitchat"}
     filtered = []
@@ -156,6 +166,7 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         "pending_routes": pending,
         "original_query": original_query,
         "had_multiple_tasks": len(filtered) > 1,
+        "preferred_language": preferred_language,
     }
 
 

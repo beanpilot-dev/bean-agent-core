@@ -15,7 +15,9 @@ class AgentState(MessagesState):
     original_query: str
     pending_routes: list[dict]
     had_multiple_tasks: bool
+    preferred_language: str
 
 
 class PillarState(MessagesState):
     sub_task: str
+    preferred_language: str
