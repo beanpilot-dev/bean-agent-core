@@ -27,7 +27,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agent_core.agent import PersonalFinanceAgent, validate_model_name
+from agent_core.agent import (
+    PersonalFinanceAgent,
+    generate_conversation_title,
+    validate_model_name,
+)
 from agent_core.config import WORKSPACE_TTL_SECONDS
 from agent_core.context import (
     agent_api_key,
@@ -170,6 +174,14 @@ class AccountsRequest(BaseModel):
     ledger: LedgerPayload | None = None
 
 
+class ConversationTitleRequest(BaseModel):
+    user_id: str
+    request_id: str | None = None
+    api_key: str
+    model: str = os.environ.get("OPENAI_MODEL", "gpt-4o")
+    query: str
+
+
 class OnboardingDiscoveryRequest(BaseModel):
     repo: RepoInfo
     user_id: str
@@ -308,6 +320,36 @@ async def agent_chat(req: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /agent/conversation-title — lightweight title generation, JSON
+# ---------------------------------------------------------------------------
+
+@app.post("/agent/conversation-title")
+async def agent_conversation_title(req: ConversationTitleRequest):
+    start_time = time.monotonic()
+    try:
+        model = validate_model_name(req.model)
+    except ValueError as e:
+        logger.error("agent-conversation-title invalid model configuration: %s", e)
+        return _error_envelope("INVALID_MODEL_CONFIG", str(e), 400)
+
+    logger.info(
+        "agent-conversation-title user_id=%s request_id=%s model=%s query_length=%s",
+        req.user_id,
+        req.request_id,
+        model,
+        len(req.query),
+    )
+    title = await generate_conversation_title(req.query, req.api_key, model)
+    if not title:
+        return _error_envelope("TITLE_UNAVAILABLE", "Title generation failed", 502)
+    return {
+        "status": "ok",
+        "title": title,
+        "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
+    }
 
 
 # ---------------------------------------------------------------------------

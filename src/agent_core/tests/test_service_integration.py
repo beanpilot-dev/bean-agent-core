@@ -42,6 +42,38 @@ def test_account_balance_tool_works_directly(ledger_workspace: Path) -> None:
     assert "CNY" in result["balance"]
 
 
+@pytest.mark.asyncio
+async def test_conversation_title_endpoint_is_lightweight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_core import main
+
+    async def fake_generate_title(query: str, api_key: str, model: str) -> str:
+        assert query == "Record lunch with the team"
+        assert api_key == "key"
+        assert model == "gpt-4o"
+        return "Team lunch"
+
+    def fail_orchestrator(*_args, **_kwargs):
+        raise AssertionError("title endpoint must not use ledger orchestration")
+
+    monkeypatch.setattr(main, "generate_conversation_title", fake_generate_title)
+    monkeypatch.setattr(main._orchestrator, "run", fail_orchestrator)
+
+    response = await main.agent_conversation_title(
+        main.ConversationTitleRequest(
+            user_id="user",
+            request_id="request",
+            api_key="key",
+            model="gpt-4o",
+            query="Record lunch with the team",
+        )
+    )
+
+    assert response["status"] == "ok"
+    assert response["title"] == "Team lunch"
+
+
 class WorkflowAgent:
     def __init__(self):
         async def query_node(_state, config):

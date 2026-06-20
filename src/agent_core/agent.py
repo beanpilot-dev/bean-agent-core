@@ -109,6 +109,45 @@ def validate_model_name(model: str) -> str:
     return normalized
 
 
+def normalize_conversation_title(raw_title: str) -> str:
+    title = " ".join(raw_title.strip().split())
+    title = title.strip("\"'`*_#[]() ")
+    title = title.rstrip(".。!！?？:：;；,，")
+    words = title.split()
+    if len(words) > 8:
+        title = " ".join(words[:8])
+    if len(title) > 48:
+        title = title[:48].rstrip()
+    if not title or "\n" in title or "|" in title:
+        return ""
+    return title
+
+
+async def generate_conversation_title(
+    query: str,
+    api_key: str | None = None,
+    model: str = "gpt-4o",
+) -> str:
+    model = validate_model_name(model)
+    llm_kwargs: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key or "none",
+        "temperature": 0,
+    }
+    if os.environ.get("OPENAI_BASE_URL"):
+        llm_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+    llm = ChatOpenAI(**llm_kwargs)
+    response = await llm.ainvoke([
+        SystemMessage(content=(
+            "Generate a concise conversation title from the user's first message. "
+            "Return only the title as plain text. No markdown, quotes, labels, or punctuation. "
+            "Use at most 8 words and avoid exposing unnecessary sensitive detail."
+        )),
+        HumanMessage(content=query),
+    ])
+    return normalize_conversation_title(str(response.content))
+
+
 # ── PersonalFinanceAgent ──────────────────────────────────────────────────────
 
 
