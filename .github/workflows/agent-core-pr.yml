@@ -42,6 +42,7 @@ jobs:
           docker run --rm \
             -e AGENT_MODE=cloud \
             -e HOME=/tmp \
+            -e PYTHONDONTWRITEBYTECODE=1 \
             -e RUFF_CACHE_DIR=/tmp/ruff-cache \
             -e UV_CACHE_DIR=/tmp/uv-cache \
             -e PYTEST_ADDOPTS="-o cache_dir=/tmp/pytest-cache" \
