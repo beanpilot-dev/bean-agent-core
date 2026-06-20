@@ -10,7 +10,9 @@ prompt), avoiding cross-pillar ambiguity. A synthesizer node composes
 the final response from all pillar outputs.
 """
 
-from typing import Literal
+import json
+import re
+from typing import Any, Literal
 
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -43,6 +45,10 @@ Rules:
 
 Output a JSON object with a "tasks" key containing the list."""
 
+PLANNER_JSON_INSTRUCTION = """Return only valid JSON. Do not include markdown fences,
+comments, or explanatory text. The JSON shape must be:
+{"tasks":[{"route":"CHITCHAT","task":"Answer this general question helpfully."}]}"""
+
 
 class SubTask(BaseModel):
     route: Literal["TRANSACTION", "ANALYTICS", "INGESTION", "CHITCHAT"]
@@ -51,6 +57,46 @@ class SubTask(BaseModel):
 
 class PlannerOutput(BaseModel):
     tasks: list[SubTask]
+
+
+def _message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
+def _extract_json_object(text: str) -> dict:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("planner output must be a JSON object")
+    return parsed
+
+
+def parse_planner_output(result: Any) -> PlannerOutput:
+    if isinstance(result, PlannerOutput):
+        return result
+    if isinstance(result, dict):
+        return PlannerOutput.model_validate(result)
+    if hasattr(result, "tasks"):
+        return PlannerOutput.model_validate(result)
+    if hasattr(result, "content"):
+        content = _message_content_text(result.content)
+        return PlannerOutput.model_validate(_extract_json_object(content))
+    return PlannerOutput.model_validate(_extract_json_object(str(result)))
 
 
 async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -77,9 +123,15 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         planner_system += f"\n\nToday's date: {today}"
     if conv_ctx:
         planner_system += f"\n\n{conv_ctx}"
+    if cfg.get("planner_output_mode") == "json_text":
+        planner_system += f"\n\n{PLANNER_JSON_INSTRUCTION}"
 
     result = await llm.ainvoke([SystemMessage(content=planner_system)] + recent)
-    tasks = result.tasks if hasattr(result, "tasks") else []
+    try:
+        planner_output = parse_planner_output(result)
+        tasks = planner_output.tasks
+    except (json.JSONDecodeError, ValueError):
+        tasks = []
 
     valid = {"transaction", "analytics", "ingestion", "chitchat"}
     filtered = []

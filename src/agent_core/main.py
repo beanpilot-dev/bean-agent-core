@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agent_core.agent import PersonalFinanceAgent
+from agent_core.agent import PersonalFinanceAgent, validate_model_name
 from agent_core.config import WORKSPACE_TTL_SECONDS
 from agent_core.context import (
     agent_api_key,
@@ -242,6 +242,11 @@ async def agent_chat(req: ChatRequest):
         ledger_config = _ledger_config(req.ledger)
     except ValueError:
         return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
+    try:
+        req.model = validate_model_name(req.model)
+    except ValueError as e:
+        logger.error("agent-chat invalid model configuration: %s", e)
+        return _error_envelope("INVALID_MODEL_CONFIG", str(e), 400)
 
     logger.info(
         "agent-chat user_id=%s request_id=%s conv_id=%s message_count=%s "

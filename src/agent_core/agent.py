@@ -94,6 +94,21 @@ def _has_preview_status(payload: Any) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "PREVIEW"
 
 
+def is_deepseek_thinking_model(model: str) -> bool:
+    return model in {"deepseek-v4-pro", "deepseek-v4-flash"}
+
+
+def validate_model_name(model: str) -> str:
+    normalized = model.strip()
+    if not normalized:
+        raise ValueError("model must not be empty")
+    if normalized != model or any(ch.isspace() for ch in normalized):
+        raise ValueError("model must not contain whitespace")
+    if normalized.endswith(".env"):
+        raise ValueError("model appears to be an environment file name")
+    return normalized
+
+
 # ── PersonalFinanceAgent ──────────────────────────────────────────────────────
 
 
@@ -171,6 +186,11 @@ class PersonalFinanceAgent:
             "conversation_tag": conversation_meta.get("tag") if conversation_meta else None,
         }
 
+        try:
+            model = validate_model_name(model)
+        except ValueError as e:
+            raise ValueError(f"Invalid model configuration: {e}") from e
+
         base_llm_kwargs: dict[str, Any] = {
             "model": model,
             "api_key": api_key or "none",
@@ -210,8 +230,15 @@ class PersonalFinanceAgent:
                         "analyst_llm": base_llm.bind_tools(ANALYTICS_TOOLS),
                         "engineer_llm": base_llm.bind_tools(INGESTION_TOOLS),
                         "qa_llm": ChatOpenAI(**base_llm_kwargs),
-                        "planner_llm": ChatOpenAI(**base_llm_kwargs).with_structured_output(
-                            PlannerOutput, method="function_calling"
+                        "planner_llm": (
+                            ChatOpenAI(**base_llm_kwargs)
+                            if is_deepseek_thinking_model(model)
+                            else ChatOpenAI(**base_llm_kwargs).with_structured_output(
+                                PlannerOutput, method="function_calling"
+                            )
+                        ),
+                        "planner_output_mode": (
+                            "json_text" if is_deepseek_thinking_model(model) else "structured"
                         ),
                         "synthesizer_llm": ChatOpenAI(**base_llm_kwargs),
                         "router_system_prompt": SYSTEM_PROMPT,
