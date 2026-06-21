@@ -144,6 +144,23 @@ def test_cache_refresh_falls_back_to_fetch_reset(
     git.fetch_reset.assert_called_once_with(str(cache), "repo", None)
 
 
+def test_cache_refresh_allows_empty_unborn_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = tmp_path / "empty.git"
+    run_git(["init", "--bare", str(remote)], tmp_path)
+    service = LocalGitService(str(remote))
+    manager = CachedWorkspaceManager(service, ttl_seconds=900)
+    monkeypatch.setattr(manager, "CACHE_ROOT", str(tmp_path / "cache"))
+
+    first = manager.acquire("user", "ignored")
+    second = manager.acquire("user", "ignored")
+
+    assert first == second
+    assert (Path(second) / ".git").is_dir()
+    assert not any(path.name != ".git" for path in Path(second).iterdir())
+
+
 def test_cleanup_expired_removes_old_and_orphaned_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

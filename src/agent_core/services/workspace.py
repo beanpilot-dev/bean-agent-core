@@ -138,6 +138,41 @@ class GitService(ABC):
             return RepoUnreachableError(stderr.strip())
         return RepoUnreachableError(stderr.strip())
 
+    @staticmethod
+    def _has_commits(workspace: str) -> bool:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    def _remote_reset_target(self, workspace: str) -> str | None:
+        rc, out, _ = self._run_git(
+            ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            cwd=workspace,
+        )
+        if rc == 0 and out:
+            return out
+
+        rc, out, err = self._run_git(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes/origin"],
+            cwd=workspace,
+        )
+        if rc != 0:
+            raise GitServiceError(f"git remote ref lookup failed: {err}")
+        remote_refs = [
+            line.strip()
+            for line in out.splitlines()
+            if line.strip() and not line.strip().endswith("/HEAD")
+        ]
+        if len(remote_refs) == 1:
+            return remote_refs[0]
+        if not remote_refs:
+            return None
+        return "origin/HEAD"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -219,8 +254,14 @@ class GitService(ABC):
             if rc != 0:
                 raise self._classify_clone_error(err)
 
+            reset_target = self._remote_reset_target(workspace)
+            if reset_target is None:
+                if not self._has_commits(workspace):
+                    return "REFRESHED_EMPTY"
+                raise GitServiceError("git reset failed: remote has no refs")
+
             rc2, _, err2 = self._run_git(
-                ["git", "reset", "--hard", "origin/HEAD"], cwd=workspace
+                ["git", "reset", "--hard", reset_target], cwd=workspace
             )
             if rc2 != 0:
                 raise GitServiceError(f"git reset failed: {err2}")
