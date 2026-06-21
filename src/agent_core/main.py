@@ -512,7 +512,7 @@ async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
     start_time = time.monotonic()
     if not _valid_setup_operation(req.operation):
         return _error_envelope("INVALID_REQUEST", "Unsupported setup operation", 400)
-    if not req.expected_head_sha:
+    if req.expected_head_sha is None:
         return _error_envelope("INVALID_REQUEST", "expected_head_sha is required", 400)
     logger.info(
         "agent-onboarding-setup-confirm user_id=%s request_id=%s operation=%s "

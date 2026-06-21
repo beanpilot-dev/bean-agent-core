@@ -234,3 +234,51 @@ async def test_stats_and_accounts_json_endpoints(
     accounts_config = main._orchestrator.run_accounts.call_args.kwargs["ledger_config"]
     assert stats_config.entry_path == "books/root.beancount"
     assert accounts_config.sidecar_write_dir == "books/agent_sidecar"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_confirm_accepts_empty_expected_head_for_clean_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_core import main
+
+    monkeypatch.setattr(
+        main._orchestrator,
+        "run_onboarding_setup_confirm",
+        AsyncMock(
+            return_value={
+                "status": "success",
+                "operation": "initialize_ledger",
+                "head_sha": "new-head",
+                "entry_path": "data/main.beancount",
+                "sidecar_main_path": "data/agent_inc/main.beancount",
+                "sidecar_write_dir": "data/agent_inc",
+            }
+        ),
+    )
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/agent/onboarding/setup/confirm",
+            json={
+                "repo": {"url": "ignored", "token": "ignored"},
+                "user_id": "user",
+                "request_id": "request",
+                "operation": "initialize_ledger",
+                "entry_path": "data/main.beancount",
+                "sidecar_main_path": "data/agent_inc/main.beancount",
+                "sidecar_write_dir": "data/agent_inc",
+                "expected_head_sha": "",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    main._orchestrator.run_onboarding_setup_confirm.assert_awaited_once()
+    assert (
+        main._orchestrator.run_onboarding_setup_confirm.call_args.kwargs[
+            "expected_head_sha"
+        ]
+        == ""
+    )
