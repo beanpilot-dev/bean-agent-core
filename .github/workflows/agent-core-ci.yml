@@ -46,6 +46,7 @@ jobs:
             -e PYTHONDONTWRITEBYTECODE=1 \
             -e RUFF_CACHE_DIR=/tmp/ruff-cache \
             -e UV_CACHE_DIR=/tmp/uv-cache \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/.venv \
             -e PYTEST_ADDOPTS="-o cache_dir=/tmp/pytest-cache" \
             -e VIRTUAL_ENV=/tmp/.venv \
             -v "$PWD:/workspace" \
