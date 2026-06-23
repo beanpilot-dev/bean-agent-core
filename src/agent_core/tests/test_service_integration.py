@@ -127,6 +127,7 @@ async def test_full_api_service_workflow_tool_response_flow(
             repo=main.RepoInfo(url="ignored", token="ignored"),
             user_id="user",
             request_id="request",
+            agent_run_id="run_test",
             api_key="key",
             model="scripted",
             query="What is my cash balance?",
@@ -139,10 +140,18 @@ async def test_full_api_service_workflow_tool_response_flow(
         async for chunk in response.body_iterator
     ]
     body = "".join(chunks)
+    data_lines = [
+        line.removeprefix("data: ").strip()
+        for line in body.splitlines()
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
 
     assert "Assets:Cash balance is" in body
     assert "CNY" in body
+    assert '"type": "activity"' in body
+    assert '"run_id": "run_test"' in body
     assert "history_snapshot" in body
+    assert json.loads(data_lines[-1])["type"] == "history_snapshot"
 
 
 @pytest.mark.asyncio

@@ -79,6 +79,10 @@ async def test_planner_node_json_text_mode_adds_instruction_and_routes():
 
     assert result["route"] == "analytics"
     assert result["sub_task"] == "List available accounts."
+    assert result["task_id"] == "task_1_analytics"
+    assert result["planned_tasks"] == [
+        {"task_id": "task_1_analytics", "route": "analytics", "actor": "analyst"}
+    ]
     assert result["preferred_language"] == "en"
     assert PLANNER_JSON_INSTRUCTION in llm.seen_messages[0].content
 

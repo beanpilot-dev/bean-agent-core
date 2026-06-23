@@ -17,6 +17,7 @@ import tempfile
 import time
 from typing import AsyncGenerator
 
+from .activity import ActivityEmitter
 from .ledger import Beancount
 from .onboarding import OnboardingService, SetupOperation
 from .preflight import PreflightService, SetupRequiredError
@@ -69,6 +70,7 @@ class AgentOrchestrator:
         workspace_path: str,
         repo_url: str,
         token: str | None,
+        agent_run_id: str | None,
         user_id: str,
         request_id: str | None,
         api_key: str,
@@ -80,21 +82,77 @@ class AgentOrchestrator:
     ) -> AsyncGenerator[dict, None]:
         """Run the full agent lifecycle and yield SSE chunks."""
         start_time = time.monotonic()
+        emitter = ActivityEmitter(run_id=agent_run_id or request_id or "agent-run")
 
         try:
+            yield emitter.emit(
+                category="run",
+                state="started",
+                phase="dispatch",
+                actor="orchestrator",
+                visibility="timeline",
+                display_key="agent.run.started",
+                fallback_text="Starting the agent run",
+            )
             self._git_service.validate_request_credentials(repo_url, token)
             logger.info(
                 "orchestrator setup user_id=%s request_id=%s",
                 user_id, request_id,
             )
 
+            yield emitter.emit(
+                category="git",
+                state="started",
+                phase="sync",
+                actor="orchestrator",
+                visibility="details",
+                display_key="agent.git.sync_started",
+                fallback_text="Preparing the ledger workspace",
+            )
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
             self._git_service.copy(cache_path, workspace_path)
+            yield emitter.emit(
+                category="git",
+                state="completed",
+                phase="sync",
+                actor="orchestrator",
+                visibility="details",
+                display_key="agent.git.sync_completed",
+                fallback_text="Ledger workspace is ready",
+            )
 
             try:
+                yield emitter.emit(
+                    category="validation",
+                    state="started",
+                    phase="preflight",
+                    actor="validator",
+                    visibility="timeline",
+                    display_key="agent.preflight.started",
+                    fallback_text="Checking ledger setup",
+                )
                 PreflightService.validate(workspace_path, ledger_config)
+                yield emitter.emit(
+                    category="validation",
+                    state="completed",
+                    phase="preflight",
+                    actor="validator",
+                    visibility="timeline",
+                    display_key="agent.preflight.completed",
+                    fallback_text="Ledger setup passed validation",
+                )
             except SetupRequiredError as e:
                 logger.error("Preflight validation failed: SETUP_REQUIRED — %s", e)
+                yield emitter.emit(
+                    category="validation",
+                    state="failed",
+                    phase="preflight",
+                    actor="validator",
+                    visibility="timeline",
+                    display_key="agent.preflight.failed",
+                    fallback_text="Ledger setup needs attention",
+                    safe_detail_summary="Setup is incomplete",
+                )
                 yield {"type": "fatal", "code": "SETUP_REQUIRED", "message": str(e)}
                 return
 
@@ -102,6 +160,8 @@ class AgentOrchestrator:
                 conversation_meta = {}
 
             whitelist = conversation_meta.get("account_whitelist")
+            last_requires_user_input = False
+            pending_history_snapshot: dict | None = None
             async for chunk in self._agent.stream(
                 query=query,
                 prior=messages,
@@ -114,11 +174,47 @@ class AgentOrchestrator:
                 git_service=self._git_service,
                 whitelist=whitelist,
                 ledger_config=ledger_config,
+                activity_emitter=emitter,
             ):
+                if chunk.get("type") == "history_snapshot":
+                    pending_history_snapshot = chunk
+                    continue
+                if chunk.get("require_user_input"):
+                    last_requires_user_input = True
                 yield chunk
+            yield emitter.emit(
+                category="run",
+                state="awaiting_input" if last_requires_user_input else "completed",
+                phase="completed" if not last_requires_user_input else "preview",
+                actor="orchestrator",
+                visibility="timeline",
+                display_key=(
+                    "agent.run.awaiting_input"
+                    if last_requires_user_input
+                    else "agent.run.completed"
+                ),
+                fallback_text=(
+                    "Waiting for your confirmation"
+                    if last_requires_user_input
+                    else "Agent run completed"
+                ),
+                display_args={"duration_ms": int((time.monotonic() - start_time) * 1000)},
+            )
+            if pending_history_snapshot:
+                yield pending_history_snapshot
 
         except CacheLockTimeoutError as e:
             logger.error("Cache lock timeout in run()")
+            yield emitter.emit(
+                category="run",
+                state="failed",
+                phase="dispatch",
+                actor="orchestrator",
+                visibility="timeline",
+                display_key="agent.run.failed",
+                fallback_text="Agent run failed",
+                safe_detail_summary="Workspace cache is busy",
+            )
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
 
         except GitServiceError as e:
@@ -127,11 +223,31 @@ class AgentOrchestrator:
                 _git_error_code(e),
                 type(e).__name__,
             )
+            yield emitter.emit(
+                category="git",
+                state="failed",
+                phase="sync",
+                actor="orchestrator",
+                visibility="timeline",
+                display_key="agent.git.sync_failed",
+                fallback_text="Could not prepare the ledger workspace",
+                safe_detail_summary=_git_error_code(e),
+            )
             yield {"type": "fatal", "code": _git_error_code(e), "message": str(e)}
 
         except Exception as e:
             logger.error("Orchestrator error error_type=%s", type(e).__name__)
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            yield emitter.emit(
+                category="run",
+                state="failed",
+                phase="dispatch",
+                actor="orchestrator",
+                visibility="timeline",
+                display_key="agent.run.failed",
+                fallback_text="Agent run failed",
+                safe_detail_summary=type(e).__name__,
+            )
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
             yield {
                 "type": "history_snapshot",

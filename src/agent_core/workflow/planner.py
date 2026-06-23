@@ -110,8 +110,8 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     llm = config.get("configurable", {}).get("planner_llm")
     if llm is None:
         return {"route": "chitchat", "sub_task": "Error: planner LLM not configured.",
-                "pending_routes": [], "original_query": "", "had_multiple_tasks": False,
-                "preferred_language": "auto"}
+                "pending_routes": [], "planned_tasks": [], "original_query": "",
+                "had_multiple_tasks": False, "preferred_language": "auto"}
     messages = state.get("messages", [])
 
     recent = [
@@ -145,12 +145,23 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
 
     valid = {"transaction", "analytics", "ingestion", "chitchat"}
     filtered = []
-    for t in tasks:
+    for index, t in enumerate(tasks, start=1):
         if t.route.lower() in valid:
-            filtered.append({"route": t.route.lower(), "task": t.task})
+            route = t.route.lower()
+            filtered.append({
+                "route": route,
+                "task": t.task,
+                "task_id": f"task_{index}_{route}",
+                "actor": _actor_for_route(route),
+            })
 
     if not filtered:
-        filtered = [{"route": "chitchat", "task": "Answer this general question helpfully."}]
+        filtered = [{
+            "route": "chitchat",
+            "task": "Answer this general question helpfully.",
+            "task_id": "task_1_chitchat",
+            "actor": "synthesizer",
+        }]
 
     original_query = ""
     for m in reversed(messages):
@@ -163,7 +174,16 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     return {
         "route": first["route"],
         "sub_task": first["task"],
+        "task_id": first["task_id"],
         "pending_routes": pending,
+        "planned_tasks": [
+            {
+                "task_id": item["task_id"],
+                "route": item["route"],
+                "actor": item["actor"],
+            }
+            for item in filtered
+        ],
         "original_query": original_query,
         "had_multiple_tasks": len(filtered) > 1,
         "preferred_language": preferred_language,
@@ -192,6 +212,7 @@ def merge_node(state: AgentState) -> dict:
     return {
         "route": next_item["route"],
         "sub_task": next_item["task"],
+        "task_id": next_item.get("task_id", ""),
         "pending_routes": pending,
     }
 
@@ -203,3 +224,12 @@ def merge_condition(state: AgentState) -> str:
     if state.get("had_multiple_tasks"):
         return "synthesizer"
     return END  # type: ignore[return-value]
+
+
+def _actor_for_route(route: str) -> str:
+    return {
+        "transaction": "bookkeeper",
+        "analytics": "analyst",
+        "ingestion": "importer",
+        "chitchat": "synthesizer",
+    }.get(route, "agent")

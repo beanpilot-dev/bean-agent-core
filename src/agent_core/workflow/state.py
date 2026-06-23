@@ -12,8 +12,10 @@ from langgraph.graph import MessagesState
 class AgentState(MessagesState):
     route: str
     sub_task: str
+    task_id: str
     original_query: str
     pending_routes: list[dict]
+    planned_tasks: list[dict]
     had_multiple_tasks: bool
     preferred_language: str
 

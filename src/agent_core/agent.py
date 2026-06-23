@@ -15,6 +15,7 @@ Tool definitions, persona prompts, and sub-graph builders live in the
 workflow/ module. This module owns only graph assembly and streaming.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
@@ -213,6 +215,7 @@ class PersonalFinanceAgent:
         git_service: GitService | None = None,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
+        activity_emitter: ActivityEmitter | None = None,
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
 
@@ -262,9 +265,28 @@ class PersonalFinanceAgent:
             system = SystemMessage(content=SYSTEM_PROMPT)
             messages = [system] + prior + [HumanMessage(content=query)]
 
+            if activity_emitter:
+                yield activity_emitter.emit(
+                    category="planning",
+                    state="started",
+                    phase="planning",
+                    actor="planner",
+                    visibility="timeline",
+                    display_key="agent.planning.started",
+                    fallback_text="Planning the request",
+                )
+
             with tracing.trace(task="agent-turn", **trace_metadata) as handler:
+                activity_queue: asyncio.Queue[dict[str, Any]] | None = (
+                    asyncio.Queue() if activity_emitter else None
+                )
+                callbacks = []
+                if tracing.enabled:
+                    callbacks.append(handler)
+                if activity_emitter and activity_queue:
+                    callbacks.append(ActivityCallbackHandler(activity_emitter, activity_queue))
                 config: RunnableConfig = {
-                    "callbacks": [handler] if tracing.enabled else [],
+                    "callbacks": callbacks,
                     "configurable": {
                         "clerk_llm": base_llm.bind_tools(TRANSACTION_TOOLS),
                         "analyst_llm": base_llm.bind_tools(ANALYTICS_TOOLS),
@@ -292,21 +314,98 @@ class PersonalFinanceAgent:
                         "ledger_config": ledger_config,
                     },
                 }
-                result = await self.graph.ainvoke(
-                    {  # pyright: ignore[reportArgumentType]
-                        "messages": messages,
-                        "route": "",
-                        "sub_task": "",
-                        "original_query": "",
-                        "pending_routes": [],
-                        "had_multiple_tasks": False,
-                        "preferred_language": "auto",
-                    },
-                    config=config,
-                )
+                if activity_emitter:
+                    yield activity_emitter.emit(
+                        category="node",
+                        state="started",
+                        phase="execution",
+                        actor="planner",
+                        visibility="details",
+                        display_key="agent.execution.started",
+                        fallback_text="Running the agent workflow",
+                    )
+                graph_input = {  # pyright: ignore[reportAssignmentType]
+                    "messages": messages,
+                    "route": "",
+                    "sub_task": "",
+                    "task_id": "",
+                    "original_query": "",
+                    "pending_routes": [],
+                    "planned_tasks": [],
+                    "had_multiple_tasks": False,
+                    "preferred_language": "auto",
+                }
+                graph_task = asyncio.create_task(self.graph.ainvoke(graph_input, config=config))
+                while activity_queue and not graph_task.done():
+                    try:
+                        yield await asyncio.wait_for(activity_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+                try:
+                    result = await graph_task
+                except Exception:
+                    if activity_queue:
+                        while not activity_queue.empty():
+                            yield activity_queue.get_nowait()
+                    raise
+                if activity_queue:
+                    while not activity_queue.empty():
+                        yield activity_queue.get_nowait()
 
             response = result["messages"][-1].content
             require_input = self._requires_user_input(result)
+            route = str(result.get("route") or "workflow")
+            actor = _actor_for_route(route)
+            tool_names = _tool_names(result)
+            if activity_emitter:
+                planned_tasks = _planned_tasks(result)
+                yield activity_emitter.emit(
+                    category="planning",
+                    state="completed",
+                    phase="planning",
+                    actor="planner",
+                    visibility="timeline",
+                    display_key="agent.planning.completed",
+                    fallback_text="Request plan is ready",
+                    display_args={
+                        "task_count": len(planned_tasks),
+                        "route": route,
+                    },
+                )
+                for task in planned_tasks:
+                    yield activity_emitter.emit(
+                        category="task",
+                        state="planned",
+                        phase="planning",
+                        actor=task["actor"],
+                        visibility="timeline",
+                        display_key=f"agent.task.{task['route']}.planned",
+                        fallback_text="Task planned",
+                        display_args={"route": task["route"]},
+                        task_id=task["task_id"],
+                        event_key=f"task.{task['task_id']}.planned",
+                    )
+                yield activity_emitter.emit(
+                    category="node",
+                    state="completed",
+                    phase="execution",
+                    actor=actor,
+                    visibility="details",
+                    display_key="agent.execution.completed",
+                    fallback_text="Agent workflow completed",
+                    display_args={"tool_count": len(tool_names), "route": route},
+                )
+                if tool_names:
+                    yield activity_emitter.emit(
+                        category="tool",
+                        state="completed",
+                        phase="execution",
+                        actor=actor,
+                        visibility="details",
+                        display_key="agent.tools.completed",
+                        fallback_text="Ledger tools completed",
+                        display_args={"tool_count": len(tool_names)},
+                    )
 
             had_multiple = result.get("had_multiple_tasks", False)
             if had_multiple and not require_input:
@@ -346,6 +445,17 @@ class PersonalFinanceAgent:
         except Exception as e:
             logger.exception("Agent error")
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            if activity_emitter:
+                yield activity_emitter.emit(
+                    category="node",
+                    state="failed",
+                    phase="execution",
+                    actor="agent",
+                    visibility="timeline",
+                    display_key="agent.execution.failed",
+                    fallback_text="Agent workflow failed",
+                    safe_detail_summary=type(e).__name__,
+                )
             yield {"is_task_complete": True, "require_user_input": False, "content": f"Error: {e}"}
             yield {
                 "type": "history_snapshot",
@@ -357,6 +467,41 @@ class PersonalFinanceAgent:
                 "trace_url": tracing.get_trace_url() if tracing else None,
                 "usage": {"tokens": 0, "duration_ms": duration_ms},
             }
+
+
+def _actor_for_route(route: str) -> str:
+    return {
+        "transaction": "bookkeeper",
+        "analytics": "analyst",
+        "ingestion": "importer",
+        "chitchat": "synthesizer",
+    }.get(route, "agent")
+
+
+def _tool_names(result: dict) -> list[str]:
+    names: list[str] = []
+    for msg in result.get("messages", []):
+        if not isinstance(msg, ToolMessage):
+            continue
+        name = getattr(msg, "name", None)
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
+
+def _planned_tasks(result: dict) -> list[dict[str, str]]:
+    tasks = result.get("planned_tasks", [])
+    if not isinstance(tasks, list):
+        return [{"task_id": "task_1_workflow", "route": "workflow", "actor": "agent"}]
+    planned = []
+    for index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            continue
+        route = str(task.get("route") or "workflow")
+        actor = str(task.get("actor") or _actor_for_route(route))
+        task_id = str(task.get("task_id") or f"task_{index}_{route}")
+        planned.append({"task_id": task_id, "route": route, "actor": actor})
+    return planned or [{"task_id": "task_1_workflow", "route": "workflow", "actor": "agent"}]
 
 
 # ── Synthesizer node ──────────────────────────────────────────────────────────

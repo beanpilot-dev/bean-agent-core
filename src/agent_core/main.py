@@ -151,6 +151,7 @@ class ChatRequest(BaseModel):
     repo: RepoInfo
     user_id: str
     request_id: str | None = None
+    agent_run_id: str | None = None
     api_key: str
     model: str = os.environ.get("OPENAI_MODEL", "gpt-4o")
     query: str
@@ -284,6 +285,7 @@ async def agent_chat(req: ChatRequest):
                 workspace_path=workspace_path,
                 repo_url=req.repo.url,
                 token=req.repo.token,
+                agent_run_id=req.agent_run_id,
                 user_id=req.user_id,
                 request_id=req.request_id,
                 api_key=req.api_key,

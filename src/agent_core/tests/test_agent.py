@@ -1,9 +1,13 @@
 """Tests for PersonalFinanceAgent response classification."""
 
+import asyncio
+from uuid import uuid4
+
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agent_core.agent import PersonalFinanceAgent, normalize_conversation_title
+from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
 from agent_core.workflow.language import response_language_instruction
 
 
@@ -25,6 +29,66 @@ def test_requires_user_input_ignores_confirmation_phrases(content):
 
 def test_requires_user_input_returns_false_without_messages():
     assert PersonalFinanceAgent._requires_user_input({}) is False
+
+
+class FailingGraph:
+    async def ainvoke(self, _input, config=None):
+        callbacks = (config or {}).get("callbacks", [])
+        for callback in callbacks:
+            if isinstance(callback, ActivityCallbackHandler):
+                run_id = uuid4()
+                callback._run_context[run_id] = {
+                    "name": "ledger_commit",
+                    "actor": "bookkeeper",
+                    "kind": "tool",
+                }
+                callback.on_tool_error(RuntimeError("raw failure"), run_id=run_id)
+        raise RuntimeError("graph failed")
+
+
+class FakeLLM:
+    def bind_tools(self, _tools):
+        return self
+
+    def with_structured_output(self, _schema, method=None):
+        return self
+
+
+@pytest.mark.asyncio
+async def test_stream_drains_activity_queue_when_graph_fails(monkeypatch):
+    async def fake_sleep(_delay):
+        return None
+
+    agent = PersonalFinanceAgent()
+    agent.graph = FailingGraph()
+    emitter = ActivityEmitter(run_id="run_test")
+    chunks = []
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: FakeLLM())
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async for chunk in agent.stream(
+        query="fail",
+        prior=[],
+        api_key="key",
+        model="scripted",
+        activity_emitter=emitter,
+    ):
+        chunks.append(chunk)
+
+    assert any(
+        chunk.get("type") == "activity"
+        and chunk.get("category") == "tool"
+        and chunk.get("state") == "failed"
+        for chunk in chunks
+    )
+    assert any(
+        chunk.get("type") == "activity"
+        and chunk.get("category") == "node"
+        and chunk.get("state") == "failed"
+        for chunk in chunks
+    )
 
 
 def test_requires_user_input_detects_preview_string_content():
