@@ -41,6 +41,70 @@ def _git_error_code(error: GitServiceError) -> str:
     return "REPO_AUTH_FAILED" if isinstance(error, RepoAuthFailedError) else "REPO_UNREACHABLE"
 
 
+def _processing_state(
+    *,
+    state: str,
+    run_id: str,
+    label: str,
+    ledger_mutation_state: str = "read_only",
+    detail: str | None = None,
+    outcome_summary: str | None = None,
+    requires_user_action: bool = False,
+    require_user_input: bool = False,
+    is_task_complete: bool = False,
+) -> dict:
+    chunk = {
+        "type": "processing_state",
+        "run_id": run_id,
+        "state": state,
+        "label": label,
+        "ledger_mutation_state": ledger_mutation_state,
+        "requires_user_action": requires_user_action,
+        "is_task_complete": is_task_complete,
+        "require_user_input": require_user_input,
+        "content": "",
+    }
+    if detail:
+        chunk["detail"] = detail
+    if outcome_summary:
+        chunk["outcome_summary"] = outcome_summary
+    return chunk
+
+
+def _working_state_for_query(query: str) -> tuple[str, str]:
+    normalized = query.strip().lower()
+    write_markers = (
+        "record ",
+        "add ",
+        "create ",
+        "log ",
+        "bought ",
+        "paid ",
+        "commit confirmed",
+    )
+    query_markers = (
+        "what ",
+        "how ",
+        "show ",
+        "find ",
+        "list ",
+        "lookup ",
+        "look up ",
+        "search ",
+        "recent",
+        "balance",
+        "spend",
+        "spent",
+        "transaction",
+        "?",
+    )
+    if any(marker in normalized for marker in write_markers):
+        return "Preparing a transaction preview", "draft_created"
+    if any(marker in normalized for marker in query_markers):
+        return "Querying your ledger", "read_only"
+    return "Working on your request", "read_only"
+
+
 class AgentOrchestrator:
     """Full lifecycle orchestrator for agent requests.
 
@@ -83,6 +147,7 @@ class AgentOrchestrator:
         """Run the full agent lifecycle and yield SSE chunks."""
         start_time = time.monotonic()
         emitter = ActivityEmitter(run_id=agent_run_id or request_id or "agent-run")
+        run_id = agent_run_id or request_id or "agent-run"
 
         try:
             yield emitter.emit(
@@ -109,6 +174,11 @@ class AgentOrchestrator:
                 display_key="agent.git.sync_started",
                 fallback_text="Preparing the ledger workspace",
             )
+            yield _processing_state(
+                state="syncing_workspace",
+                run_id=run_id,
+                label="Syncing your ledger",
+            )
             cache_path = self._cache_manager.acquire(user_id, repo_url, token)
             self._git_service.copy(cache_path, workspace_path)
             yield emitter.emit(
@@ -130,6 +200,11 @@ class AgentOrchestrator:
                     visibility="timeline",
                     display_key="agent.preflight.started",
                     fallback_text="Checking ledger setup",
+                )
+                yield _processing_state(
+                    state="validating_ledger",
+                    run_id=run_id,
+                    label="Checking ledger health",
                 )
                 PreflightService.validate(workspace_path, ledger_config)
                 yield emitter.emit(
@@ -153,6 +228,14 @@ class AgentOrchestrator:
                     fallback_text="Ledger setup needs attention",
                     safe_detail_summary="Setup is incomplete",
                 )
+                yield _processing_state(
+                    state="failed",
+                    run_id=run_id,
+                    label="Ledger validation needs attention",
+                    ledger_mutation_state="read_only",
+                    outcome_summary="No changes were made.",
+                    is_task_complete=True,
+                )
                 yield {"type": "fatal", "code": "SETUP_REQUIRED", "message": str(e)}
                 return
 
@@ -162,6 +245,20 @@ class AgentOrchestrator:
             whitelist = conversation_meta.get("account_whitelist")
             last_requires_user_input = False
             pending_history_snapshot: dict | None = None
+            is_confirm_request = query.strip().lower() == "commit confirmed"
+            working_label, working_mutation_state = _working_state_for_query(query)
+            yield _processing_state(
+                state="applying_changes" if is_confirm_request else "working",
+                run_id=run_id,
+                label=(
+                    "Applying approved changes"
+                    if is_confirm_request
+                    else working_label
+                ),
+                ledger_mutation_state=(
+                    "applying_changes" if is_confirm_request else working_mutation_state
+                ),
+            )
             async for chunk in self._agent.stream(
                 query=query,
                 prior=messages,
@@ -215,6 +312,14 @@ class AgentOrchestrator:
                 fallback_text="Agent run failed",
                 safe_detail_summary="Workspace cache is busy",
             )
+            yield _processing_state(
+                state="failed",
+                run_id=run_id,
+                label="Could not prepare your request",
+                ledger_mutation_state="read_only",
+                outcome_summary="No changes were made.",
+                is_task_complete=True,
+            )
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
 
         except GitServiceError as e:
@@ -233,6 +338,14 @@ class AgentOrchestrator:
                 fallback_text="Could not prepare the ledger workspace",
                 safe_detail_summary=_git_error_code(e),
             )
+            yield _processing_state(
+                state="failed",
+                run_id=run_id,
+                label="Could not sync your ledger",
+                ledger_mutation_state="read_only",
+                outcome_summary="No changes were made.",
+                is_task_complete=True,
+            )
             yield {"type": "fatal", "code": _git_error_code(e), "message": str(e)}
 
         except Exception as e:
@@ -247,6 +360,22 @@ class AgentOrchestrator:
                 display_key="agent.run.failed",
                 fallback_text="Agent run failed",
                 safe_detail_summary=type(e).__name__,
+            )
+            yield _processing_state(
+                state="failed",
+                run_id=run_id,
+                label="Could not complete your request",
+                ledger_mutation_state=(
+                    "reverted_or_failed_safely"
+                    if query.strip().lower() == "commit confirmed"
+                    else "read_only"
+                ),
+                outcome_summary=(
+                    "The request failed safely."
+                    if query.strip().lower() == "commit confirmed"
+                    else "No changes were made."
+                ),
+                is_task_complete=True,
             )
             yield {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
             yield {
