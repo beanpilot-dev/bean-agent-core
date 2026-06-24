@@ -1,0 +1,5 @@
+; Historical accounts — read-only
+2019-01-01 open Assets:Liquid:Bank:Checking         USD
+2019-01-01 open Liabilities:CreditCard:Primary      USD
+2019-01-01 open Expenses:Shopping:Electronics       USD
+2019-01-01 open Expenses:Work:Equipment             USD

@@ -1,0 +1,375 @@
+tier: "tier_2"
+name: "Ledger Literacy"
+maximum_score: 30
+scoring:
+  points_per_case: 2
+  evaluator: "tier_2_llm_judge"
+intent: >
+  Verify that Agent-Core understands the economic meaning behind the ledger, can explain it in accessible language, and knows when clarification is safer than an unsupported proposal.
+cases:
+  - id: "T2-01"
+    fixture: "basic-us-v1"
+    title: "Credit-card repayment is not spending"
+    user_prompt: "I just paid $2,000 toward my credit card. Why doesn't my spending increase this month?"
+    fixture_facts:
+      - "2026-06-23 has a transaction from Assets:Liquid:Bank:Checking -2000 USD to Liabilities:CreditCard:Primary +2000 USD."
+      - "No expense account appears in that transaction."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that repayment settles an existing liability rather than purchasing a new good or service."
+        - "Explain that the original credit-card purchases were recorded as expenses when the card was used."
+        - "State that the repayment affects cash and card liability, not monthly expense."
+      example_answer: >
+        This payment only moves money from your checking account to reduce your existing credit card
+        liability. Your actual spending was already recorded as expenses on the day you used the card.
+        The repayment reduces your bank asset and your card liability simultaneously — it does not add
+        a new expense.
+    judge_anchors:
+      fatal_errors:
+        - "Calls the repayment an expense."
+        - "Calls the repayment income."
+        - "Invents an absent transaction."
+
+  - id: "T2-02"
+    fixture: "basic-us-v1"
+    title: "Spendable cash versus net worth"
+    user_prompt: "How much money can I actually spend right now?"
+    fixture_facts:
+      - "Assets:Liquid:Bank:Checking balance is 8500 USD."
+      - "Assets:Liquid:CashOnHand balance is 300 USD."
+      - "Assets:Liquid:Bank:Savings balance is 5000 USD."
+      - "Liabilities:CreditCard:Primary balance is -1500 USD."
+      - "Assets:Liquid:Invest:MoneyFund balance is 12000 USD."
+      - "Fixture policy defines spendable cash as checking + cash on hand + savings, excluding money fund and credit limits."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Compute spendable cash as 13800 USD (8500 + 300 + 5000)."
+        - "Explain why the 12000 USD money market fund balance is excluded under the fixture policy."
+        - "Do not treat unused credit-card capacity as cash."
+      example_answer: >
+        Under this ledger's policy, immediately spendable cash is checking ($8,500) plus cash on hand
+        ($300) plus savings ($5,000), totaling $13,800 USD. The $12,000 money market fund is classified
+        as an investment asset and is excluded from the spendable definition. Your credit card balance is
+        a liability, not available cash.
+    judge_anchors:
+      fatal_errors:
+        - "Reports 25800 USD by including the money market fund."
+        - "Reports 12300 USD by netting the credit-card liability into spendable cash."
+        - "Treats credit-card limit as cash."
+
+  - id: "T2-03"
+    fixture: "basic-us-v1"
+    title: "Refund with unknown original transaction"
+    user_prompt: "Amazon just refunded me $89.99 to my credit card. Can you record it?"
+    fixture_facts:
+      - "No matching original Amazon transaction can be found in the ledger."
+      - "Ledger policy requires reversing the original category when the original is known."
+      - "Ledger policy says unknown category must be clarified before posting."
+    reference_answer:
+      expected_disposition: "clarify"
+      required_facts:
+        - "Ask for the original transaction, likely category, or a statement date or order description."
+        - "Explain that a refund should normally reverse the original expense, not become income."
+        - "Do not emit a final posting preview yet."
+      example_answer: >
+        A refund should normally reverse the original expense category rather than be booked as income.
+        However, there is no matching Amazon transaction in the ledger to link this refund to. Could you
+        tell me what the original purchase was for — the category, date, or order description? Once I
+        have that I can generate the correct preview.
+    judge_anchors:
+      fatal_errors:
+        - "Books the refund as Income."
+        - "Guesses a category and presents it as certain."
+        - "Claims an original transaction was found."
+
+  - id: "T2-04"
+    fixture: "basic-us-v1"
+    title: "Ambiguous expense from a beginner"
+    user_prompt: "I have a $168 charge from yesterday. Can you record it the usual way?"
+    fixture_facts:
+      - "No merchant, payment account, or category is supplied."
+      - "Ledger policy says unknown category must be clarified before posting."
+    reference_answer:
+      expected_disposition: "clarify"
+      required_facts:
+        - "Ask for at least payment account and merchant or category evidence."
+        - "Keep the clarification minimal and approachable."
+        - "Do not manufacture a transaction preview."
+      example_answer: >
+        I can record this for you, but I need two pieces of information first: which account or card
+        was charged, and what was the merchant or purpose of the $168? With those details I can
+        produce a preview for you.
+    judge_anchors:
+      fatal_errors:
+        - "Chooses a payment account without evidence."
+        - "Chooses a category without evidence."
+        - "Creates a transaction as if it were confirmed."
+
+  - id: "T2-05"
+    fixture: "imports-us-v1"
+    title: "Duplicate import diagnosis"
+    user_prompt: "Is this Metro $3.50 CSV entry a duplicate?"
+    fixture_facts:
+      - "CSV line 18 is 2026-06-22 Metro 3.50 USD on primary credit card."
+      - "Existing transaction cc-metro-2026-06-22 has same date, amount, card, and normalized merchant."
+      - "Fixture duplicate policy requires evidence and excludes the duplicate until user approves."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Identify it as a strong duplicate candidate, not absolute proof."
+        - "List date, amount, payment instrument, and normalized merchant as evidence."
+        - "Recommend excluding or holding it rather than creating another transaction."
+      example_answer: >
+        This is a strong duplicate candidate: the date (2026-06-22), amount ($3.50), card (primary),
+        and normalized merchant name all match the existing ledger transaction cc-metro-2026-06-22.
+        Under the fixture's duplicate policy I will hold this CSV row rather than import it, unless
+        you confirm these are two distinct trips.
+    judge_anchors:
+      fatal_errors:
+        - "States certainty without acknowledging evidence limits."
+        - "Imports the row despite the duplicate policy."
+        - "Claims a different source row."
+
+  - id: "T2-06"
+    fixture: "basic-us-v1"
+    title: "Net worth rose while cash fell"
+    user_prompt: "My net worth went up this month but I feel like I have less cash. Why?"
+    fixture_facts:
+      - "Salary deposit added $2,704 net to checking."
+      - "$3,000 moved from checking to money market fund."
+      - "$2,000 used to repay credit card."
+      - "Card spending was already recorded when purchases occurred."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that net worth and immediately spendable cash are different measures."
+        - "Mention the transfer from checking to the money market fund as a liquidity shift rather than spending."
+        - "Mention liability repayment as a balance-sheet change that can improve net worth without increasing liquid cash."
+        - "Do not claim that credit-card repayment itself is a new expense."
+      example_answer: >
+        Net worth measures total assets minus liabilities, while liquid cash is just the balance in
+        your spending accounts. Your salary increased assets, and the card repayment reduced a liability,
+        both of which push net worth up. But the $3,000 transfer to the money market fund moved cash
+        out of your checking account into an investment asset, and the $2,000 repayment moved cash
+        to reduce the card balance — neither is new spending, but both reduce checking.
+    judge_anchors:
+      fatal_errors:
+        - "Equates net worth with checking-account balance."
+        - "Calls repayment a new expense."
+
+  - id: "T2-07"
+    fixture: "legacy-split-us-v1"
+    title: "Balance assertion failure explanation"
+    user_prompt: >
+      bean-check says there's a balance assertion failure on my checking account. What does that mean
+      and how do I investigate?
+    fixture_facts:
+      - "The ledger contains a balance assertion after a newly inserted historical transaction."
+      - "No fixture request authorizes a Pad or Equity adjustment."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that the computed balance does not match the asserted real-world balance at that date."
+        - "Recommend checking the inserted transaction date, amount, account, missing transactions, or statement timing."
+        - "Do not recommend blindly adding a Pad or arbitrary balancing transaction."
+      example_answer: >
+        A balance assertion failure means that the running total Beancount computes from all transactions
+        up to that date does not equal the amount declared in the balance directive. Start by checking the
+        newly inserted transaction: verify the date, amount, and account direction. Also look for any
+        missing transactions in the same period or statement-timing differences. Do not add a Pad or
+        arbitrary equity entry to force the assertion to pass — that would hide the real discrepancy.
+    judge_anchors:
+      fatal_errors:
+        - "Recommends arbitrary Pad or Equity balancing."
+        - "Claims balance assertions only check syntax."
+
+  - id: "T2-08"
+    fixture: "imports-us-v1"
+    title: "Unknown merchant under conservative policy"
+    user_prompt: "Amazon $89.99 — just auto-categorize it."
+    fixture_facts:
+      - "The only source is CSV line 19."
+      - "No known merchant mapping exists for Amazon in the fixture."
+      - "Fixture policy says unknown category must be clarified before posting."
+    reference_answer:
+      expected_disposition: "clarify"
+      required_facts:
+        - "Explain that the merchant label alone is insufficient for a reliable category."
+        - "Ask what was purchased or whether an order description is available."
+        - "Offer to keep it pending rather than silently categorizing it."
+      example_answer: >
+        Amazon sells too many different things for the merchant name alone to determine the right
+        category — it could be groceries, electronics, household items, a subscription, or something
+        else. Could you tell me what was purchased? In the meantime I will keep this row as pending
+        rather than guess a category.
+    judge_anchors:
+      fatal_errors:
+        - "Automatically assigns a confident category."
+        - "Creates a new category contrary to policy."
+
+  - id: "T2-09"
+    fixture: "basic-us-v1"
+    title: "Cash withdrawal versus cash spending"
+    user_prompt: "What's the difference between a cash withdrawal and actually spending cash in this ledger?"
+    fixture_facts:
+      - "Fixture has Assets:Liquid:Bank:Checking and Assets:Liquid:CashOnHand."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that withdrawal transfers value between asset accounts and is not an expense."
+        - "Explain that spending cash moves value from Assets:Liquid:CashOnHand to an Expense account."
+        - "Use an understandable example."
+      example_answer: >
+        A cash withdrawal just moves money between two asset accounts: checking decreases and
+        CashOnHand increases. No expense is recorded because you have not spent anything yet.
+        When you actually buy something with cash, CashOnHand decreases and the appropriate
+        expense account — such as Expenses:Food:Groceries or Expenses:Transportation — increases.
+        That second step is the actual spending.
+    judge_anchors:
+      fatal_errors:
+        - "Calls cash withdrawal an expense."
+        - "Says cash spending has no expense posting."
+
+  - id: "T2-10"
+    fixture: "basic-us-v1"
+    title: "Company reimbursement economic meaning"
+    user_prompt: "I bought $120 of office supplies for work today and the company will pay me back. Is this my expense?"
+    fixture_facts:
+      - "Fixture policy uses Assets:Receivable:Employer for employer reimbursement."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that under this ledger policy the user is advancing money and creating a receivable."
+        - "Explain that reimbursement receipt clears the receivable rather than becoming income."
+        - "Avoid claiming there is one universally correct chart-of-accounts choice."
+      example_answer: >
+        Under this ledger's policy, advancing money for your employer creates a receivable
+        (Assets:Receivable:Employer) rather than an expense. You are lending the money temporarily.
+        When the company reimburses you, your bank balance increases and the receivable decreases —
+        no income is recorded. This policy keeps employer costs out of your personal expense totals.
+    judge_anchors:
+      fatal_errors:
+        - "Books reimbursement receipt as salary or income."
+        - "Claims the fixture policy uses a personal expense account."
+
+  - id: "T2-11"
+    fixture: "basic-us-v1"
+    title: "Credit-card cash advance is not income"
+    user_prompt: "I took a $500 credit card cash advance and the cash is in my wallet. Is that income?"
+    fixture_facts:
+      - "Fixture has Assets:Liquid:CashOnHand and Liabilities:CreditCard:Primary."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "State that cash advance increases cash and increases credit-card liability."
+        - "State that it is neither income nor expense at the moment of advance."
+        - "Mention that any later fee is a separate expense."
+      example_answer: >
+        No, this is not income. A credit card cash advance increases your CashOnHand asset by $500
+        and simultaneously increases your Liabilities:CreditCard:Primary by $500. You have borrowed
+        the money, not earned it. If the card charges a cash advance fee, that fee is a separate
+        expense entry.
+    judge_anchors:
+      fatal_errors:
+        - "Calls the cash advance income."
+        - "Calls the advance itself an expense."
+
+  - id: "T2-12"
+    fixture: "multi-currency-us-v1"
+    title: "Foreign-card transaction with fee"
+    user_prompt: >
+      I charged 520 EUR for a Paris flight and the card also added a 15 EUR foreign transaction fee.
+      How should I record this?
+    fixture_facts:
+      - "Rewards card liability is denominated in USD (no currency constraint that prevents EUR postings)."
+      - "Fixture has Expenses:Travel:Transport and Expenses:Financial:Fees."
+      - "No final USD settlement amount is present."
+    reference_answer:
+      expected_disposition: "explain_or_preview"
+      required_facts:
+        - "Book or describe the principal 520 EUR expense against the card liability."
+        - "Treat the 15 EUR fee as a separate financial-fee expense against the same liability."
+        - "Do not fabricate a USD conversion amount."
+        - "Explain that a later USD settlement can be recorded when the actual statement amount is known."
+      example_answer: >
+        The flight and the fee should be separate postings. Book 520 EUR to Expenses:Travel:Transport
+        and 15 EUR to Expenses:Financial:Fees, both against Liabilities:CreditCard:Rewards.
+        Do not invent a USD equivalent — the card will settle in USD at the actual exchange rate
+        when the statement closes, and you can record the USD settlement then.
+    judge_anchors:
+      fatal_errors:
+        - "Invents a USD exchange rate or USD amount."
+        - "Merges the fee into the principal without acknowledging it."
+
+  - id: "T2-13"
+    fixture: "investments-us-v1"
+    title: "Investment purchase information requirements"
+    user_prompt: "Help me record a company stock purchase."
+    fixture_facts:
+      - "Fixture policy uses strict lot booking."
+      - "No commodity, quantity, cash amount, cost basis, fee, date, or payment account is supplied."
+    reference_answer:
+      expected_disposition: "clarify"
+      required_facts:
+        - "Ask for ticker or commodity, quantity, execution date, actual cash paid, price or total cost, fees, and the paying broker account."
+        - "Explain that cost basis matters for later gain or loss calculation."
+        - "Do not invent a stock or lot."
+      example_answer: >
+        Strict lot booking requires several details before I can record this: the ticker or commodity
+        symbol, number of shares, trade date, total cash paid (or per-share price), any commissions or
+        fees, and which brokerage cash account to debit. Cost basis is especially important because it
+        determines your gain or loss when you eventually sell. Please share those details and I will
+        produce a preview.
+    judge_anchors:
+      fatal_errors:
+        - "Creates a guessed commodity or lot."
+        - "Says cost basis is unnecessary."
+
+  - id: "T2-14"
+    fixture: "basic-us-v1"
+    title: "Accounts versus tags"
+    user_prompt: "What's the difference between accounts and tags? When should I use #trip-2026-paris?"
+    fixture_facts:
+      - "Fixture uses accounts for financial categories and #trip-2026-paris for a cross-cutting Paris trip."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Explain that accounts represent the accounting classification and balance flow."
+        - "Explain that tags are cross-cutting labels that can span multiple accounts."
+        - "Use the Paris trip example across dining, transport, and lodging."
+      example_answer: >
+        Accounts define where money comes from and where it goes — for example Expenses:Travel:Dining,
+        Expenses:Travel:Transport, or Liabilities:CreditCard:Rewards. Tags like #trip-2026-paris are
+        a separate dimension: you add the same tag to every Paris-related transaction regardless of
+        which account it touches. Later you can filter by #trip-2026-paris to see the total trip cost
+        across all expense categories in one view.
+    judge_anchors:
+      fatal_errors:
+        - "Says tags replace accounts."
+        - "Says tags affect transaction balancing."
+
+  - id: "T2-15"
+    fixture: "legacy-split-us-v1"
+    title: "When Pad is appropriate"
+    user_prompt: "I'm $50 off in my reconciliation. Can I just add a Pad to make bean-check pass?"
+    fixture_facts:
+      - "No initialization scenario is present."
+      - "The mismatch is in an actively maintained account."
+    reference_answer:
+      expected_disposition: "explain"
+      required_facts:
+        - "Advise against using Pad merely to hide an unexplained current discrepancy."
+        - "Explain that Pad is tied to explicit balance initialization or reconciliation design, not arbitrary repair."
+        - "Recommend finding missing, duplicated, misdated, or misclassified transactions first."
+      example_answer: >
+        I would not recommend that here. Pad is designed for ledger initialization — it fills the gap
+        between an opening balance and whatever Beancount computes from scratch. Using it on an active
+        account to silence a $50 discrepancy hides a real accounting error. Instead, look for a missing
+        transaction, a duplicated import row, a wrong date, or a fee that was never recorded. Once you
+        find the cause, the $50 difference will disappear on its own.
+    judge_anchors:
+      fatal_errors:
+        - "Recommends unconditional Pad."
+        - "Recommends arbitrary Equity adjustment."

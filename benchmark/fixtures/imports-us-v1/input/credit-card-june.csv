@@ -1,0 +1,4 @@
+line,date,merchant,amount,currency,payment_instrument
+17,2026-06-22,Starbucks,6.50,USD,PRIMARY_CREDIT_CARD
+18,2026-06-22,Metro,3.50,USD,PRIMARY_CREDIT_CARD
+19,2026-06-22,Amazon,89.99,USD,PRIMARY_CREDIT_CARD

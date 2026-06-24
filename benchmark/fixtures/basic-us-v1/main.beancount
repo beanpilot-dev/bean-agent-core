@@ -1,0 +1,84 @@
+option "title" "BeanBench basic-us-v1 fixture"
+option "operating_currency" "USD"
+
+include "data/agent_inc/2026-06.beancount"
+
+; ── Commodities ───────────────────────────────────────────────────
+1970-01-01 commodity USD
+
+; ── Assets ───────────────────────────────────────────────────────
+2026-01-01 open Assets:Liquid:Bank:Checking         USD
+2026-01-01 open Assets:Liquid:Bank:Savings          USD
+2026-01-01 open Assets:Liquid:CashOnHand            USD
+2026-01-01 open Assets:Liquid:Invest:MoneyFund      USD
+2026-01-01 open Assets:Retirement:401k:Employee     USD
+2026-01-01 open Assets:Retirement:401k:Employer     USD
+2026-01-01 open Assets:Retirement:IRA:Roth          USD
+2026-01-01 open Assets:Health:HSA                   USD
+2026-01-01 open Assets:Receivable:Employer          USD
+2026-01-01 open Assets:Receivable:Alice             USD
+2026-01-01 open Assets:Receivable:Bob               USD
+
+; ── Liabilities ──────────────────────────────────────────────────
+2026-01-01 open Liabilities:CreditCard:Primary      USD
+2026-01-01 open Liabilities:CreditCard:Rewards      USD
+2026-01-01 open Liabilities:Loan:AutoLoan           USD
+2026-01-01 open Liabilities:Loan:Mortgage           USD
+
+; ── Income ───────────────────────────────────────────────────────
+2020-01-01 open Income:Active:Salary                USD
+2020-01-01 open Income:Active:Bonus                 USD
+2020-01-01 open Income:Active:TaxRefund             USD
+2020-01-01 open Income:Passive:Interest             USD
+2020-01-01 open Income:Passive:Dividend             USD
+2026-01-01 open Income:Retire:401kMatch             USD
+
+; ── Expenses ─────────────────────────────────────────────────────
+2026-01-01 open Expenses:Food:Groceries             USD
+2026-01-01 open Expenses:Food:Dining                USD
+2026-01-01 open Expenses:Food:Coffee                USD
+2026-01-01 open Expenses:Housing:Rent               USD
+2026-01-01 open Expenses:Housing:Mortgage:Interest  USD
+2026-01-01 open Expenses:Utilities:Electric         USD
+2026-01-01 open Expenses:Utilities:Internet         USD
+2026-01-01 open Expenses:Utilities:Water            USD
+2026-01-01 open Expenses:Transportation             USD
+2026-01-01 open Expenses:Vehicle:Gas                USD
+2026-01-01 open Expenses:Vehicle                    USD
+2026-01-01 open Expenses:Subscriptions              USD
+2026-01-01 open Expenses:Medical                    USD
+2026-01-01 open Expenses:Insurance:Health           USD
+2026-01-01 open Expenses:Tax:Federal                USD
+2026-01-01 open Expenses:Tax:State                  USD
+2026-01-01 open Expenses:Tax:FICA                   USD
+2026-01-01 open Expenses:Shopping:Household         USD
+2026-01-01 open Expenses:Shopping:Electronics       USD
+2026-01-01 open Expenses:Work:Equipment             USD
+2026-01-01 open Expenses:Gifts                      USD
+2026-01-01 open Expenses:Charity                    USD
+2026-01-01 open Expenses:Financial:BankFees         USD
+2026-01-01 open Expenses:Financial:CardFees         USD
+
+; ── Equity ───────────────────────────────────────────────────────
+2026-01-01 open Equity:Opening-Balances
+
+; ── Opening balances ─────────────────────────────────────────────
+2026-06-01 * "Opening" "Fixture balances for BeanBench"
+  Assets:Liquid:Bank:Checking        8500.00 USD
+  Assets:Liquid:Bank:Savings         5000.00 USD
+  Assets:Liquid:CashOnHand            300.00 USD
+  Assets:Liquid:Invest:MoneyFund    12000.00 USD
+  Assets:Retirement:401k:Employee    3200.00 USD
+  Assets:Retirement:401k:Employer    1600.00 USD
+  Assets:Retirement:IRA:Roth         2500.00 USD
+  Assets:Health:HSA                   800.00 USD
+  Assets:Receivable:Bob               300.00 USD
+  Liabilities:CreditCard:Primary    -1500.00 USD
+  Liabilities:Loan:AutoLoan        -10100.00 USD
+  Equity:Opening-Balances
+
+; ── Known reference entries ──────────────────────────────────────
+; Grocery purchase (for refund test T1-10)
+2026-06-01 * "Trader Joe's" "Weekly groceries"  ^orig-traderjoes-2026-06-01
+  Expenses:Food:Groceries             75.50 USD
+  Liabilities:CreditCard:Primary      -75.50 USD

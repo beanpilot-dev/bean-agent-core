@@ -1,0 +1,465 @@
+tier: "tier_3"
+name: "Ledger Stewardship"
+maximum_score: 48
+scoring:
+  points_per_case: 4
+  evaluator: "tier_3_llm_judge"
+intent: >
+  Verify that Agent-Core can preserve user intent across multiple turns, revise obsolete proposals, explain uncertainty, and end with a reviewable final preview.
+cases:
+  - id: "T3-01"
+    fixture: "basic-us-v1"
+    title: "Revise a grocery draft after discovering a shared portion"
+    turns:
+      - role: "user"
+        content: "I bought $75.50 of groceries at Trader Joe's on 2026-06-23, put it on my primary card."
+      - role: "user"
+        content: "Actually, $20 of that was for a coworker who'll pay me back."
+      - role: "user"
+        content: "Yes, use that version. Give me the final preview, don't record it."
+    reference_progress:
+      - >
+        First response should propose a normal grocery purchase or ask no unnecessary question
+        because date, merchant, amount, and payment account are complete.
+      - >
+        Second response must replace the earlier pure-expense proposal rather than append a second
+        transaction. It must recognize a receivable from the coworker.
+      - >
+        Final response must contain one final Beancount preview only.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Trader Joe's" "groceries, shared portion" #shared
+          Expenses:Food:Groceries          55.50 USD
+          Assets:Receivable:Alice          20.00 USD
+          Liabilities:CreditCard:Primary  -75.50 USD
+      accepted_variation:
+        - "A fixture-authorized named colleague receivable account (Alice or Bob) may be used."
+        - "Narration wording may vary."
+    judge_anchors:
+      required_facts:
+        - "Final own grocery expense is 55.50 USD."
+        - "Final receivable is 20.00 USD."
+        - "Final card liability is -75.50 USD."
+        - "There is no remaining obsolete 75.50-only grocery proposal."
+        - "No commit or fixture mutation occurs."
+      fatal_errors:
+        - "Leaves both a 75.50 grocery entry and a corrected entry."
+
+  - id: "T3-02"
+    fixture: "imports-us-v1"
+    title: "Partial CSV import with duplicate and unknown merchant"
+    turns:
+      - role: "user"
+        content: "Import input/credit-card-june.csv for me."
+      - role: "user"
+        content: "Metro is a duplicate, skip it. Starbucks is coffee."
+      - role: "user"
+        content: "Amazon I'm not sure about, hold it. Give me the final preview."
+    reference_progress:
+      - >
+        First response should inspect available rows and identify the Metro duplicate candidate
+        plus the unknown Amazon category rather than blindly importing all rows.
+      - >
+        Second response should retain the duplicate exclusion and accept Starbucks as coffee.
+      - >
+        Third response should produce only the approved Starbucks preview.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-22 * "Starbucks" "coffee" #imported
+          source: "csv:credit-card-june.csv:17"
+          Expenses:Food:Coffee              6.50 USD
+          Liabilities:CreditCard:Primary   -6.50 USD
+      omitted_items:
+        - "Metro CSV row 18 is excluded as duplicate candidate."
+        - "Amazon CSV row 19 remains pending and is not included."
+    judge_anchors:
+      required_facts:
+        - "Only Starbucks is in the final preview."
+        - "Metro is excluded because of duplicate evidence."
+        - "Amazon remains pending, not guessed."
+        - "Source metadata and imported tag are present."
+      fatal_errors:
+        - "Imports Metro despite user instruction."
+        - "Imports or categorizes Amazon despite user instruction."
+        - "Drops source provenance."
+
+  - id: "T3-03"
+    fixture: "basic-us-v1"
+    title: "Beginner onboarding to first payroll entry"
+    turns:
+      - role: "user"
+        content: "I'm new to Beancount. I want to record my paycheck. Can you walk me through it?"
+      - role: "user"
+        content: "My paycheck is direct deposited to checking. Gross $4,000, federal $480, state $160, FICA $306, health $150, 401k $200, net $2,704."
+      - role: "user"
+        content: "Date is 2026-06-23. Give me a preview, don't record it."
+    reference_progress:
+      - >
+        First response should explain only the minimum needed concepts: money arrives in an asset
+        account, salary is income, and withheld amounts can be recorded as expenses or asset
+        contributions under this fixture policy.
+      - >
+        It should not overwhelm the user with investments, price directives, Git workflow, or
+        unrelated advanced concepts.
+      - >
+        After the second and third turns, it should produce a balanced payroll preview.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Employer" "biweekly payroll"
+          Assets:Liquid:Bank:Checking      2704.00 USD
+          Expenses:Tax:Federal              480.00 USD
+          Expenses:Tax:State                160.00 USD
+          Expenses:Tax:FICA                 306.00 USD
+          Expenses:Insurance:Health         150.00 USD
+          Assets:Retirement:401k:Employee   200.00 USD
+          Income:Active:Salary            -4000.00 USD
+    judge_anchors:
+      required_facts:
+        - "Use the checking account for the net deposit."
+        - "Explain enough accounting context for a beginner."
+        - "Use the correct payroll split with all seven postings."
+        - "Do not pretend the entry has already been written."
+      fatal_errors:
+        - "Creates a transaction before user provides amounts."
+        - "Books net salary and gross salary as separate income."
+        - "Omits a withholding while still claiming the preview balances."
+
+  - id: "T3-04"
+    fixture: "legacy-split-us-v1"
+    title: "Correct a historical import without rewriting it"
+    turns:
+      - role: "user"
+        content: "The June 5 Apple MacBook $1,299 purchase is a work device, not personal electronics."
+      - role: "user"
+        content: "Yes it's in legacy/2026-06-import.beancount. I don't want to change that file."
+      - role: "user"
+        content: "Use a current-period adjustment entry. Give me the preview."
+    reference_progress:
+      - >
+        The agent should identify the historical classification and respect the read-only legacy policy.
+      - >
+        It should create a current-period reclassification adjustment in agent_inc rather than editing
+        the original transaction.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Reclassify Apple purchase" "work device correction"
+          Expenses:Work:Equipment          1299.00 USD
+          Expenses:Shopping:Electronics   -1299.00 USD
+          adjustment_for: "legacy-apple-2026-06-05"
+    judge_anchors:
+      required_facts:
+        - "No change is proposed to legacy/2026-06-import.beancount."
+        - "The adjustment increases Expenses:Work:Equipment by 1299.00 USD."
+        - "The adjustment reverses Expenses:Shopping:Electronics by 1299.00 USD."
+        - "The adjustment references the original transaction."
+      fatal_errors:
+        - "Edits the legacy transaction."
+        - "Changes the credit-card liability."
+        - "Creates new income, asset, or equity postings."
+
+  - id: "T3-05"
+    fixture: "multi-currency-us-v1"
+    title: "Shared EUR dinner and repayment"
+    turns:
+      - role: "user"
+        content: "Last night at dinner in Paris, 96 EUR total on my rewards card. Alice owes 36 EUR."
+      - role: "user"
+        content: "Yes, tag it trip-2026-paris."
+      - role: "user"
+        content: "Alice just PayPal'd me 36 EUR. Give me both previews, don't record."
+    reference_progress:
+      - >
+        First proposal must separate the user's 60 EUR dining expense from Alice's 36 EUR receivable
+        while recording the full 96 EUR card liability.
+      - >
+        Later repayment must reduce Alice's receivable and increase the relevant EUR asset account.
+        It must not become income.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-22 * "dinner" "shared with Alice" #shared #trip-2026-paris
+          Expenses:Travel:Dining            60.00 EUR
+          Assets:Receivable:Alice           36.00 EUR
+          Liabilities:CreditCard:Rewards   -96.00 EUR
+
+        2026-06-23 * "Alice" "Paris dinner repayment"
+          Assets:Cash:EUR                   36.00 EUR
+          Assets:Receivable:Alice          -36.00 EUR
+      accepted_variation:
+        - "If the EUR cash account is named differently in the fixture, a semantic equivalent is accepted."
+    judge_anchors:
+      required_facts:
+        - "Own dining share is 60.00 EUR."
+        - "Alice receivable is created for 36.00 EUR and later cleared."
+        - "Rewards card liability is -96.00 EUR."
+        - "Both shared and trip-2026-paris tags appear on the initial expense."
+        - "Repayment is not income."
+      fatal_errors:
+        - "Books all 96 EUR as personal expense."
+        - "Books Alice repayment as income."
+        - "Forgets or duplicates the receivable."
+
+  - id: "T3-06"
+    fixture: "basic-us-v1"
+    title: "Clarify an unknown transaction before proposing"
+    turns:
+      - role: "user"
+        content: "I have a $268 charge from yesterday I need to add."
+      - role: "user"
+        content: "It's from my primary credit card. Merchant shows IKEA."
+      - role: "user"
+        content: "I bought storage bins. Record it as household supplies please."
+    reference_progress:
+      - >
+        First response should ask for missing payment account and merchant or use.
+      - >
+        Second response may still ask for purpose or category because IKEA can cover multiple
+        categories under the conservative fixture policy.
+      - >
+        Third response should produce one household purchase preview.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-22 * "IKEA" "storage bins"
+          Expenses:Shopping:Household     268.00 USD
+          Liabilities:CreditCard:Primary -268.00 USD
+    judge_anchors:
+      required_facts:
+        - "No transaction preview before enough information is supplied."
+        - "Final category is household supplies."
+        - "Final payment account is primary credit card."
+        - "Only one final proposal exists."
+      fatal_errors:
+        - "Guesses an account or category in the first turn."
+        - "Keeps a preliminary obsolete transaction."
+        - "Uses checking account instead of credit card."
+
+  - id: "T3-07"
+    fixture: "basic-us-v1"
+    title: "Help a novice distinguish a refund from card repayment"
+    turns:
+      - role: "user"
+        content: "My credit card statement shows +$75.50 — is that income?"
+      - role: "user"
+        content: "It's a Trader Joe's refund for my June 1 groceries."
+      - role: "user"
+        content: "OK, show me the correct preview."
+    reference_progress:
+      - >
+        First response should ask what the +$75.50 represents or explain that a positive card
+        statement movement is not automatically income.
+      - >
+        Second response should connect it to the known grocery purchase and explain that it
+        reverses the original expense while reducing card liability.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Trader Joe's" "refund" ^orig-traderjoes-2026-06-01
+          Expenses:Food:Groceries         -75.50 USD
+          Liabilities:CreditCard:Primary   75.50 USD
+    judge_anchors:
+      required_facts:
+        - "Explain that the refund is not income."
+        - "Reverse the grocery expense."
+        - "Increase the credit-card liability balance toward zero by 75.50 USD."
+        - "Link to original grocery transaction."
+      fatal_errors:
+        - "Books income."
+        - "Treats it as a bank repayment from checking."
+        - "Fails to update the card liability."
+
+  - id: "T3-08"
+    fixture: "basic-us-v1"
+    title: "Replace a mistaken payroll draft"
+    turns:
+      - role: "user"
+        content: "Record June payroll: gross $4,000, net $2,704 to checking."
+      - role: "user"
+        content: "Withholdings are: federal $480, state $160, FICA $306, health $150, 401k $200."
+      - role: "user"
+        content: "Amounts are right. Give me the final payroll preview."
+    reference_progress:
+      - >
+        The first response should either ask for withholding detail or produce a clearly provisional
+        draft that states the unknown allocation.
+      - >
+        The second response must replace any incomplete draft with the complete payroll split.
+      - >
+        The final response must show only the correct complete payroll transaction.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Employer" "biweekly payroll"
+          Assets:Liquid:Bank:Checking      2704.00 USD
+          Expenses:Tax:Federal              480.00 USD
+          Expenses:Tax:State                160.00 USD
+          Expenses:Tax:FICA                 306.00 USD
+          Expenses:Insurance:Health         150.00 USD
+          Assets:Retirement:401k:Employee   200.00 USD
+          Income:Active:Salary            -4000.00 USD
+    judge_anchors:
+      required_facts:
+        - "Final proposal contains seven balanced postings."
+        - "No duplicate earlier payroll transaction remains."
+        - "The agent acknowledges that gross and net alone do not specify withholding categories."
+      fatal_errors:
+        - "Creates two payroll transactions."
+        - "Books 2704 and 4000 as separate income."
+        - "Uses an arbitrary balancing posting."
+
+  - id: "T3-09"
+    fixture: "investments-us-v1"
+    title: "Investment trade, dividend, and cautious sale workflow"
+    turns:
+      - role: "user"
+        content: "I bought 2 VTI at $250 each at IBKR, paid from IBKR cash."
+      - role: "user"
+        content: "There was also an $8.50 VTI dividend that day."
+      - role: "user"
+        content: "I also sold 1 share at $260. Give me all three previews."
+    reference_progress:
+      - >
+        First response should create a lot with 250 USD cost basis and reduce IBKR cash.
+      - >
+        Second response should add dividend income separately.
+      - >
+        Third response should sell one share from the known lot and recognize 10 USD gain.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "IBKR" "buy VTI" #invest
+          Assets:Investments:IBKR:VTI       2 VTI {250.00 USD}
+          Assets:Investments:IBKR:Cash   -500.00 USD
+
+        2026-06-23 * "VTI" "dividend" #invest
+          Assets:Investments:IBKR:Cash       8.50 USD
+          Income:Investments:Dividends      -8.50 USD
+
+        2026-06-23 * "IBKR" "sell VTI" #invest
+          Assets:Investments:IBKR:VTI      -1 VTI {250.00 USD} @ 260.00 USD
+          Assets:Investments:IBKR:Cash    260.00 USD
+          Income:Investments:CapitalGains -10.00 USD
+    judge_anchors:
+      required_facts:
+        - "Purchase uses a 250 USD cost basis."
+        - "Dividend is separate investment income."
+        - "Sale consumes one lot and recognizes 10 USD gain."
+        - "Final output contains three distinct but non-duplicated entries."
+      fatal_errors:
+        - "Books sale proceeds entirely as income."
+        - "Omits cost basis."
+        - "Uses a fabricated lot or price."
+        - "Conflates dividend with sale proceeds."
+
+  - id: "T3-10"
+    fixture: "imports-us-v1"
+    title: "Reconciliation discrepancy after import review"
+    turns:
+      - role: "user"
+        content: "After importing the CSV, my ledger is $50 short of my statement. Just balance it."
+      - role: "user"
+        content: "I checked — there's a $50 annual fee charged June 21 on the primary card."
+      - role: "user"
+        content: "Record only that annual fee please."
+    reference_progress:
+      - >
+        First response must reject arbitrary balancing and request evidence for the missing
+        economic event.
+      - >
+        After the user identifies a real annual fee, the agent should record only that fee.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-21 * "Primary Credit Card" "annual fee"
+          Expenses:Financial:CardFees       50.00 USD
+          Liabilities:CreditCard:Primary   -50.00 USD
+    judge_anchors:
+      required_facts:
+        - "First response does not use Pad, Equity, or a fabricated balancing transaction."
+        - "Final response records a real card-fee expense."
+        - "Final response increases credit-card liability by 50.00 USD."
+        - "Only the identified annual fee appears."
+      fatal_errors:
+        - "Adds arbitrary balancing entry in first turn."
+        - "Records annual fee as transfer or income."
+        - "Changes historical entries unrelated to the fee."
+
+  - id: "T3-11"
+    fixture: "basic-us-v1"
+    title: "Clarify payroll withholdings before recording"
+    turns:
+      - role: "user"
+        content: "Record my paycheck: gross $4,000, deposited $2,704 to checking."
+      - role: "user"
+        content: "Withholdings are: federal $480, state $160, FICA $306, health insurance premium $150, and 401k contribution $200."
+      - role: "user"
+        content: "That's right. Show me the final preview."
+    reference_progress:
+      - >
+        First response should either ask for the withholding breakdown or produce a provisional draft
+        noting the unknown allocation of the $1,296 gap between gross and net.
+      - >
+        Second response must replace any incomplete draft with the complete payroll split.
+      - >
+        Final response shows one complete payroll transaction with all seven postings.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Employer" "biweekly payroll"
+          Assets:Liquid:Bank:Checking      2704.00 USD
+          Expenses:Tax:Federal              480.00 USD
+          Expenses:Tax:State                160.00 USD
+          Expenses:Tax:FICA                 306.00 USD
+          Expenses:Insurance:Health         150.00 USD
+          Assets:Retirement:401k:Employee   200.00 USD
+          Income:Active:Salary            -4000.00 USD
+    judge_anchors:
+      required_facts:
+        - "Final has seven balanced postings."
+        - "No duplicate earlier payroll transaction remains."
+        - "Gross-only first turn handled without guessing withholding categories."
+      fatal_errors:
+        - "Creates two payroll transactions."
+        - "Books 2704 and 4000 as separate income."
+        - "Uses an arbitrary balancing account."
+
+  - id: "T3-12"
+    fixture: "basic-us-v1"
+    title: "RSU vesting entry with clarified cost basis"
+    turns:
+      - role: "user"
+        content: "10 ACME-CORP shares vested today. How do I record that?"
+      - role: "user"
+        content: "The fair market value per share is $153.20 USD at vesting. They went into my ESPP brokerage account."
+      - role: "user"
+        content: "Yes, record it as income at today's FMV. Show me the preview."
+    reference_progress:
+      - >
+        First response should ask for FMV at vesting, number of shares, and destination account
+        before proposing anything.
+      - >
+        Second response confirms enough information and either asks about taxes or proposes the entry.
+      - >
+        Final preview records the vesting as income using the supplied FMV as cost basis.
+    final_reference_answer:
+      expected_disposition: "preview"
+      canonical_preview: |
+        2026-06-23 * "Employer" "RSU vesting — 10 ACME-CORP" #vest
+          Assets:Liquid:Invest:ESPP         10 ACME-CORP {153.20 USD}
+          Income:Active:Salary           -1532.00 USD
+      accepted_variation:
+        - "An income account for RSU or investment compensation may be used if present in the fixture."
+        - "The ESPP account path may vary if fixture setup uses a different authorized account."
+    judge_anchors:
+      required_facts:
+        - "FMV of 153.20 USD is used as cost basis per share."
+        - "Total vested value is 1532.00 USD credited to an income account."
+        - "No fabricated lot price."
+      fatal_errors:
+        - "Guesses FMV without asking."
+        - "Books vesting as a liability."
+        - "Creates phantom withholding without evidence."

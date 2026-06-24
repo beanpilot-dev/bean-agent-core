@@ -1,0 +1,23 @@
+option "title" "BeanBench imports-us-v1 fixture"
+option "operating_currency" "USD"
+
+include "data/agent_inc/2026-06.beancount"
+
+1970-01-01 commodity USD
+
+2026-01-01 open Assets:Liquid:Bank:Checking         USD
+2026-01-01 open Liabilities:CreditCard:Primary      USD
+2026-01-01 open Expenses:Food:Coffee                USD
+2026-01-01 open Expenses:Transportation             USD
+2026-01-01 open Expenses:Shopping:Household         USD
+2026-01-01 open Equity:Opening-Balances
+
+2026-06-01 * "Opening" "Imports fixture"
+  Assets:Liquid:Bank:Checking       3000.00 USD
+  Liabilities:CreditCard:Primary     -200.00 USD
+  Equity:Opening-Balances
+
+; Existing transaction that duplicates Metro CSV row (cc-metro-2026-06-22)
+2026-06-22 * "Metro" "Subway fare"  ; id: cc-metro-2026-06-22
+  Expenses:Transportation              3.50 USD
+  Liabilities:CreditCard:Primary       -3.50 USD

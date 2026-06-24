@@ -1,0 +1,24 @@
+option "title" "BeanBench investments-us-v1 fixture"
+option "operating_currency" "USD"
+option "booking_method" "STRICT"
+
+include "data/agent_inc/2026-06.beancount"
+
+1970-01-01 commodity USD
+1970-01-01 commodity VTI
+  name: "Vanguard Total Stock Market ETF"
+
+2026-01-01 open Assets:Investments:IBKR:Cash        USD
+2026-01-01 open Assets:Investments:IBKR:VTI         VTI
+2026-01-01 open Income:Investments:Dividends        USD
+2026-01-01 open Income:Investments:CapitalGains     USD
+2026-01-01 open Equity:Opening-Balances
+
+2026-06-01 * "Opening" "IBKR fixture balances"
+  Assets:Investments:IBKR:Cash       1500.00 USD
+  Equity:Opening-Balances
+
+; Known lot (acquired before benchmark period)
+2026-06-10 * "IBKR" "Initial VTI purchase" #invest
+  Assets:Investments:IBKR:VTI          2 VTI {250.00 USD}
+  Assets:Investments:IBKR:Cash        -500.00 USD
