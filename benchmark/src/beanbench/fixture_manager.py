@@ -51,7 +51,7 @@ def copy_fixture(fixture_dir: Path) -> Path:
     return temp_dir
 
 
-def _patch_env_local(agent_core_dir: Path, openai_base_url: str | None) -> str:
+def _patch_env_local(agent_core_dir: Path, openai_base_url: str | None, langfuse_enabled: bool = False) -> str:
     """Rewrite agent-core/.env.local to set AGENT_MODE=local.
 
     Returns the original content for later restoration.
@@ -64,12 +64,16 @@ def _patch_env_local(agent_core_dir: Path, openai_base_url: str | None) -> str:
 
     lines = []
     for line in original.splitlines():
-        if any(line.startswith(p) for p in ("AGENT_MODE=", "OPENAI_MODEL=", "OPENAI_BASE_URL=", "LANGFUSE")):
+        if any(line.startswith(p) for p in ("AGENT_MODE=", "OPENAI_MODEL=", "OPENAI_BASE_URL=")):
+            continue
+        if not langfuse_enabled and line.startswith("LANGFUSE"):
             continue
         lines.append(line)
     lines.append("AGENT_MODE=local")
     if openai_base_url:
         lines.append(f"OPENAI_BASE_URL={openai_base_url}")
+    if not langfuse_enabled:
+        lines.append("LANGFUSE_ENABLED=false")
     env_local.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return original
 
@@ -86,13 +90,14 @@ def _restore_env_local(agent_core_dir: Path, original: str) -> None:
 class _EnvLocalGuard:
     """Context manager that patches .env.local and restores on exit."""
 
-    def __init__(self, agent_core_dir: Path, openai_base_url: str | None):
+    def __init__(self, agent_core_dir: Path, openai_base_url: str | None, langfuse_enabled: bool = False):
         self._agent_core_dir = agent_core_dir
         self._original = ""
         self._openai_base_url = openai_base_url
+        self._langfuse_enabled = langfuse_enabled
 
     def __enter__(self):
-        self._original = _patch_env_local(self._agent_core_dir, self._openai_base_url)
+        self._original = _patch_env_local(self._agent_core_dir, self._openai_base_url, self._langfuse_enabled)
         return self
 
     def __exit__(self, *args):
@@ -166,6 +171,7 @@ def stop_agent_core(proc: subprocess.Popen) -> None:
 def fixture_context(
     fixture_dir: Path,
     env: dict[str, str] | None = None,
+    langfuse_enabled: bool = False,
 ):
     """Context manager: copy fixture, patch .env.local, start agent-core, yield (port, temp_path), cleanup."""
     port = _find_free_port()
@@ -174,7 +180,7 @@ def fixture_context(
     openai_base_url = (env or {}).get("OPENAI_BASE_URL")
     proc = None
     try:
-        with _EnvLocalGuard(agent_core_dir, openai_base_url):
+        with _EnvLocalGuard(agent_core_dir, openai_base_url, langfuse_enabled):
             proc = start_agent_core(temp_path, port, env)
             if not wait_ready(port):
                 stop_agent_core(proc)

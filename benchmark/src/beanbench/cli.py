@@ -67,6 +67,27 @@ def cli():
     help="Use LLM judge for tier 1 instead of deterministic evaluation",
 )
 @click.option(
+    "--langfuse-enabled",
+    is_flag=True,
+    default=False,
+    help="Enable Langfuse tracing in agent-core",
+)
+@click.option(
+    "--langfuse-public-key",
+    help="Langfuse public key",
+    envvar="LANGFUSE_PUBLIC_KEY",
+)
+@click.option(
+    "--langfuse-secret-key",
+    help="Langfuse secret key",
+    envvar="LANGFUSE_SECRET_KEY",
+)
+@click.option(
+    "--langfuse-base-url",
+    help="Langfuse base URL",
+    envvar="LANGFUSE_BASE_URL",
+)
+@click.option(
     "--tier",
     "tiers",
     multiple=True,
@@ -105,6 +126,10 @@ def run(**kwargs):
         judge_api_key=kwargs.pop("judge_api_key"),
         judge_base_url=kwargs.pop("judge_base_url"),
         judge_tier1=kwargs.pop("judge_tier1", False),
+        langfuse_enabled=kwargs.pop("langfuse_enabled", False),
+        langfuse_public_key=kwargs.pop("langfuse_public_key"),
+        langfuse_secret_key=kwargs.pop("langfuse_secret_key"),
+        langfuse_base_url=kwargs.pop("langfuse_base_url"),
         tiers=tiers,
         results_dir=results_dir,
     )

@@ -1,10 +1,11 @@
 """
-LLM tracing and observability via LangFuse (SDK v2, server v2).
+LLM tracing and observability via LangFuse SDK v4 (OTEL-native).
 
 Supports two modes, controlled by LANGFUSE_TRACE_LEVEL:
   - "full"     -> all LLM inputs/outputs and tool inputs/outputs are recorded
-  - "metadata" -> only token counts, timing, tool names, and error types are recorded
-                  (constraint #17 compliant — no financial data leakage)
+                  via the official langfuse.langchain.CallbackHandler
+  - "metadata" -> only the root trace span is recorded (no LLM/tool detail)
+                  constraint #17 compliant — no financial data leakage
 
 When LANGFUSE_ENABLED is "false" or LANGFUSE_SECRET_KEY is not set,
 all tracing operations are no-ops.
@@ -12,10 +13,8 @@ all tracing operations are no-ops.
 
 import logging
 import os
-import time
 from contextlib import contextmanager
 from typing import Any
-from uuid import UUID
 
 from langchain_core.callbacks.base import BaseCallbackHandler
 
@@ -32,9 +31,14 @@ def _read_env() -> dict:
         enabled = False
     else:
         enabled = True
+
+    base_url = os.environ.get("LANGFUSE_BASE_URL", "")
+    if not base_url:
+        base_url = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+
     return {
         "enabled": enabled and bool(secret),
-        "host": os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
+        "base_url": base_url,
         "public_key": os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         "secret_key": secret,
         "trace_level": os.environ.get("LANGFUSE_TRACE_LEVEL", "full"),
@@ -42,157 +46,11 @@ def _read_env() -> dict:
 
 
 class _NoopCallback(BaseCallbackHandler):
-    """Does nothing — used when tracing is disabled."""
-
-    @property
-    def last_trace_id(self) -> str | None:
-        return None
-
-
-_REDACTED = "[REDACTED — financial content]"
-
-
-class _LangfuseCallback(BaseCallbackHandler):
-    """Custom LangChain callback that records to a LangFuse SDK v2 trace.
-
-    Creates a span for the whole agent turn, generations for LLM calls,
-    and child spans for tool calls — all under the parent trace.
-    """
-
-    def __init__(
-        self,
-        trace: Any,
-        trace_level: str = "full",
-    ):
-        super().__init__()
-        self._trace = trace
-        self._trace_level = trace_level
-        self._turn_span: Any = None
-        self._generations: dict[UUID, Any] = {}
-        self._tool_spans: dict[UUID, Any] = {}
-        self._llm_timers: dict[UUID, float] = {}
-        self._tool_timers: dict[UUID, float] = {}
-        self.last_trace_id: str | None = trace.trace_id if hasattr(trace, "trace_id") else None
-
-    def _maybe_redact(self, value: Any) -> Any:
-        if self._trace_level == "full":
-            return value
-        if isinstance(value, str):
-            return _REDACTED
-        if isinstance(value, (list, tuple)):
-            return [_REDACTED] * len(value)
-        if isinstance(value, dict):
-            return {k: _REDACTED for k in value}
-        return _REDACTED
-
-    def _ensure_turn_span(self):
-        if self._turn_span is None:
-            self._turn_span = self._trace.span(name="agent-turn")
-
-    # -- Chain callbacks --
-
-    def on_chain_start(self, serialized, inputs, **kwargs):
-        self._ensure_turn_span()
-
-    def on_chain_end(self, outputs, **kwargs):
-        pass
-
-    def on_chain_error(self, error, **kwargs):
-        pass
-
-    # -- LLM callbacks --
-
-    def on_llm_start(self, serialized, prompts, **kwargs):
-        self._ensure_turn_span()
-        run_id = kwargs.get("run_id")
-        if run_id:
-            self._llm_timers[run_id] = time.monotonic()
-        model_name = (
-            serialized.get("name", "unknown")
-            if isinstance(serialized, dict)
-            else str(serialized)
-        )
-        gen = self._turn_span.generation(
-            name="ChatOpenAI",
-            model=model_name,
-            input=self._maybe_redact(prompts),
-        )
-        if run_id:
-            self._generations[run_id] = gen
-
-    def on_llm_end(self, response, **kwargs):
-        run_id = kwargs.get("run_id")
-        gen = self._generations.pop(run_id, None) if run_id else None
-        if gen is None:
-            return
-
-        usage = None
-        output = None
-        try:
-            llm_output = getattr(response, "llm_output", {}) or {}
-            token_usage = llm_output.get("token_usage", {}) or {}
-            if token_usage:
-                from langfuse.model import ModelUsage
-                usage = ModelUsage(
-                    prompt_tokens=token_usage.get("prompt_tokens", 0),
-                    completion_tokens=token_usage.get("completion_tokens", 0),
-                    total_tokens=token_usage.get("total_tokens", 0),
-                )
-
-            generations = getattr(response, "generations", None)
-            if generations and len(generations) > 0 and len(generations[0]) > 0:
-                msg = getattr(generations[0][0], "message", None)
-                if msg:
-                    output = self._maybe_redact(msg.content)
-                else:
-                    output = self._maybe_redact(str(generations[0][0].text))
-            else:
-                output = self._maybe_redact(str(response))
-        except Exception:
-            output = self._maybe_redact(str(response))
-
-        gen.end(output=output, usage=usage)
-
-    def on_llm_error(self, error, **kwargs):
-        run_id = kwargs.get("run_id")
-        gen = self._generations.pop(run_id, None) if run_id else None
-        if gen:
-            gen.end(level="ERROR", status_message=str(error))
-
-    # -- Tool callbacks --
-
-    def on_tool_start(self, serialized, input_str, **kwargs):
-        self._ensure_turn_span()
-        run_id = kwargs.get("run_id")
-        if run_id:
-            self._tool_timers[run_id] = time.monotonic()
-        tool_name = (
-            serialized.get("name", "unknown")
-            if isinstance(serialized, dict)
-            else str(serialized)
-        )
-        span = self._turn_span.span(
-            name=tool_name,
-            input=self._maybe_redact(input_str),
-        )
-        if run_id:
-            self._tool_spans[run_id] = span
-
-    def on_tool_end(self, output, **kwargs):
-        run_id = kwargs.get("run_id")
-        span = self._tool_spans.pop(run_id, None) if run_id else None
-        if span:
-            span.end(output=self._maybe_redact(output))
-
-    def on_tool_error(self, error, **kwargs):
-        run_id = kwargs.get("run_id")
-        span = self._tool_spans.pop(run_id, None) if run_id else None
-        if span:
-            span.end(level="ERROR", status_message=str(error))
+    """Does nothing — used when trace_level=metadata (root span only)."""
 
 
 class TracingManager:
-    """Manages LangFuse tracing for agent runs (SDK v2 compatible).
+    """Manages LangFuse tracing for agent runs (SDK v4, OTEL-native).
 
     Usage:
         manager = TracingManager()
@@ -208,25 +66,27 @@ class TracingManager:
     def __init__(self):
         self._config = _read_env()
         self._client: Any = None
-        self._trace: Any = None
-        self._handler: _LangfuseCallback | _NoopCallback | None = None
+        self._root_span: Any = None
         self._trace_id: str | None = None
 
         if self._config["enabled"]:
             try:
                 from langfuse import Langfuse
+
                 self._client = Langfuse(
                     public_key=self._config["public_key"],
                     secret_key=self._config["secret_key"],
-                    host=self._config["host"],
+                    base_url=self._config["base_url"],
                 )
                 logger.info(
-                    "LangFuse tracing enabled (host=%s, level=%s)",
-                    self._config["host"],
+                    "LangFuse tracing enabled (base_url=%s, level=%s)",
+                    self._config["base_url"],
                     self._config["trace_level"],
                 )
             except Exception as e:
-                logger.warning("Failed to initialize LangFuse: %s — tracing disabled", e)
+                logger.warning(
+                    "Failed to initialize LangFuse: %s — tracing disabled", e
+                )
 
     @property
     def enabled(self) -> bool:
@@ -237,18 +97,15 @@ class TracingManager:
         return self._config["trace_level"]
 
     def get_trace_id(self) -> str | None:
-        """Return the current trace ID, or None if tracing is disabled."""
-        if self._handler and hasattr(self._handler, "last_trace_id"):
-            return self._handler.last_trace_id
+        """Return the current trace ID (W3C format, 32-char hex)."""
         return self._trace_id
 
     def get_trace_url(self) -> str | None:
         """Return the LangFuse web URL for the current trace."""
-        trace_id = self.get_trace_id()
-        if not trace_id or not self._trace:
+        if not self._client or not self._trace_id:
             return None
         try:
-            return self._trace.get_trace_url()
+            return self._client.get_trace_url(self._trace_id)
         except Exception:
             return None
 
@@ -260,14 +117,37 @@ class TracingManager:
             except Exception as e:
                 logger.warning("LangFuse flush failed: %s", e)
 
+    def shutdown(self) -> None:
+        """Gracefully shut down the Langfuse client (flush + thread cleanup).
+
+        Recommended for short-lived processes (scripts, workers, serverless)
+        to prevent data loss. The SDK auto-registers an atexit hook, but
+        manual invocation is safer in environments where atexit may not fire.
+        """
+        if self._client:
+            try:
+                self._client.shutdown()
+            except Exception as e:
+                logger.warning("LangFuse shutdown failed: %s", e)
+
     @contextmanager
     def trace(self, **metadata):
-        """Context manager: creates a LangFuse trace, returns a callback handler.
+        """Context manager: creates a LangFuse root span, returns a callback handler.
 
-        The handler is ready to pass to LangGraph's ainvoke() callbacks.
+        In full mode, the handler is langfuse.langchain.CallbackHandler which
+        auto-creates nested observations for LLM and tool calls within the
+        LangGraph run. In metadata mode, a noop handler is returned — only
+        the root span is recorded.
+
+        Supported kwargs:
+          task: trace/span name (default: "agent-run")
+          input: input data for the root observation (optional)
+          user_id: user identifier for propagate_attributes
+          conversation_id: session identifier for propagate_attributes
+          conversation_tag: passed as a tag for filtering
+          All other kwargs become metadata values (str, <=200 chars).
         """
-        self._handler = None
-        self._trace = None
+        self._root_span = None
         self._trace_id = None
 
         if not self.enabled:
@@ -275,23 +155,57 @@ class TracingManager:
             return
 
         try:
-            trace_name = metadata.get("task", "agent-run")
-            trace_metadata = {k: v for k, v in metadata.items() if v is not None}
+            from langfuse import propagate_attributes
 
-            self._trace = self._client.trace(name=trace_name)
-            self._trace.update(metadata=trace_metadata)
-            self._trace_id = self._trace.trace_id
+            if self._config["trace_level"] == "full":
+                from langfuse.langchain import CallbackHandler as LangfuseCallback
 
-            self._handler = _LangfuseCallback(
-                trace=self._trace,
-                trace_level=self._config["trace_level"],
-            )
+                handler = LangfuseCallback()
+            else:
+                handler = _NoopCallback()
+
+            task_name = metadata.pop("task", "agent-run")
+            root_input = metadata.pop("input", None)
+            user_id = metadata.pop("user_id", None)
+            session_id = metadata.pop("conversation_id", None)
+            conversation_tag = metadata.pop("conversation_tag", None)
+
+            tags: list[str] | None = None
+            if conversation_tag:
+                tags = [conversation_tag]
+
+            trace_metadata: dict[str, str] | None = None
+            if metadata:
+                trace_metadata = {}
+                for k, v in metadata.items():
+                    if v is not None:
+                        val = str(v)
+                        if len(val) > 200:
+                            val = val[:197] + "..."
+                        trace_metadata[k] = val
+
+            with self._client.start_as_current_observation(
+                as_type="span",
+                name=task_name,
+                input=root_input,
+            ) as root_span:
+                self._root_span = root_span
+                self._trace_id = root_span.trace_id
+
+                with propagate_attributes(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tags=tags,
+                    metadata=trace_metadata,
+                    trace_name=task_name,
+                ):
+                    yield handler
+
         except Exception as e:
-            logger.warning("LangFuse trace error: %s — falling back to noop", e)
-            self._handler = _NoopCallback()
-
-        try:
-            yield self._handler
+            logger.warning(
+                "LangFuse trace error: %s — falling back to noop", e
+            )
+            yield _NoopCallback()
         finally:
             self.flush()
 
