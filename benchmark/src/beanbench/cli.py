@@ -95,6 +95,10 @@ def cli():
     help="Run only specific tier(s). Repeatable. Default: all tiers.",
 )
 @click.option(
+    "--case-id",
+    help="Run one explicit case ID, e.g. T1-07. Respects --tier when provided.",
+)
+@click.option(
     "--results-dir",
     default=str(BENCHMARK_DIR / "results"),
     help="Directory for result JSON files",
@@ -131,16 +135,22 @@ def run(**kwargs):
         langfuse_secret_key=kwargs.pop("langfuse_secret_key"),
         langfuse_base_url=kwargs.pop("langfuse_base_url"),
         tiers=tiers,
+        case_id=kwargs.pop("case_id"),
         results_dir=results_dir,
     )
 
     click.echo(f"BeanBench — {config.benchmark_name} v{config.benchmark_version}")
     click.echo(f"Model: {run_config.model}")
     click.echo(f"Tiers: {', '.join(tiers)}")
+    if run_config.case_id:
+        click.echo(f"Case: {run_config.case_id}")
     click.echo(f"Results dir: {results_dir}")
     click.echo()
 
-    result = asyncio.run(run_benchmark(config, run_config))
+    try:
+        result = asyncio.run(run_benchmark(config, run_config))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     click.echo()
     click.echo("=" * 60)

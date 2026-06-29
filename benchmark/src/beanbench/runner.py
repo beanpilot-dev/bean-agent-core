@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent.parent
 RESULTS_DIR = BENCHMARK_DIR / "results"
+BenchmarkCase = Tier1Case | Tier2Case | Tier3Case
 
 
 class RunConfig:
@@ -51,6 +52,7 @@ class RunConfig:
         langfuse_secret_key: str | None = None,
         langfuse_base_url: str | None = None,
         tiers: list[str] | None = None,
+        case_id: str | None = None,
         results_dir: Path | None = None,
     ):
         self.model = model
@@ -65,6 +67,7 @@ class RunConfig:
         self.langfuse_secret_key = langfuse_secret_key
         self.langfuse_base_url = langfuse_base_url
         self.tiers = tiers or ["tier_1", "tier_2", "tier_3"]
+        self.case_id = case_id
         self.results_dir = results_dir or RESULTS_DIR
 
 
@@ -103,7 +106,12 @@ async def run_benchmark(config: BenchmarkConfig, run_config: RunConfig) -> Bench
 
         case_file = BENCHMARK_DIR / tier_meta.case_file
         cases = load_tier_cases(case_file, tier_id)
+        cases = _filter_cases(cases, run_config.case_id)
         total_cases += len(cases)
+
+    if run_config.case_id and total_cases == 0:
+        tiers = ", ".join(run_config.tiers)
+        raise ValueError(f"Case '{run_config.case_id}' not found in selected tiers: {tiers}")
 
     case_ix = 0
     for tier_id in run_config.tiers:
@@ -113,6 +121,7 @@ async def run_benchmark(config: BenchmarkConfig, run_config: RunConfig) -> Bench
 
         case_file = BENCHMARK_DIR / tier_meta.case_file
         cases = load_tier_cases(case_file, tier_id)
+        cases = _filter_cases(cases, run_config.case_id)
 
         max_points = tier_meta.scoring.points_per_case
 
@@ -178,6 +187,15 @@ async def run_benchmark(config: BenchmarkConfig, run_config: RunConfig) -> Bench
     logger.info("Results saved to %s", saved_path)
 
     return result
+
+
+def _filter_cases(cases: list[BenchmarkCase], case_id: str | None) -> list[BenchmarkCase]:
+    """Return only the explicitly requested case when a case ID filter is set."""
+    if not case_id:
+        return cases
+
+    wanted = case_id.upper()
+    return [case for case in cases if case.id.upper() == wanted]
 
 
 def _save_incremental(result: BenchmarkResult, results_dir: Path) -> None:
