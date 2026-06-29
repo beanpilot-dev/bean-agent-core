@@ -6,7 +6,6 @@ from typing import Any
 
 import httpx
 
-
 BENCHMARK_USER_ID = "beanbench"
 
 
@@ -51,6 +50,8 @@ async def send_chat_request(
       - is_task_complete: bool
       - history_messages: list[dict] (snapshot from agent)
       - usage: dict | None
+      - trace_id: str | None
+      - trace_url: str | None
       - error: str | None (fatal error message)
     """
     payload = _build_chat_payload(query, prior_messages, model, api_key, case_id)
@@ -60,6 +61,8 @@ async def send_chat_request(
         "is_task_complete": False,
         "history_messages": [],
         "usage": None,
+        "trace_id": None,
+        "trace_url": None,
         "error": None,
     }
 
@@ -92,6 +95,8 @@ async def send_chat_request(
                 if chunk.get("type") == "history_snapshot":
                     result["history_messages"] = chunk.get("messages", [])
                     result["usage"] = chunk.get("usage")
+                    result["trace_id"] = chunk.get("trace_id")
+                    result["trace_url"] = chunk.get("trace_url")
 
                 if chunk.get("type") == "activity":
                     continue
@@ -131,6 +136,7 @@ async def run_multi_turn(
     """Execute multiple turns, accumulating message history between calls."""
     messages: list[dict] = []
     last_resp: dict[str, Any] = {}
+    turn_traces: list[dict[str, Any]] = []
     for i, turn in enumerate(turns):
         user_content = turn.get("content", "")
         resp = await send_chat_request(
@@ -142,10 +148,17 @@ async def run_multi_turn(
             port=port,
             timeout=timeout,
         )
+        turn_traces.append({
+            "turn": i + 1,
+            "trace_id": resp.get("trace_id"),
+            "trace_url": resp.get("trace_url"),
+        })
         if resp.get("error"):
+            resp["turn_traces"] = turn_traces
             return resp
         messages = resp.get("history_messages", [])
         last_resp = resp
+    last_resp["turn_traces"] = turn_traces
     return last_resp
 
 

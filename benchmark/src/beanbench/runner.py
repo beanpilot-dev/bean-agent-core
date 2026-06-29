@@ -1,6 +1,5 @@
 """Main orchestrator — runs benchmark cases across tiers, fixtures, models."""
 
-import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -227,6 +226,7 @@ async def _run_tier1(
 
     resp_text = resp.get("response_text", "")
     details: dict = {"response": resp_text, "response_time_ms": elapsed_ms}
+    _add_trace_details(details, resp)
 
     if resp.get("error"):
         details["error"] = resp["error"]
@@ -296,6 +296,7 @@ async def _run_tier2(
 
     resp_text = resp.get("response_text", "")
     details: dict = {"response": resp_text, "response_time_ms": elapsed_ms}
+    _add_trace_details(details, resp)
     if resp.get("error"):
         details["error"] = resp["error"]
         return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
@@ -350,6 +351,7 @@ async def _run_tier3(
 
     resp_text = resp.get("response_text", "")
     details: dict = {"response": resp_text, "response_time_ms": elapsed_ms}
+    _add_trace_details(details, resp)
     if resp.get("error"):
         details["error"] = resp["error"]
         return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
@@ -380,3 +382,13 @@ async def _run_tier3(
         case_id=case.id, score=score, max_score=max_points,
         passed=score > 0, details=details,
     )
+
+
+def _add_trace_details(details: dict, resp: dict) -> None:
+    """Attach agent-core trace metadata when the SSE history snapshot included it."""
+    if resp.get("trace_id"):
+        details["trace_id"] = resp["trace_id"]
+    if resp.get("trace_url"):
+        details["trace_url"] = resp["trace_url"]
+    if resp.get("turn_traces"):
+        details["turn_traces"] = resp["turn_traces"]

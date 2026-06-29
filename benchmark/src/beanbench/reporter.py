@@ -3,7 +3,6 @@
 import json
 from datetime import datetime
 
-
 REPORT_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -164,7 +163,12 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
 <div id="case-panel" style="margin-top: 16px; display: none">
   <h3 style="margin-bottom: 8px">Case Details</h3>
   <table>
-    <thead><tr><th>Case</th><th>Score</th><th>Max</th><th>Passed</th><th>Time</th><th>Errors / Judge</th></tr></thead>
+    <thead>
+      <tr>
+        <th>Case</th><th>Score</th><th>Max</th><th>Passed</th>
+        <th>Time</th><th>Trace</th><th>Errors / Judge</th>
+      </tr>
+    </thead>
     <tbody id="case-body"></tbody>
   </table>
 </div>
@@ -206,6 +210,32 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
   function renderViolations(count) {
     if (count > 0) return `<span class="violation-badge">${count}</span>`;
     return `<span class="violation-badge clean">0</span>`;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function renderTrace(details) {
+    const traceId = details?.trace_id || "";
+    const traceUrl = details?.trace_url || "";
+    if (!traceId) return '<span style="color:var(--muted)">--</span>';
+
+    const shortId = traceId.length > 12 ? `${traceId.slice(0, 12)}...` : traceId;
+    const label = escapeHtml(shortId);
+    const title = escapeHtml(traceId);
+    if (traceUrl) {
+      const href = escapeHtml(traceUrl);
+      return `<a href="${href}" target="_blank" rel="noreferrer" title="${title}">
+        ${label}
+      </a>`;
+    }
+    return `<code title="${title}">${label}</code>`;
   }
 
   function filterRows() {
@@ -256,14 +286,19 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
       const detailText = errors.length > 0
         ? errors.join("; ")
         : (judge.reason || judge.fatal_errors?.join(", ") || "");
+      const escapedDetail = escapeHtml(detailText);
 
       html += `<tr>
-        <td>${cr.case_id}</td>
+        <td>${escapeHtml(cr.case_id)}</td>
         <td>${cr.score}</td>
         <td>${cr.max_score}</td>
         <td>${cr.passed ? '&#x2705;' : '&#x274C;'}</td>
         <td>${rtStr}</td>
-        <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis" title="${detailText.replace(/"/g, '&quot;')}">${detailText.substring(0, 120)}</td>
+        <td>${renderTrace(cr.details)}</td>
+        <td
+          style="max-width:400px;overflow:hidden;text-overflow:ellipsis"
+          title="${escapedDetail}"
+        >${escapeHtml(detailText.substring(0, 120))}</td>
       </tr>`;
     }
 
