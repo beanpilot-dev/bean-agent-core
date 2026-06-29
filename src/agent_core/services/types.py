@@ -160,25 +160,30 @@ class LedgerConfig:
     """
 
     entry_path: str = "data/main.beancount"
-    sidecar_main_path: str = "data/agent_inc/main.beancount"
+    sidecar_main_path: str | None = "data/agent_inc/main.beancount"
     sidecar_write_dir: str = "data/agent_inc"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "entry_path", _normalize_repo_path(self.entry_path))
         object.__setattr__(
             self,
-            "sidecar_main_path",
-            _normalize_repo_path(self.sidecar_main_path),
-        )
-        object.__setattr__(
-            self,
             "sidecar_write_dir",
             _normalize_repo_path(self.sidecar_write_dir),
         )
 
-        sidecar_parent = PurePosixPath(self.sidecar_main_path).parent.as_posix()
-        if sidecar_parent != self.sidecar_write_dir:
-            raise ValueError("sidecar_main_path must live inside sidecar_write_dir")
+        derived_sidecar_main = (
+            PurePosixPath(self.sidecar_write_dir) / "main.beancount"
+        ).as_posix()
+        provided_sidecar_main = (
+            _normalize_repo_path(self.sidecar_main_path)
+            if self.sidecar_main_path
+            else derived_sidecar_main
+        )
+        sidecar_parent = PurePosixPath(provided_sidecar_main).parent.as_posix()
+        sidecar_name = PurePosixPath(provided_sidecar_main).name
+        if sidecar_parent != self.sidecar_write_dir or sidecar_name != "main.beancount":
+            provided_sidecar_main = derived_sidecar_main
+        object.__setattr__(self, "sidecar_main_path", provided_sidecar_main)
 
 
 def _normalize_repo_path(path: str) -> str:

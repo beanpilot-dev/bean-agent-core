@@ -51,7 +51,11 @@ def copy_fixture(fixture_dir: Path) -> Path:
     return temp_dir
 
 
-def _patch_env_local(agent_core_dir: Path, openai_base_url: str | None, langfuse_enabled: bool = False) -> str:
+def _patch_env_local(
+    agent_core_dir: Path,
+    openai_base_url: str | None,
+    langfuse_enabled: bool = False,
+) -> str:
     """Rewrite agent-core/.env.local to set AGENT_MODE=local.
 
     Returns the original content for later restoration.
@@ -66,7 +70,7 @@ def _patch_env_local(agent_core_dir: Path, openai_base_url: str | None, langfuse
     for line in original.splitlines():
         if any(line.startswith(p) for p in ("AGENT_MODE=", "OPENAI_MODEL=", "OPENAI_BASE_URL=")):
             continue
-        if not langfuse_enabled and line.startswith("LANGFUSE"):
+        if line.startswith("LANGFUSE"):
             continue
         lines.append(line)
     lines.append("AGENT_MODE=local")
@@ -90,14 +94,23 @@ def _restore_env_local(agent_core_dir: Path, original: str) -> None:
 class _EnvLocalGuard:
     """Context manager that patches .env.local and restores on exit."""
 
-    def __init__(self, agent_core_dir: Path, openai_base_url: str | None, langfuse_enabled: bool = False):
+    def __init__(
+        self,
+        agent_core_dir: Path,
+        openai_base_url: str | None,
+        langfuse_enabled: bool = False,
+    ):
         self._agent_core_dir = agent_core_dir
         self._original = ""
         self._openai_base_url = openai_base_url
         self._langfuse_enabled = langfuse_enabled
 
     def __enter__(self):
-        self._original = _patch_env_local(self._agent_core_dir, self._openai_base_url, self._langfuse_enabled)
+        self._original = _patch_env_local(
+            self._agent_core_dir,
+            self._openai_base_url,
+            self._langfuse_enabled,
+        )
         return self
 
     def __exit__(self, *args):
@@ -173,7 +186,7 @@ def fixture_context(
     env: dict[str, str] | None = None,
     langfuse_enabled: bool = False,
 ):
-    """Context manager: copy fixture, patch .env.local, start agent-core, yield (port, temp_path), cleanup."""
+    """Copy fixture, patch .env.local, start agent-core, yield port and path."""
     port = _find_free_port()
     temp_path = copy_fixture(fixture_dir)
     agent_core_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -185,7 +198,8 @@ def fixture_context(
             if not wait_ready(port):
                 stop_agent_core(proc)
                 raise RuntimeError(
-                    f"Agent-core failed to become ready on port {port} within {AGENT_CORE_READY_TIMEOUT}s"
+                    "Agent-core failed to become ready on port "
+                    f"{port} within {AGENT_CORE_READY_TIMEOUT}s"
                 )
         yield (port, temp_path)
     finally:

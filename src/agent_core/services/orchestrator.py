@@ -15,6 +15,7 @@ the Agent layer for LLM reasoning.
 import logging
 import tempfile
 import time
+from dataclasses import asdict
 from typing import AsyncGenerator
 
 from .activity import ActivityEmitter
@@ -206,7 +207,7 @@ class AgentOrchestrator:
                     run_id=run_id,
                     label="Checking ledger health",
                 )
-                PreflightService.validate(workspace_path, ledger_config)
+                preflight = PreflightService.validate(workspace_path, ledger_config)
                 yield emitter.emit(
                     category="validation",
                     state="completed",
@@ -271,6 +272,7 @@ class AgentOrchestrator:
                 git_service=self._git_service,
                 whitelist=whitelist,
                 ledger_config=ledger_config,
+                ledger_context=asdict(preflight),
                 activity_emitter=emitter,
             ):
                 if chunk.get("type") == "history_snapshot":

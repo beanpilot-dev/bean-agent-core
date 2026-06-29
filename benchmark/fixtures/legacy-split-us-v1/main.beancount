@@ -3,7 +3,7 @@ option "operating_currency" "USD"
 
 include "legacy/2019.beancount"
 include "legacy/2026-06-import.beancount"
-include "data/agent_inc/2026-06.beancount"
+include "data/agent_inc/main.beancount"
 
 1970-01-01 commodity USD
 

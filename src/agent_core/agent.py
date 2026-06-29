@@ -22,7 +22,7 @@ from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitte
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
-from agent_core.workflow.language import response_language_instruction
+from agent_core.workflow.language import detect_preferred_language, response_language_instruction
 from agent_core.workflow.state import AgentState
 from agent_core.workflow.tools import MODEL_TOOLS
 
@@ -38,9 +38,9 @@ RUNTIME POLICY:
   synthesizer handoffs.
 - You may inspect the ledger with read tools and prepare approval-gated actions
   with prepare_* tools.
-- For any ledger write, call ledger_preflight first and use exact account names
-  returned by the ledger. Do not invent near-miss accounts or pluralization
-  variants.
+- Deterministic preflight has already supplied ledger context when available.
+  Use exact account names from that context or from tool results. Do not invent
+  near-miss accounts or pluralization variants.
 - Account-opening tools are not available in this default loop. If no suitable
   existing account exists, ask a clarification question instead of drafting a
   write. If a prepare tool rejects unknown accounts, retry with exact accounts
@@ -106,6 +106,43 @@ def normalize_conversation_title(raw_title: str) -> str:
     return title
 
 
+def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
+    if not isinstance(ledger_context, dict):
+        return ""
+    compact_context = {
+        key: ledger_context.get(key)
+        for key in ("status", "target", "accounts", "recent", "errors")
+        if ledger_context.get(key)
+    }
+    if not compact_context:
+        return ""
+    return (
+        "\nLEDGER CONTEXT:\n"
+        + json.dumps(compact_context, ensure_ascii=False)
+        + "\n"
+    )
+
+
+def _build_single_loop_prompt(
+    today: str,
+    conversation_context: str,
+    ledger_context: dict[str, Any] | None,
+    preferred_language: str,
+) -> str:
+    return (
+        SYSTEM_PROMPT
+        + SINGLE_LOOP_POLICY
+        + f"\nTODAY: {today}\n"
+        + _format_ledger_context(ledger_context)
+        + (
+            f"\nCONVERSATION CONTEXT:\n{conversation_context}\n"
+            if conversation_context else ""
+        )
+        + "\nRESPONSE LANGUAGE:\n"
+        + response_language_instruction(preferred_language)
+    )
+
+
 async def _single_agent_node(state: AgentState, config: RunnableConfig) -> dict:
     llm = config.get("configurable", {}).get("single_loop_llm")
     if llm is None:
@@ -113,17 +150,13 @@ async def _single_agent_node(state: AgentState, config: RunnableConfig) -> dict:
     cfg = config.get("configurable", {})
     today = cfg.get("today", "")
     conversation_context = cfg.get("conversation_context", "")
+    ledger_context = cfg.get("ledger_context")
     preferred_language = state.get("preferred_language", "auto")
-    prompt = (
-        SYSTEM_PROMPT
-        + SINGLE_LOOP_POLICY
-        + f"\nTODAY: {today}\n"
-        + (
-            f"\nCONVERSATION CONTEXT:\n{conversation_context}\n"
-            if conversation_context else ""
-        )
-        + "\nRESPONSE LANGUAGE:\n"
-        + response_language_instruction(preferred_language)
+    prompt = _build_single_loop_prompt(
+        today=today,
+        conversation_context=conversation_context,
+        ledger_context=ledger_context,
+        preferred_language=preferred_language,
     )
     messages = list(state["messages"])
     if messages and isinstance(messages[0], SystemMessage):
@@ -221,6 +254,7 @@ class PersonalFinanceAgent:
         git_service: GitService | None = None,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
+        ledger_context: dict[str, Any] | None = None,
         activity_emitter: ActivityEmitter | None = None,
     ) -> AsyncGenerator[dict, None]:
         yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
@@ -268,7 +302,15 @@ class PersonalFinanceAgent:
                 if parts:
                     conv_ctx = "\n".join(parts)
 
-            system = SystemMessage(content=SYSTEM_PROMPT)
+            preferred_language = detect_preferred_language(query)
+            system = SystemMessage(
+                content=_build_single_loop_prompt(
+                    today=today,
+                    conversation_context=conv_ctx,
+                    ledger_context=ledger_context,
+                    preferred_language=preferred_language,
+                )
+            )
             messages = [system] + prior + [HumanMessage(content=query)]
 
             if activity_emitter:
@@ -304,6 +346,7 @@ class PersonalFinanceAgent:
                         "git_service": git_service,
                         "whitelist": whitelist,
                         "ledger_config": ledger_config,
+                        "ledger_context": ledger_context,
                     },
                 }
                 if activity_emitter:
@@ -325,7 +368,7 @@ class PersonalFinanceAgent:
                     "pending_routes": [],
                     "planned_tasks": [],
                     "had_multiple_tasks": False,
-                    "preferred_language": "auto",
+                    "preferred_language": preferred_language,
                 }
                 graph_task = asyncio.create_task(self.graph.ainvoke(graph_input, config=config))
                 while activity_queue and not graph_task.done():

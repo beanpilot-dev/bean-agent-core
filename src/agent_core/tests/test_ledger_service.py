@@ -434,6 +434,26 @@ def test_preflight_and_queries_use_configured_entry_path(
     assert "1000 CNY" in (balance.balance or "")
 
 
+def test_ledger_config_derives_sidecar_main_from_write_dir() -> None:
+    config = LedgerConfig(
+        entry_path="books/root.beancount",
+        sidecar_main_path=None,
+        sidecar_write_dir="books/agent_sidecar",
+    )
+
+    assert config.sidecar_main_path == "books/agent_sidecar/main.beancount"
+
+
+def test_ledger_config_replaces_legacy_monthly_sidecar_main_path() -> None:
+    config = LedgerConfig(
+        entry_path="main.beancount",
+        sidecar_main_path="data/agent_inc/2026-06.beancount",
+        sidecar_write_dir="data/agent_inc",
+    )
+
+    assert config.sidecar_main_path == "data/agent_inc/main.beancount"
+
+
 def test_get_accounts_raises_on_bql_error(
     ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

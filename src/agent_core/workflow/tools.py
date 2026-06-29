@@ -24,10 +24,9 @@ _ingestion = IngestionService()
 
 @tool("ledger_preflight")
 def tool_preflight(config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:  # pyright: ignore[reportArgumentType]
-    """Run preflight check on the Beancount ledger.
+    """Refresh the deterministic preflight check on the Beancount ledger.
     Returns STATUS (CLEAN or ERROR), TARGET file path,
-    valid ACCOUNTS list, and RECENT transactions.
-    Always call this before recording any transaction."""
+    valid ACCOUNTS list, and RECENT transactions."""
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     ledger_config = c.get("ledger_config")

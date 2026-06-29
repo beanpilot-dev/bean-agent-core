@@ -1,14 +1,22 @@
 """Tests for PersonalFinanceAgent response classification."""
 
 import asyncio
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agent_core.agent import PersonalFinanceAgent, normalize_conversation_title
+from agent_core.agent import (
+    PersonalFinanceAgent,
+    _single_agent_node,
+    normalize_conversation_title,
+)
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
-from agent_core.workflow.language import response_language_instruction
+from agent_core.workflow.language import (
+    detect_preferred_language,
+    response_language_instruction,
+)
 
 
 @pytest.mark.parametrize(
@@ -63,6 +71,26 @@ class CapturingLLM:
 
     async def ainvoke(self, _messages, config=None):
         return AIMessage(content="single loop response")
+
+
+class PromptCapturingLLM:
+    messages: list | None = None
+
+    async def ainvoke(self, messages, config=None):
+        self.messages = messages
+        return AIMessage(content="node response")
+
+
+class CapturingGraph:
+    captured_input: dict | None = None
+    captured_config: dict | None = None
+
+    async def ainvoke(self, graph_input, config=None):
+        self.captured_input = graph_input
+        self.captured_config = config
+        return {
+            "messages": graph_input["messages"] + [AIMessage(content="captured response")],
+        }
 
 
 @pytest.mark.asyncio
@@ -193,6 +221,118 @@ def test_response_language_instruction_preserves_ledger_literals():
     assert "Beancount syntax" in instruction
     assert "account names" in instruction
     assert "machine-readable codes" in instruction
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("How much cash can I spend from Assets:现金 and Assets:Bank:Checking?", "en"),
+        ("帮我看看 Assets:Bank:Checking 还有多少钱可以花", "zh-CN"),
+        (
+            "请用 Expenses:Food:Dining 记录 2026-06-29 coffee 12.50 USD",
+            "zh-CN",
+        ),
+        ("Assets:现金 USD 2026-06-29", "auto"),
+    ],
+)
+def test_detect_preferred_language_uses_latest_user_prose_not_ledger_literals(
+    prompt,
+    expected,
+):
+    assert detect_preferred_language(prompt) == expected
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_preferred_language_before_graph_invocation(monkeypatch):
+    graph = CapturingGraph()
+    agent = PersonalFinanceAgent()
+    agent.graph = graph
+    chunks = []
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: FakeLLM())
+
+    async for chunk in agent.stream(
+        query="请查询 Assets:Bank:Checking 的可用现金",
+        prior=[],
+        api_key="key",
+        model="scripted",
+    ):
+        chunks.append(chunk)
+
+    assert graph.captured_input is not None
+    assert graph.captured_input["preferred_language"] == "zh-CN"
+    assert chunks[-2]["content"] == "captured response"
+
+
+@pytest.mark.asyncio
+async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeypatch):
+    graph = CapturingGraph()
+    agent = PersonalFinanceAgent()
+    agent.graph = graph
+    ledger_context = {
+        "status": "CLEAN",
+        "target": "data/agent_inc/2026-06.beancount",
+        "accounts": ["Assets:Liquid:Bank:Checking"],
+        "recent": "",
+        "errors": None,
+    }
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: FakeLLM())
+
+    async for _chunk in agent.stream(
+        query="How much cash is available?",
+        prior=[],
+        api_key="key",
+        model="scripted",
+        ledger_context=ledger_context,
+    ):
+        pass
+
+    assert graph.captured_config is not None
+    assert graph.captured_config["configurable"]["ledger_context"] == ledger_context
+    assert graph.captured_input is not None
+
+
+@pytest.mark.asyncio
+async def test_single_agent_node_adds_ledger_context_to_system_prompt():
+    llm = PromptCapturingLLM()
+    state = {
+        "messages": [
+            SystemMessage(content="old"),
+            HumanMessage(content="How much cash is available?"),
+        ],
+        "preferred_language": "en",
+    }
+    config = {
+        "configurable": {
+            "single_loop_llm": llm,
+            "today": "2026-06-29",
+            "ledger_context": {
+                "status": "CLEAN",
+                "target": "data/agent_inc/2026-06.beancount",
+                "accounts": ["Assets:Liquid:Bank:Checking"],
+            },
+        }
+    }
+
+    await _single_agent_node(state, config)
+
+    assert llm.messages is not None
+    system_prompt = llm.messages[0].content
+    assert "LEDGER CONTEXT" in system_prompt
+    assert "Assets:Liquid:Bank:Checking" in system_prompt
+
+
+def test_single_loop_prompt_analysis_contract_has_no_global_cny_default():
+    prompt_path = Path(__file__).parents[1] / "ledger" / "prompt.md"
+    prompt = prompt_path.read_text()
+
+    assert "There is no global default currency" in prompt
+    assert "Always use primary currency CNY" not in prompt
+    assert "spendable cash separate from net worth" in prompt
+    assert "Do not present net worth as spendable cash" in prompt
 
 
 def test_normalize_conversation_title_strips_markup_and_punctuation():

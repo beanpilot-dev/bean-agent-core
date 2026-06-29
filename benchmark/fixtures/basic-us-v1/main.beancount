@@ -1,7 +1,7 @@
 option "title" "BeanBench basic-us-v1 fixture"
 option "operating_currency" "USD"
 
-include "data/agent_inc/2026-06.beancount"
+include "data/agent_inc/main.beancount"
 
 ; ── Commodities ───────────────────────────────────────────────────
 1970-01-01 commodity USD

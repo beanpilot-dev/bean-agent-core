@@ -143,7 +143,7 @@ class StatsConversationMeta(BaseModel):
 
 class LedgerPayload(BaseModel):
     entry_path: str
-    sidecar_main_path: str
+    sidecar_main_path: str | None = None
     sidecar_write_dir: str
 
 

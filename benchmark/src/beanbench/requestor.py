@@ -27,7 +27,7 @@ def _build_chat_payload(
         "messages": prior_messages or [],
         "ledger": {
             "entry_path": "main.beancount",
-            "sidecar_main_path": "data/agent_inc/2026-06.beancount",
+            "sidecar_main_path": "data/agent_inc/main.beancount",
             "sidecar_write_dir": "data/agent_inc",
         },
     }
