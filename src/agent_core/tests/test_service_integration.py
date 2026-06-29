@@ -14,6 +14,11 @@ from agent_core.services.workspace import CachedWorkspaceManager, LocalGitServic
 from agent_core.workflow.tools import tool_account_balance, tool_query_template
 
 
+@pytest.fixture(autouse=True)
+def safe_main_import_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCAL_REPO_URL", str(tmp_path))
+
+
 def test_query_template_tool_works_directly(ledger_workspace: Path) -> None:
     result = json.loads(
         tool_query_template.invoke(

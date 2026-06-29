@@ -32,6 +32,50 @@ class Preview(ServiceResult):
     operation: str = ""
     preview: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    pending_action: dict[str, Any] | None = None
+
+
+@dataclass
+class PendingAction(ServiceResult):
+    """Immutable approval-gated action prepared by agent-core.
+
+    SaaS may persist the payload opaquely and use the digest/signature metadata
+    for idempotency and tamper detection. The display fields are informational;
+    execution always uses execution_spec.
+    """
+
+    status: Literal["PENDING_ACTION"] = "PENDING_ACTION"
+    pending_action_id: str = ""
+    action_type: str = ""
+    schema_version: int = 1
+    execution_spec: dict[str, Any] = field(default_factory=dict)
+    display: dict[str, Any] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=dict)
+    expires_at: str = ""
+    idempotency_key: str = ""
+    digest: str = ""
+    signature: str = ""
+    message: str = ""
+
+
+@dataclass
+class ApplyReceipt(ServiceResult):
+    """Deterministic apply result for a previously approved pending action."""
+
+    status: Literal["APPLIED"] = "APPLIED"
+    pending_action_id: str = ""
+    action_type: str = ""
+    receipt: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class IntegrityFailed(ServiceResult):
+    """Pending action payload failed deterministic integrity checks."""
+
+    status: Literal["INTEGRITY_FAILED"] = "INTEGRITY_FAILED"
+    pending_action_id: str = ""
+    error: str = ""
 
 
 # ── Success ───────────────────────────────────────────────────────────────────

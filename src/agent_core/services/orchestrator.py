@@ -18,7 +18,7 @@ import time
 from typing import AsyncGenerator
 
 from .activity import ActivityEmitter
-from .ledger import Beancount
+from .ledger import Beancount, LedgerService
 from .onboarding import OnboardingService, SetupOperation
 from .preflight import PreflightService, SetupRequiredError
 from .types import LedgerConfig
@@ -452,6 +452,58 @@ class AgentOrchestrator:
             return {
                 "status": "error",
                 "error": {"code": _git_error_code(e), "message": str(e)},
+            }
+        finally:
+            if workspace_path:
+                self._git_service.destroy(workspace_path)
+
+    async def run_apply_pending_action(
+        self,
+        *,
+        repo_url: str,
+        token: str | None,
+        user_id: str,
+        request_id: str | None,
+        pending_action: dict,
+        ledger_config: LedgerConfig | None = None,
+    ) -> dict:
+        """Apply an approved pending action without invoking the LLM."""
+        start_time = time.monotonic()
+        workspace_path: str | None = None
+        try:
+            self._git_service.validate_request_credentials(repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_apply_")
+            self._git_service.copy(cache_path, workspace_path)
+            PreflightService.validate(workspace_path, ledger_config)
+
+            result = LedgerService().apply_pending_action(
+                workspace_path,
+                pending_action,
+                repo_url,
+                self._git_service,
+                token,
+                ledger_config=ledger_config,
+            )
+            payload = {
+                "status": result.status,
+                "result": getattr(result, "__dict__", {}),
+                "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
+            }
+            if result.status in {"APPLIED", "SUCCESS"}:
+                return payload
+            return {
+                **payload,
+                "error": {
+                    "code": result.status,
+                    "message": getattr(result, "error", "Pending action apply failed"),
+                },
+            }
+        except GitServiceError as e:
+            return {
+                "status": "error",
+                "error": {"code": _git_error_code(e), "message": str(e)},
+                "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
             }
         finally:
             if workspace_path:

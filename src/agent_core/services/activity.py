@@ -55,13 +55,8 @@ _SENSITIVE_TEXT_PATTERNS = [
     re.compile(r"https?://|git@"),
 ]
 _NODE_ACTORS = {
-    "planner": "planner",
-    "transaction": "bookkeeper",
-    "analytics": "analyst",
-    "ingestion": "importer",
-    "chitchat": "synthesizer",
-    "merge": "orchestrator",
-    "synthesizer": "synthesizer",
+    "agent": "agent",
+    "tools": "agent",
 }
 
 

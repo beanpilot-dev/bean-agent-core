@@ -54,6 +54,17 @@ class FakeLLM:
         return self
 
 
+class CapturingLLM:
+    bound_tool_names: list[str] = []
+
+    def bind_tools(self, tools):
+        CapturingLLM.bound_tool_names = [tool.name for tool in tools]
+        return self
+
+    async def ainvoke(self, _messages, config=None):
+        return AIMessage(content="single loop response")
+
+
 @pytest.mark.asyncio
 async def test_stream_drains_activity_queue_when_graph_fails(monkeypatch):
     async def fake_sleep(_delay):
@@ -192,3 +203,27 @@ def test_normalize_conversation_title_strips_markup_and_punctuation():
 
 def test_normalize_conversation_title_rejects_table_like_output():
     assert normalize_conversation_title("| title |") == ""
+
+
+def test_default_model_manifest_excludes_confirm_tools():
+    agent = PersonalFinanceAgent()
+    tool_names = [tool.name for tool in agent.model_tools]
+
+    assert "confirm_commit" not in tool_names
+    assert "confirm_open" not in tool_names
+    assert "confirm_update" not in tool_names
+    assert "confirm_bulk" not in tool_names
+    assert "prepare_commit" in tool_names
+
+
+def test_default_graph_has_no_planner_nodes():
+    agent = PersonalFinanceAgent()
+    graph = agent.graph.get_graph()
+    node_names = set(graph.nodes.keys())
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+
+    assert node_names == {"__start__", "agent", "tools", "__end__"}
+    assert ("__start__", "agent") in edges
+    assert ("tools", "agent") in edges
+    assert "planner" not in node_names
+    assert "synthesizer" not in node_names

@@ -12,10 +12,13 @@ from agent_core.services.ledger import (
     LedgerServiceError,
 )
 from agent_core.services.types import (
+    ApplyReceipt,
     CommitResult,
     DependencyUnavailable,
+    IntegrityFailed,
     InvariantViolation,
     LedgerConfig,
+    PendingAction,
     Preview,
     QueryResult,
     ValidationFailed,
@@ -87,6 +90,68 @@ def test_preview_commit_rejects_unknown_account(ledger_workspace: Path) -> None:
 
     assert isinstance(result, InvariantViolation)
     assert result.invariant == "ACCOUNT_WHITELIST"
+
+
+def test_get_accounts_includes_open_only_accounts(ledger_workspace: Path) -> None:
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    sidecar_main.write_text(
+        sidecar_main.read_text()
+        + "\n2020-01-01 open Expenses:Tax:Federal USD\n"
+    )
+
+    accounts = LedgerService.get_accounts(str(ledger_workspace))
+
+    assert "Expenses:Tax:Federal" in accounts
+
+
+def test_prepare_commit_materializes_pending_action_contract(ledger_workspace: Path) -> None:
+    result = LedgerService().prepare_commit(
+        str(ledger_workspace), TXN, "record dinner", ["Expenses:Food", "Assets:Cash"]
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.status == "PENDING_ACTION"
+    assert result.action_type == "commit_transaction"
+    assert result.execution_spec["transaction_text"] == TXN
+    assert result.display["diff"] == TXN
+    assert result.digest
+    assert result.signature == f"sha256:{result.digest}"
+    assert result.policy["risk"] == "normal"
+    assert result.policy["requires_elevated_review"] is False
+
+
+def test_pending_action_integrity_detects_mutation(ledger_workspace: Path) -> None:
+    result = LedgerService().prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    assert isinstance(result, PendingAction)
+
+    payload = result.__dict__.copy()
+    payload["execution_spec"] = {
+        **result.execution_spec,
+        "transaction_text": TXN.replace("Dinner", "Tampered"),
+    }
+
+    integrity = LedgerService.verify_pending_action(payload)
+    assert isinstance(integrity, IntegrityFailed)
+
+
+def test_apply_pending_action_uses_exact_contract(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    pending = LedgerService().prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    assert isinstance(pending, PendingAction)
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        pending.__dict__.copy(),
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ApplyReceipt)
+    assert result.pending_action_id == pending.pending_action_id
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    assert "Dinner" in target.read_text()
 
 
 def test_confirm_commit_writes_formats_and_pushes(

@@ -332,35 +332,34 @@ def tool_run_python(
 
 
 # ---------------------------------------------------------------------------
-# Write tools — preview/confirm pairs
+# Write tools — prepare-only model tools plus execution-only confirm functions
 # ---------------------------------------------------------------------------
 
-@tool("preview_commit")
-def tool_preview_commit(
+@tool("prepare_commit")
+def tool_prepare_commit(
     transaction_text: str,
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and preview a transaction before committing.
+    """Prepare a transaction as an approval-gated pending action.
 
     Validates all accounts against the ledger whitelist.
-    Returns a PREVIEW with the exact transaction that will be written.
-    Nothing is modified. Show the preview to the user and wait for approval,
-    then call confirm_commit with the same transaction_text and commit_message.
+    Returns a signed/digested pending action with the exact transaction that
+    will be written after explicit user approval. Nothing is modified.
 
     Args:
         transaction_text: The complete beancount transaction text.
         commit_message: Git commit message (e.g. 'chore(finance): record gas expense 2026-04-21').
 
     Returns a JSON string. Possible statuses:
-        PREVIEW            — accounts validated, awaiting confirmation
+        PENDING_ACTION     — accounts validated, awaiting approval
         INVARIANT_VIOLATION — unknown accounts; use preview_open to create them
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.preview_commit(
+    result = _ledger.prepare_commit(
         ws, transaction_text, commit_message, whitelist, ledger_config
     )
     return _json_mod.dumps(dataclasses.asdict(result))
@@ -407,18 +406,17 @@ def tool_confirm_commit(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("preview_open")
-def tool_preview_open(
+@tool("prepare_open")
+def tool_prepare_open(
     account_name: str,
     currency: str,
     open_date: str,
     display_name: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and preview opening a new account in the Beancount ledger.
+    """Prepare opening a new account as an approval-gated pending action.
 
     Use this when preview_commit returns INVARIANT_VIOLATION with unknown accounts.
-    After preview, call confirm_open with the same parameters to execute.
 
     Args:
         account_name: Full Beancount account path (e.g. 'Assets:Liquid:Bank:NewBank').
@@ -431,7 +429,7 @@ def tool_preview_open(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.preview_open(
+    result = _ledger.prepare_open(
         ws,
         account_name,
         currency or None,
@@ -484,22 +482,21 @@ def tool_confirm_open(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("preview_update")
-def tool_preview_update(
+@tool("prepare_update")
+def tool_prepare_update(
     date: str,
     narration: str,
     new_transaction_text: str,
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Find an existing transaction by date + narration and preview a replacement.
+    """Prepare a transaction replacement as an approval-gated pending action.
 
     Workflow:
     1. Use ledger_find_transactions to locate the entry and confirm which one to edit.
-    2. Call this tool to get a PREVIEW showing the found block vs the replacement.
+    2. Call this tool to get a pending action showing the found block vs the replacement.
        An ADVISORY warning is included if amounts or accounts change.
     3. Show the preview to the user and wait for explicit approval.
-    4. Call confirm_update with the same parameters to execute.
 
     Args:
         date: Transaction date in ISO format (e.g. '2026-04-10').
@@ -509,14 +506,14 @@ def tool_preview_update(
         commit_message: Git commit message (e.g. 'fix(finance): correct gas amount 2026-04-10').
 
     Returns a JSON string. Possible statuses:
-        PREVIEW              — transaction found, advisory emitted if values changed
+        PENDING_ACTION       — transaction found, advisory emitted if values changed
         INVARIANT_VIOLATION  — TRANSACTION_NOT_FOUND, AMBIGUOUS_MATCH, or ACCOUNT_WHITELIST
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.preview_update(
+    result = _ledger.prepare_update(
         ws,
         date,
         narration,
@@ -575,14 +572,14 @@ def tool_confirm_update(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("preview_bulk")
-def tool_preview_bulk(
+@tool("prepare_bulk")
+def tool_prepare_bulk(
     transactions_text: str = "",
     commit_message: str = "",
     transactions_file: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and preview multiple beancount transactions at once.
+    """Prepare multiple beancount transactions as one pending action.
 
     Two input modes:
     - transactions_text: pass the raw text directly (suitable for small batches).
@@ -609,7 +606,7 @@ def tool_preview_bulk(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.preview_bulk(
+    result = _ledger.prepare_bulk(
         ws,
         transactions_text,
         commit_message,
@@ -669,14 +666,9 @@ def tool_confirm_bulk(
 # ---------------------------------------------------------------------------
 
 TRANSACTION_TOOLS = [
-    tool_preview_commit,
-    tool_confirm_commit,
-    tool_preview_open,
-    tool_confirm_open,
-    tool_preview_update,
-    tool_confirm_update,
-    tool_preview_bulk,
-    tool_confirm_bulk,
+    tool_prepare_commit,
+    tool_prepare_update,
+    tool_prepare_bulk,
 ]
 
 ANALYTICS_TOOLS = [
@@ -691,8 +683,22 @@ ANALYTICS_TOOLS = [
 INGESTION_TOOLS = [
     tool_ingest_file,
     tool_run_python,
-    tool_preview_bulk,
-    tool_confirm_bulk,
+    tool_prepare_bulk,
 ]
 
 CHITCHAT_TOOLS = []
+
+EXECUTION_TOOLS = [
+    tool_confirm_commit,
+    tool_confirm_open,
+    tool_confirm_update,
+    tool_confirm_bulk,
+]
+
+MODEL_TOOLS = [
+    tool_preflight,
+    *ANALYTICS_TOOLS,
+    tool_ingest_file,
+    tool_run_python,
+    *TRANSACTION_TOOLS,
+]

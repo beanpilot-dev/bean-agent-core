@@ -175,6 +175,19 @@ class AccountsRequest(BaseModel):
     ledger: LedgerPayload | None = None
 
 
+class ApplyPendingActionRequest(BaseModel):
+    repo: RepoInfo
+    user_id: str
+    request_id: str | None = None
+    workflow_id: str | None = None
+    pending_action_id: str | None = None
+    payload_digest: str | None = None
+    integrity_digest: str | None = None
+    opaque_payload: dict[str, Any] | None = None
+    pending_action: dict[str, Any] | None = None
+    ledger: LedgerPayload | None = None
+
+
 class ConversationTitleRequest(BaseModel):
     user_id: str
     request_id: str | None = None
@@ -327,6 +340,42 @@ async def agent_chat(req: ChatRequest):
 # ---------------------------------------------------------------------------
 # POST /agent/conversation-title — lightweight title generation, JSON
 # ---------------------------------------------------------------------------
+
+
+@app.post("/agent/actions/apply")
+async def agent_apply_pending_action(req: ApplyPendingActionRequest):
+    start_time = time.monotonic()
+    try:
+        ledger_config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
+
+    logger.info(
+        "agent-actions-apply user_id=%s request_id=%s action_type=%s",
+        req.user_id,
+        req.request_id,
+        (req.pending_action or req.opaque_payload or {}).get("action_type"),
+    )
+    pending_action = req.pending_action or req.opaque_payload
+    if not pending_action:
+        return _error_envelope("INVALID_PENDING_ACTION", "pending action payload is required", 400)
+    result = await _orchestrator.run_apply_pending_action(
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        pending_action=pending_action,
+        ledger_config=ledger_config,
+    )
+    if "usage" not in result:
+        result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    if result.get("error"):
+        code = result["error"].get("code")
+        return JSONResponse(
+            content=result,
+            status_code=409 if code in {"INTEGRITY_FAILED", "VALIDATION_FAILED"} else 500,
+        )
+    return result
 
 @app.post("/agent/conversation-title")
 async def agent_conversation_title(req: ConversationTitleRequest):

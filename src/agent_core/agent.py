@@ -1,19 +1,4 @@
-"""PersonalFinanceAgent — LangGraph graph wiring and SSE streaming.
-
-The agent uses a Planner → Pillar → Synthesizer architecture:
-
-  START → planner (decompose into sub-tasks)
-    → conditional_edge → first pillar (sees only its sub-task)
-    → merge (pop next; stop if PREVIEW)
-    → conditional_edge → next pillar → merge → ...
-    → synthesizer (compose final response) → END
-
-or for single-task / PREVIEW:
-  START → planner → pillar → merge → END
-
-Tool definitions, persona prompts, and sub-graph builders live in the
-workflow/ module. This module owns only graph assembly and streaming.
-"""
+"""PersonalFinanceAgent — single-loop LangGraph runtime and SSE streaming."""
 
 import asyncio
 import json
@@ -31,52 +16,44 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
-from agent_core.workflow import (
-    ANALYTICS_TOOLS,
-    INGESTION_TOOLS,
-    TRANSACTION_TOOLS,
-    PlannerOutput,
-    build_analytics_graph,
-    build_chitchat_graph,
-    build_ingestion_graph,
-    build_transaction_graph,
-    merge_condition,
-    merge_node,
-    planner_node,
-    route_condition,
-)
 from agent_core.workflow.language import response_language_instruction
 from agent_core.workflow.state import AgentState
+from agent_core.workflow.tools import MODEL_TOOLS
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_FILE = os.path.join(os.path.dirname(__file__), "ledger", "prompt.md")
 SYSTEM_PROMPT = open(_PROMPT_FILE).read()
 
-SYNTHESIZER_PROMPT = """You are a response synthesizer. The conversation below contains the user's
-original request and responses from one or more specialist workers who each handled
-a part of the request. Produce a single, coherent, concise response that addresses
-ALL parts of the user's request in a natural conversational tone.
+SINGLE_LOOP_POLICY = """
 
-Do NOT re-execute any tools — the specialists have already
-handled that. Just weave their findings into one unified reply."""
-
-
-# ── Pillar + synth routing map ────────────────────────────────────────────────
-
-_PILLAR_MAP = {  # type: ignore[var-annotated]
-    "transaction": "transaction",
-    "analytics": "analytics",
-    "ingestion": "ingestion",
-    "chitchat": "chitchat",
-    "synthesizer": "synthesizer",
-    END: END,
-}
+RUNTIME POLICY:
+- You are one agent loop. Do not invent planner, specialist, reviewer, or
+  synthesizer handoffs.
+- You may inspect the ledger with read tools and prepare approval-gated actions
+  with prepare_* tools.
+- For any ledger write, call ledger_preflight first and use exact account names
+  returned by the ledger. Do not invent near-miss accounts or pluralization
+  variants.
+- Account-opening tools are not available in this default loop. If no suitable
+  existing account exists, ask a clarification question instead of drafting a
+  write. If a prepare tool rejects unknown accounts, retry with exact accounts
+  from preflight rather than inventing new accounts.
+- You cannot commit, push, confirm, apply, or discard ledger changes. Those
+  execution capabilities are deterministic server actions after user approval.
+- When a prepare_* tool returns status PENDING_ACTION, explain the proposed
+  action briefly, include the exact Beancount text from the prepared action's
+  display.diff field in a fenced code block, and ask the user to approve,
+  discard, or request changes.
+- Treat pending-action preview text as display-only. The pending action payload
+  is the executable contract.
+"""
 
 
 def _serialize_history(messages) -> list[dict]:
@@ -94,7 +71,10 @@ def _has_preview_status(payload: Any) -> bool:
             payload = json.loads(payload)
         except json.JSONDecodeError:
             return False
-    return isinstance(payload, dict) and payload.get("status") == "PREVIEW"
+    return (
+        isinstance(payload, dict)
+        and payload.get("status") in {"PREVIEW", "PENDING_ACTION"}
+    )
 
 
 def is_deepseek_thinking_model(model: str) -> bool:
@@ -124,6 +104,42 @@ def normalize_conversation_title(raw_title: str) -> str:
     if not title or "\n" in title or "|" in title:
         return ""
     return title
+
+
+async def _single_agent_node(state: AgentState, config: RunnableConfig) -> dict:
+    llm = config.get("configurable", {}).get("single_loop_llm")
+    if llm is None:
+        return {"messages": []}
+    cfg = config.get("configurable", {})
+    today = cfg.get("today", "")
+    conversation_context = cfg.get("conversation_context", "")
+    preferred_language = state.get("preferred_language", "auto")
+    prompt = (
+        SYSTEM_PROMPT
+        + SINGLE_LOOP_POLICY
+        + f"\nTODAY: {today}\n"
+        + (
+            f"\nCONVERSATION CONTEXT:\n{conversation_context}\n"
+            if conversation_context else ""
+        )
+        + "\nRESPONSE LANGUAGE:\n"
+        + response_language_instruction(preferred_language)
+    )
+    messages = list(state["messages"])
+    if messages and isinstance(messages[0], SystemMessage):
+        messages[0] = SystemMessage(content=prompt)
+    else:
+        messages.insert(0, SystemMessage(content=prompt))
+    response = await llm.ainvoke(messages, config=config)
+    return {"messages": [response], "route": "single_loop"}
+
+
+def _single_loop_condition(state: AgentState) -> str:
+    messages = state.get("messages", [])
+    if not messages:
+        return END
+    tool_calls = getattr(messages[-1], "tool_calls", None)
+    return "tools" if tool_calls else END
 
 
 async def generate_conversation_title(
@@ -157,29 +173,19 @@ async def generate_conversation_title(
 class PersonalFinanceAgent:
 
     def __init__(self):
-        self._transaction_graph = build_transaction_graph()
-        self._analytics_graph = build_analytics_graph()
-        self._ingestion_graph = build_ingestion_graph()
-        self._chitchat_graph = build_chitchat_graph()
         self.graph = self._build_graph()
+        self.model_tools = MODEL_TOOLS
 
     def _build_graph(self):
         builder = StateGraph(AgentState)
-        builder.add_node("planner", planner_node)
-        builder.add_node("transaction", self._transaction_graph)
-        builder.add_node("analytics", self._analytics_graph)
-        builder.add_node("ingestion", self._ingestion_graph)
-        builder.add_node("chitchat", self._chitchat_graph)
-        builder.add_node("merge", merge_node)
-        builder.add_node("synthesizer", _synthesizer_node)
-        builder.add_edge(START, "planner")
-        builder.add_conditional_edges("planner", route_condition, _PILLAR_MAP)  # pyright: ignore[reportArgumentType]
-        builder.add_edge("transaction", "merge")
-        builder.add_edge("analytics", "merge")
-        builder.add_edge("ingestion", "merge")
-        builder.add_edge("chitchat", "merge")
-        builder.add_conditional_edges("merge", merge_condition, _PILLAR_MAP)  # pyright: ignore[reportArgumentType]
-        builder.add_edge("synthesizer", END)
+        builder.add_node("agent", _single_agent_node)
+        builder.add_node("tools", ToolNode(MODEL_TOOLS))
+        builder.add_edge(START, "agent")
+        builder.add_conditional_edges("agent", _single_loop_condition, {
+            "tools": "tools",
+            END: END,
+        })
+        builder.add_edge("tools", "agent")
         return builder.compile()
 
     @staticmethod
@@ -267,13 +273,13 @@ class PersonalFinanceAgent:
 
             if activity_emitter:
                 yield activity_emitter.emit(
-                    category="planning",
+                    category="workflow",
                     state="started",
-                    phase="planning",
-                    actor="planner",
+                    phase="prepare",
+                    actor="agent",
                     visibility="timeline",
-                    display_key="agent.planning.started",
-                    fallback_text="Planning the request",
+                    display_key="workflow.prepare.started",
+                    fallback_text="Preparing a response",
                 )
 
             with tracing.trace(task="agent-turn", **trace_metadata) as handler:
@@ -288,21 +294,7 @@ class PersonalFinanceAgent:
                 config: RunnableConfig = {
                     "callbacks": callbacks,
                     "configurable": {
-                        "clerk_llm": base_llm.bind_tools(TRANSACTION_TOOLS),
-                        "analyst_llm": base_llm.bind_tools(ANALYTICS_TOOLS),
-                        "engineer_llm": base_llm.bind_tools(INGESTION_TOOLS),
-                        "qa_llm": ChatOpenAI(**base_llm_kwargs),
-                        "planner_llm": (
-                            ChatOpenAI(**base_llm_kwargs)
-                            if is_deepseek_thinking_model(model)
-                            else ChatOpenAI(**base_llm_kwargs).with_structured_output(
-                                PlannerOutput, method="function_calling"
-                            )
-                        ),
-                        "planner_output_mode": (
-                            "json_text" if is_deepseek_thinking_model(model) else "structured"
-                        ),
-                        "synthesizer_llm": ChatOpenAI(**base_llm_kwargs),
+                        "single_loop_llm": base_llm.bind_tools(MODEL_TOOLS),
                         "router_system_prompt": SYSTEM_PROMPT,
                         "today": today,
                         "conversation_context": conv_ctx,
@@ -316,20 +308,20 @@ class PersonalFinanceAgent:
                 }
                 if activity_emitter:
                     yield activity_emitter.emit(
-                        category="node",
+                        category="workflow",
                         state="started",
                         phase="execution",
-                        actor="planner",
+                        actor="agent",
                         visibility="details",
-                        display_key="agent.execution.started",
-                        fallback_text="Running the agent workflow",
+                        display_key="workflow.execution.started",
+                        fallback_text="Running the agent loop",
                     )
                 graph_input = {  # pyright: ignore[reportAssignmentType]
                     "messages": messages,
-                    "route": "",
+                    "route": "single_loop",
                     "sub_task": "",
                     "task_id": "",
-                    "original_query": "",
+                    "original_query": query if isinstance(query, str) else "",
                     "pending_routes": [],
                     "planned_tasks": [],
                     "had_multiple_tasks": False,
@@ -354,69 +346,50 @@ class PersonalFinanceAgent:
 
             response = result["messages"][-1].content
             require_input = self._requires_user_input(result)
-            route = str(result.get("route") or "workflow")
-            actor = _actor_for_route(route)
             tool_names = _tool_names(result)
+            pending_actions = _pending_actions(result)
             if activity_emitter:
-                planned_tasks = _planned_tasks(result)
                 yield activity_emitter.emit(
-                    category="planning",
+                    category="workflow",
                     state="completed",
-                    phase="planning",
-                    actor="planner",
+                    phase="prepare" if require_input else "execution",
+                    actor="agent",
                     visibility="timeline",
-                    display_key="agent.planning.completed",
-                    fallback_text="Request plan is ready",
+                    display_key=(
+                        "workflow.awaiting_approval"
+                        if require_input else "workflow.execution.completed"
+                    ),
+                    fallback_text=(
+                        "Waiting for approval"
+                        if require_input else "Agent loop completed"
+                    ),
                     display_args={
-                        "task_count": len(planned_tasks),
-                        "route": route,
+                        "tool_count": len(tool_names),
                     },
                 )
-                for task in planned_tasks:
-                    yield activity_emitter.emit(
-                        category="task",
-                        state="planned",
-                        phase="planning",
-                        actor=task["actor"],
-                        visibility="timeline",
-                        display_key=f"agent.task.{task['route']}.planned",
-                        fallback_text="Task planned",
-                        display_args={"route": task["route"]},
-                        task_id=task["task_id"],
-                        event_key=f"task.{task['task_id']}.planned",
-                    )
                 yield activity_emitter.emit(
-                    category="node",
+                    category="workflow",
                     state="completed",
                     phase="execution",
-                    actor=actor,
+                    actor="agent",
                     visibility="details",
-                    display_key="agent.execution.completed",
-                    fallback_text="Agent workflow completed",
-                    display_args={"tool_count": len(tool_names), "route": route},
+                    display_key="workflow.loop.completed",
+                    fallback_text="Agent loop completed",
+                    display_args={"tool_count": len(tool_names)},
                 )
                 if tool_names:
                     yield activity_emitter.emit(
                         category="tool",
                         state="completed",
                         phase="execution",
-                        actor=actor,
+                        actor="agent",
                         visibility="details",
                         display_key="agent.tools.completed",
                         fallback_text="Ledger tools completed",
                         display_args={"tool_count": len(tool_names)},
                     )
 
-            had_multiple = result.get("had_multiple_tasks", False)
-            if had_multiple and not require_input:
-                original = result.get("original_query", query)
-                final_msg = result["messages"][-1]
-                updated_history = _serialize_history([
-                    HumanMessage(content=original),
-                    final_msg,
-                ])
-            else:
-                updated_history = _serialize_history(result["messages"][1:])
+            updated_history = _serialize_history(result["messages"][1:])
 
             trace_id = tracing.get_trace_id()
             trace_url = tracing.get_trace_url()
@@ -435,6 +408,14 @@ class PersonalFinanceAgent:
                 "require_user_input": require_input,
                 "content": response,
             }
+            for pending_action in pending_actions:
+                yield {
+                    "type": "awaiting_approval",
+                    "is_task_complete": True,
+                    "require_user_input": True,
+                    "pending_action": pending_action,
+                    "content": pending_action.get("message", ""),
+                }
             yield {
                 "type": "history_snapshot",
                 "messages": updated_history,
@@ -468,16 +449,6 @@ class PersonalFinanceAgent:
                 "usage": {"tokens": 0, "duration_ms": duration_ms},
             }
 
-
-def _actor_for_route(route: str) -> str:
-    return {
-        "transaction": "bookkeeper",
-        "analytics": "analyst",
-        "ingestion": "importer",
-        "chitchat": "synthesizer",
-    }.get(route, "agent")
-
-
 def _tool_names(result: dict) -> list[str]:
     names: list[str] = []
     for msg in result.get("messages", []):
@@ -489,37 +460,17 @@ def _tool_names(result: dict) -> list[str]:
     return names
 
 
-def _planned_tasks(result: dict) -> list[dict[str, str]]:
-    tasks = result.get("planned_tasks", [])
-    if not isinstance(tasks, list):
-        return [{"task_id": "task_1_workflow", "route": "workflow", "actor": "agent"}]
-    planned = []
-    for index, task in enumerate(tasks, start=1):
-        if not isinstance(task, dict):
+def _pending_actions(result: dict) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for msg in result.get("messages", []):
+        if not isinstance(msg, ToolMessage):
             continue
-        route = str(task.get("route") or "workflow")
-        actor = str(task.get("actor") or _actor_for_route(route))
-        task_id = str(task.get("task_id") or f"task_{index}_{route}")
-        planned.append({"task_id": task_id, "route": route, "actor": actor})
-    return planned or [{"task_id": "task_1_workflow", "route": "workflow", "actor": "agent"}]
-
-
-# ── Synthesizer node ──────────────────────────────────────────────────────────
-
-
-async def _synthesizer_node(state: AgentState, config: RunnableConfig) -> dict:
-    llm = config.get("configurable", {}).get("synthesizer_llm")
-    if llm is None:
-        return {"messages": []}
-    prompt = (
-        SYNTHESIZER_PROMPT
-        + "\n\nRESPONSE LANGUAGE:\n"
-        + response_language_instruction(state.get("preferred_language", "auto"))
-    )
-    messages = list(state["messages"])
-    if messages and isinstance(messages[0], SystemMessage):
-        messages[0] = SystemMessage(content=prompt)
-    else:
-        messages.insert(0, SystemMessage(content=prompt))
-    response = await llm.ainvoke(messages)
-    return {"messages": [response]}
+        content = getattr(msg, "content", "") or ""
+        if isinstance(content, str):
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("status") == "PENDING_ACTION":
+                actions.append(payload)
+    return actions

@@ -16,19 +16,25 @@ ValidationFailed for the Tool Layer to route back to the LLM.
 System errors (disk full, git failure) raise exceptions.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
 import uuid
-from datetime import date
+from dataclasses import asdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePosixPath
 
 from .types import (
     DEFAULT_LEDGER_CONFIG,
+    ApplyReceipt,
     CommitResult,
     DependencyUnavailable,
+    IntegrityFailed,
     InvariantViolation,
     LedgerConfig,
+    PendingAction,
     PreflightResult,
     Preview,
     QueryResult,
@@ -150,7 +156,49 @@ _POSTING_ACCOUNT_RE = re.compile(
     r"^\s+(Assets|Liabilities|Equity|Income|Expenses)(?::[A-Za-z][A-Za-z0-9\-]+)+",
     re.MULTILINE,
 )
+_OPEN_ACCOUNT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\s+open\s+"
+    r"((?:Assets|Liabilities|Equity|Income|Expenses)(?::[A-Za-z][A-Za-z0-9\-]+)+)",
+    re.MULTILINE,
+)
 _AMOUNT_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*\s+[A-Z][A-Z0-9\-]+")
+
+_PENDING_ACTION_SCHEMA_VERSION = 1
+_PENDING_ACTION_TTL_MINUTES = 30
+
+
+def _canonical_json(value: dict) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _digest_payload(payload: dict) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _pending_action_digest_input(action: dict) -> dict:
+    return {
+        key: value
+        for key, value in action.items()
+        if key not in {"digest", "signature", "status", "message"}
+    }
+
+
+def _classify_action_risk(action_type: str, validation: dict[str, object]) -> dict[str, object]:
+    reasons: list[str] = []
+    risk = "normal"
+    txn_count = validation.get("transaction_count")
+    if action_type == "bulk_commit" and isinstance(txn_count, int) and txn_count >= 25:
+        risk = "high"
+        reasons.append("bulk_transaction_count")
+    if action_type == "update_transaction":
+        risk = "elevated"
+        reasons.append("historical_update")
+    return {
+        "version": "risk-policy-v1",
+        "risk": risk,
+        "reasons": reasons,
+        "requires_elevated_review": risk == "high",
+    }
 # ---------------------------------------------------------------------------
 # Sidecar helpers
 # ---------------------------------------------------------------------------
@@ -219,6 +267,88 @@ class LedgerService:
     # ── Helpers ────────────────────────────────────────────────────────────
 
     @staticmethod
+    def _make_pending_action(
+        *,
+        action_type: str,
+        execution_spec: dict[str, object],
+        display: dict[str, object],
+        validation: dict[str, object],
+    ) -> PendingAction:
+        pending_action_id = f"pa_{uuid.uuid4().hex[:16]}"
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=_PENDING_ACTION_TTL_MINUTES)
+        ).isoformat()
+        idempotency_key = _digest_payload({
+            "action_type": action_type,
+            "execution_spec": execution_spec,
+            "validation": validation,
+        })
+        payload = {
+            "pending_action_id": pending_action_id,
+            "action_type": action_type,
+            "schema_version": _PENDING_ACTION_SCHEMA_VERSION,
+            "execution_spec": execution_spec,
+            "display": display,
+            "validation": validation,
+            "policy": {
+                "version": "pending-action-v1",
+                "requires_approval": True,
+                **_classify_action_risk(action_type, validation),
+            },
+            "expires_at": expires_at,
+            "idempotency_key": idempotency_key,
+        }
+        digest = _digest_payload(payload)
+        return PendingAction(
+            pending_action_id=pending_action_id,
+            action_type=action_type,
+            schema_version=_PENDING_ACTION_SCHEMA_VERSION,
+            execution_spec=execution_spec,
+            display=display,
+            validation=validation,
+            policy=payload["policy"],
+            expires_at=expires_at,
+            idempotency_key=idempotency_key,
+            digest=digest,
+            signature=f"sha256:{digest}",
+            message="Prepared action is awaiting explicit user approval.",
+        )
+
+    @staticmethod
+    def verify_pending_action(action: dict[str, object]) -> IntegrityFailed | None:
+        pending_action_id = str(action.get("pending_action_id") or "")
+        digest = action.get("digest")
+        signature = action.get("signature")
+        if not isinstance(digest, str) or not digest:
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Missing pending action digest.",
+            )
+        expected = _digest_payload(_pending_action_digest_input(action))
+        if digest != expected or signature != f"sha256:{expected}":
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Pending action integrity check failed.",
+            )
+        expires_at = action.get("expires_at")
+        if isinstance(expires_at, str) and expires_at:
+            try:
+                expires = datetime.fromisoformat(expires_at)
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires <= datetime.now(timezone.utc):
+                    return IntegrityFailed(
+                        pending_action_id=pending_action_id,
+                        error="Pending action has expired.",
+                    )
+            except ValueError:
+                return IntegrityFailed(
+                    pending_action_id=pending_action_id,
+                    error="Pending action expiry is invalid.",
+                )
+        return None
+
+    @staticmethod
     def _extract_accounts(transaction_text: str) -> list[str]:
         return sorted({
             m.group(0).strip()
@@ -234,7 +364,18 @@ class LedgerService:
         )
         if err:
             raise LedgerServiceError(f"Failed to list accounts: {err}")
-        return [r["account"] for r in rows]
+        accounts = {r["account"] for r in rows if r.get("account")}
+        try:
+            for dirpath, dirnames, filenames in os.walk(workspace):
+                dirnames[:] = [d for d in dirnames if d not in {".git", ".venv"}]
+                for fname in filenames:
+                    if not fname.endswith(".beancount"):
+                        continue
+                    with open(os.path.join(dirpath, fname), encoding="utf-8") as f:
+                        accounts.update(_OPEN_ACCOUNT_RE.findall(f.read()))
+        except OSError:
+            pass
+        return sorted(accounts)
 
     @staticmethod
     def validate_accounts(
@@ -315,6 +456,38 @@ class LedgerService:
                 "call confirm_commit with the same transaction_text and "
                 "commit_message after approval."
             ),
+        )
+
+    def prepare_commit(
+        self,
+        workspace: str,
+        transaction_text: str,
+        commit_message: str,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation:
+        preview = self.preview_commit(
+            workspace, transaction_text, commit_message, whitelist, ledger_config
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        return self._make_pending_action(
+            action_type="commit_transaction",
+            execution_spec={
+                "transaction_text": transaction_text,
+                "commit_message": commit_message,
+            },
+            display={
+                "kind": "transaction_preview",
+                "summary": "Record a transaction",
+                "diff": transaction_text,
+                "preview": preview.preview,
+            },
+            validation={
+                "status": "validated",
+                "accounts": preview.preview.get("accounts_validated", []),
+                "target_file": preview.preview.get("target_file"),
+            },
         )
 
     def confirm_commit(
@@ -512,6 +685,40 @@ class LedgerService:
                 "file": config.sidecar_main_path,
             },
             push_status=git["push"],
+        )
+
+    def prepare_open(
+        self,
+        workspace: str,
+        account_name: str,
+        currency: str | None,
+        open_date: str,
+        display_name: str | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation:
+        preview = self.preview_open(
+            workspace, account_name, currency, open_date, display_name, ledger_config
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        return self._make_pending_action(
+            action_type="open_account",
+            execution_spec={
+                "account_name": account_name,
+                "currency": currency,
+                "open_date": open_date,
+                "display_name": display_name,
+            },
+            display={
+                "kind": "account_open_preview",
+                "summary": "Open an account",
+                "diff": preview.preview.get("directive", ""),
+                "preview": preview.preview,
+            },
+            validation={
+                "status": "validated",
+                "account": account_name,
+            },
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -742,6 +949,43 @@ class LedgerService:
             push_status=git["push"],
         )
 
+    def prepare_update(
+        self,
+        workspace: str,
+        target_date: str,
+        narration: str,
+        new_transaction_text: str,
+        commit_message: str,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation:
+        preview = self.preview_update(
+            workspace, target_date, narration, new_transaction_text,
+            commit_message, whitelist, ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        return self._make_pending_action(
+            action_type="update_transaction",
+            execution_spec={
+                "target_date": target_date,
+                "narration": narration,
+                "new_transaction_text": new_transaction_text,
+                "commit_message": commit_message,
+            },
+            display={
+                "kind": "transaction_update_preview",
+                "summary": "Update a transaction",
+                "diff": new_transaction_text,
+                "preview": preview.preview,
+            },
+            validation={
+                "status": "validated",
+                "file": preview.preview.get("file"),
+                "advisory": preview.preview.get("advisory"),
+            },
+        )
+
     # ═══════════════════════════════════════════════════════════════════════
     # bulk_commit → preview_bulk + confirm_bulk
     # ═══════════════════════════════════════════════════════════════════════
@@ -884,6 +1128,146 @@ class LedgerService:
             },
             push_status=git["push"],
         )
+
+    def prepare_bulk(
+        self,
+        workspace: str,
+        transactions_text: str = "",
+        commit_message: str = "",
+        transactions_file: str | None = None,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation:
+        preview = self.preview_bulk(
+            workspace,
+            transactions_text,
+            commit_message,
+            transactions_file,
+            whitelist,
+            ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        if transactions_file:
+            try:
+                with open(transactions_file, encoding="utf-8") as f:
+                    transactions_text = f.read()
+            except OSError as e:
+                return InvariantViolation(
+                    invariant="STAGING_ERROR",
+                    severity="HARD",
+                    provided=transactions_file,
+                    remediation=f"Cannot read staging file: {e}",
+                )
+        return self._make_pending_action(
+            action_type="bulk_commit",
+            execution_spec={
+                "transactions_text": transactions_text,
+                "commit_message": commit_message,
+            },
+            display={
+                "kind": "bulk_import_preview",
+                "summary": "Record multiple transactions",
+                "diff": preview.preview.get("sample", ""),
+                "preview": preview.preview,
+            },
+            validation={
+                "status": "validated",
+                "transaction_count": preview.preview.get("transaction_count", 0),
+                "target_file": preview.preview.get("target_file"),
+            },
+        )
+
+    def apply_pending_action(
+        self,
+        workspace: str,
+        action: dict[str, object],
+        repo_url: str,
+        git_service: GitService,
+        github_token: str | None = None,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> (
+        ApplyReceipt
+        | CommitResult
+        | ValidationFailed
+        | DependencyUnavailable
+        | InvariantViolation
+        | IntegrityFailed
+    ):
+        integrity = self.verify_pending_action(action)
+        if integrity:
+            return integrity
+
+        action_type = str(action.get("action_type") or "")
+        spec = action.get("execution_spec")
+        if not isinstance(spec, dict):
+            return IntegrityFailed(
+                pending_action_id=str(action.get("pending_action_id") or ""),
+                error="Pending action execution spec is invalid.",
+            )
+
+        if action_type == "commit_transaction":
+            result = self.confirm_commit(
+                workspace,
+                str(spec.get("transaction_text") or ""),
+                str(spec.get("commit_message") or ""),
+                repo_url,
+                git_service,
+                github_token,
+                whitelist,
+                ledger_config,
+            )
+        elif action_type == "open_account":
+            result = self.confirm_open(
+                workspace,
+                str(spec.get("account_name") or ""),
+                spec.get("currency") if isinstance(spec.get("currency"), str) else None,
+                str(spec.get("open_date") or ""),
+                repo_url,
+                git_service,
+                spec.get("display_name") if isinstance(spec.get("display_name"), str) else None,
+                github_token,
+                ledger_config,
+            )
+        elif action_type == "update_transaction":
+            result = self.confirm_update(
+                workspace,
+                str(spec.get("target_date") or ""),
+                str(spec.get("narration") or ""),
+                str(spec.get("new_transaction_text") or ""),
+                str(spec.get("commit_message") or ""),
+                repo_url,
+                git_service,
+                github_token,
+                whitelist,
+                ledger_config,
+            )
+        elif action_type == "bulk_commit":
+            result = self.confirm_bulk(
+                workspace,
+                str(spec.get("transactions_text") or ""),
+                str(spec.get("commit_message") or ""),
+                repo_url,
+                git_service,
+                None,
+                github_token,
+                whitelist,
+                ledger_config,
+            )
+        else:
+            return IntegrityFailed(
+                pending_action_id=str(action.get("pending_action_id") or ""),
+                error=f"Unsupported pending action type: {action_type}",
+            )
+
+        if isinstance(result, CommitResult):
+            return ApplyReceipt(
+                pending_action_id=str(action.get("pending_action_id") or ""),
+                action_type=action_type,
+                receipt=asdict(result),
+            )
+        return result
 
     # ═══════════════════════════════════════════════════════════════════════
     # Read operations (stateless)
