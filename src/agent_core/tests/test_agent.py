@@ -5,7 +5,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from agent_core.agent import (
     PersonalFinanceAgent,
@@ -81,6 +87,15 @@ class PromptCapturingLLM:
         return AIMessage(content="node response")
 
 
+class StreamingLLM:
+    async def astream(self, _messages, config=None):
+        yield AIMessageChunk(content="streamed ")
+        yield AIMessageChunk(content="response")
+
+    async def ainvoke(self, _messages, config=None):
+        raise AssertionError("streaming path should not fall back to ainvoke")
+
+
 class CapturingGraph:
     captured_input: dict | None = None
     captured_config: dict | None = None
@@ -128,6 +143,29 @@ async def test_stream_drains_activity_queue_when_graph_fails(monkeypatch):
         and chunk.get("state") == "failed"
         for chunk in chunks
     )
+
+
+@pytest.mark.asyncio
+async def test_single_agent_node_streams_content_to_queue():
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    result = await _single_agent_node(
+        {
+            "messages": [HumanMessage(content="Summarize cash")],
+            "preferred_language": "en",
+        },
+        {
+            "configurable": {
+                "single_loop_llm": StreamingLLM(),
+                "content_stream_queue": queue,
+                "today": "2026-07-01",
+            }
+        },
+    )
+
+    assert result["messages"][0].content == "streamed response"
+    assert queue.get_nowait() == "streamed "
+    assert queue.get_nowait() == "response"
 
 
 def test_requires_user_input_detects_preview_string_content():

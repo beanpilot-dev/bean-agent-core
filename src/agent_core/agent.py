@@ -13,6 +13,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.messages.utils import message_chunk_to_message
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
@@ -163,8 +164,38 @@ async def _single_agent_node(state: AgentState, config: RunnableConfig) -> dict:
         messages[0] = SystemMessage(content=prompt)
     else:
         messages.insert(0, SystemMessage(content=prompt))
-    response = await llm.ainvoke(messages, config=config)
+    content_stream_queue = cfg.get("content_stream_queue")
+    if not hasattr(llm, "astream"):
+        response = await llm.ainvoke(messages, config=config)
+        return {"messages": [response], "route": "single_loop"}
+
+    response_chunk = None
+    async for chunk in llm.astream(messages, config=config):
+        response_chunk = chunk if response_chunk is None else response_chunk + chunk
+        if isinstance(content_stream_queue, asyncio.Queue):
+            text = _message_content_to_text(getattr(chunk, "content", ""))
+            if text:
+                await content_stream_queue.put(text)
+    response = (
+        message_chunk_to_message(response_chunk)
+        if response_chunk is not None
+        else await llm.ainvoke(messages, config=config)
+    )
     return {"messages": [response], "route": "single_loop"}
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "".join(parts)
 
 
 def _single_loop_condition(state: AgentState) -> str:
@@ -257,7 +288,7 @@ class PersonalFinanceAgent:
         ledger_context: dict[str, Any] | None = None,
         activity_emitter: ActivityEmitter | None = None,
     ) -> AsyncGenerator[dict, None]:
-        yield {"is_task_complete": False, "require_user_input": False, "content": "Processing..."}
+        yield {"is_task_complete": False, "require_user_input": False, "content": ""}
 
         start_time = time.monotonic()
         tracing = get_tracing_manager()
@@ -328,6 +359,7 @@ class PersonalFinanceAgent:
                 activity_queue: asyncio.Queue[dict[str, Any]] | None = (
                     asyncio.Queue() if activity_emitter else None
                 )
+                content_stream_queue: asyncio.Queue[str] = asyncio.Queue()
                 callbacks = []
                 if tracing.enabled:
                     callbacks.append(handler)
@@ -347,6 +379,7 @@ class PersonalFinanceAgent:
                         "whitelist": whitelist,
                         "ledger_config": ledger_config,
                         "ledger_context": ledger_context,
+                        "content_stream_queue": content_stream_queue,
                     },
                 }
                 if activity_emitter:
@@ -371,11 +404,21 @@ class PersonalFinanceAgent:
                     "preferred_language": preferred_language,
                 }
                 graph_task = asyncio.create_task(self.graph.ainvoke(graph_input, config=config))
-                while activity_queue and not graph_task.done():
-                    try:
-                        yield await asyncio.wait_for(activity_queue.get(), timeout=0.1)
-                    except asyncio.TimeoutError:
-                        continue
+                while not graph_task.done():
+                    yielded = False
+                    while not content_stream_queue.empty():
+                        yielded = True
+                        yield {
+                            "is_task_complete": False,
+                            "require_user_input": False,
+                            "content": content_stream_queue.get_nowait(),
+                        }
+                    if activity_queue:
+                        while not activity_queue.empty():
+                            yielded = True
+                            yield activity_queue.get_nowait()
+                    if not yielded:
+                        await asyncio.wait({graph_task}, timeout=0.05)
                 try:
                     result = await graph_task
                 except Exception:
@@ -383,6 +426,12 @@ class PersonalFinanceAgent:
                         while not activity_queue.empty():
                             yield activity_queue.get_nowait()
                     raise
+                while not content_stream_queue.empty():
+                    yield {
+                        "is_task_complete": False,
+                        "require_user_input": False,
+                        "content": content_stream_queue.get_nowait(),
+                    }
                 if activity_queue:
                     while not activity_queue.empty():
                         yield activity_queue.get_nowait()
