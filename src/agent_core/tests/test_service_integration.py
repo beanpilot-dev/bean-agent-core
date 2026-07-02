@@ -1,6 +1,7 @@
 """Integration tests across API, orchestrator, workflow tools, and services."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -10,7 +11,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from agent_core.services.orchestrator import AgentOrchestrator
-from agent_core.services.workspace import CachedWorkspaceManager, LocalGitService
+from agent_core.services.types import PreflightResult
+from agent_core.services.workspace import (
+    CachedWorkspaceManager,
+    CacheLockTimeoutError,
+    GitServiceError,
+    LocalGitService,
+    RepoAuthFailedError,
+)
 from agent_core.workflow.tools import tool_account_balance, tool_query_template
 
 
@@ -200,6 +208,187 @@ async def test_stats_and_accounts_run_through_services(
 
 
 @pytest.mark.asyncio
+async def test_cache_warmup_copies_preflights_and_cleans_temp_workspace(
+    tmp_path: Path, bare_ledger_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_core.services import orchestrator as orchestrator_module
+
+    git = LocalGitService(str(bare_ledger_repo))
+    cache = CachedWorkspaceManager(git, ttl_seconds=-1)
+    monkeypatch.setattr(cache, "CACHE_ROOT", str(tmp_path / "cache"))
+    snapshot = tmp_path / "bean_warmup_test"
+    monkeypatch.setattr(
+        orchestrator_module.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(snapshot),
+    )
+    orchestrator = AgentOrchestrator(Mock(), cache, git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="ignored",
+        token=None,
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "ok"
+    assert result["cache_state"] == "ready"
+    assert result["preflight_status"] == "ok"
+    assert not snapshot.exists()
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_setup_required_is_safe_and_cleans_temp_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_core.services import orchestrator as orchestrator_module
+
+    workspace = tmp_path / "repo"
+    data = workspace / "data"
+    data.mkdir(parents=True)
+    (data / "main.beancount").write_text('option "title" "Missing sidecar"\n')
+    subprocess.run(["git", "init", str(workspace)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "data"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "missing sidecar"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    git = LocalGitService(str(workspace))
+    cache = CachedWorkspaceManager(git, ttl_seconds=-1)
+    monkeypatch.setattr(cache, "CACHE_ROOT", str(tmp_path / "cache"))
+    snapshot = tmp_path / "bean_warmup_setup_required"
+    monkeypatch.setattr(
+        orchestrator_module.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: str(snapshot),
+    )
+    orchestrator = AgentOrchestrator(Mock(), cache, git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="ignored",
+        token=None,
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "SETUP_REQUIRED"
+    assert result["error"]["message"] == "Workspace ledger setup is incomplete"
+    assert result["preflight_status"] == "setup_required"
+    assert not snapshot.exists()
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_maps_preflight_error_without_raw_output(
+    tmp_path: Path, bare_ledger_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_core.services import orchestrator as orchestrator_module
+
+    git = LocalGitService(str(bare_ledger_repo))
+    cache = CachedWorkspaceManager(git, ttl_seconds=-1)
+    monkeypatch.setattr(cache, "CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        orchestrator_module.PreflightService,
+        "validate",
+        Mock(return_value=PreflightResult(status="ERROR", errors="secret bean output")),
+    )
+    orchestrator = AgentOrchestrator(Mock(), cache, git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="ignored",
+        token=None,
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "error"
+    assert result["preflight_status"] == "error"
+    assert result["error"] == {
+        "code": "PREFLIGHT_FAILED",
+        "message": "Ledger preflight failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_maps_auth_failure_without_raw_error() -> None:
+    git = Mock()
+    git.validate_request_credentials.side_effect = RepoAuthFailedError("secret git stderr")
+    orchestrator = AgentOrchestrator(Mock(), Mock(), git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="https://example.com/private.git",
+        token="token",
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "code": "REPO_AUTH_FAILED",
+        "message": "Repository authorization failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_maps_cache_lock_timeout() -> None:
+    git = Mock()
+    git.validate_request_credentials.return_value = None
+    cache = Mock()
+    cache.acquire.side_effect = CacheLockTimeoutError("secret cache path")
+    orchestrator = AgentOrchestrator(Mock(), cache, git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="repo",
+        token=None,
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "error"
+    assert result["cache_state"] == "busy"
+    assert result["error"] == {
+        "code": "CACHE_BUSY",
+        "message": "Workspace cache is busy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cache_warmup_maps_git_failure_without_raw_error() -> None:
+    git = Mock()
+    git.validate_request_credentials.return_value = None
+    cache = Mock()
+    cache.acquire.side_effect = GitServiceError("secret git stderr")
+    orchestrator = AgentOrchestrator(Mock(), cache, git)
+
+    result = await orchestrator.run_cache_warmup(
+        repo_url="repo",
+        token=None,
+        user_id="user",
+        request_id="warm",
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "code": "REPO_UNREACHABLE",
+        "message": "Repository is unreachable",
+    }
+
+
+@pytest.mark.asyncio
 async def test_stats_and_accounts_json_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,6 +410,18 @@ async def test_stats_and_accounts_json_endpoints(
             }
         ),
     )
+    monkeypatch.setattr(
+        main._orchestrator,
+        "run_cache_warmup",
+        AsyncMock(
+            return_value={
+                "status": "ok",
+                "cache_state": "ready",
+                "preflight_status": "ok",
+                "request_id": "request",
+            }
+        ),
+    )
     common = {
         "repo": {"url": "ignored", "token": "ignored"},
         "user_id": "user",
@@ -239,15 +440,20 @@ async def test_stats_and_accounts_json_endpoints(
             json={**common, "conversation": {"tag": "#trip"}},
         )
         accounts = await client.post("/agent/accounts", json=common)
+        warmup = await client.post("/agent/cache/warm", json=common)
 
     assert stats.status_code == 200
     assert stats.json()["rows"] == [{"account": "Expenses:Food"}]
     assert accounts.status_code == 200
     assert accounts.json()["accounts"] == ["Assets:Cash"]
+    assert warmup.status_code == 200
+    assert warmup.json()["cache_state"] == "ready"
     stats_config = main._orchestrator.run_stats.call_args.kwargs["ledger_config"]
     accounts_config = main._orchestrator.run_accounts.call_args.kwargs["ledger_config"]
+    warmup_config = main._orchestrator.run_cache_warmup.call_args.kwargs["ledger_config"]
     assert stats_config.entry_path == "books/root.beancount"
     assert accounts_config.sidecar_write_dir == "books/agent_sidecar"
+    assert warmup_config.entry_path == "books/root.beancount"
 
 
 @pytest.mark.asyncio

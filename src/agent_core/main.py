@@ -175,6 +175,13 @@ class AccountsRequest(BaseModel):
     ledger: LedgerPayload | None = None
 
 
+class CacheWarmRequest(BaseModel):
+    repo: RepoInfo
+    user_id: str
+    request_id: str | None = None
+    ledger: LedgerPayload | None = None
+
+
 class ApplyPendingActionRequest(BaseModel):
     repo: RepoInfo
     user_id: str
@@ -494,6 +501,38 @@ async def agent_accounts(req: AccountsRequest):
         "raw_accounts": result.get("raw_accounts", []),
         "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /agent/cache/warm — best-effort cache warmup, JSON
+# ---------------------------------------------------------------------------
+
+@app.post("/agent/cache/warm")
+async def agent_cache_warm(req: CacheWarmRequest):
+    try:
+        ledger_config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
+
+    logger.info(
+        "agent-cache-warm user_id=%s request_id=%s has_ledger_config=%s",
+        req.user_id,
+        req.request_id,
+        bool(req.ledger),
+    )
+
+    result = await _orchestrator.run_cache_warmup(
+        repo_url=req.repo.url,
+        token=req.repo.token,
+        user_id=req.user_id,
+        request_id=req.request_id,
+        ledger_config=ledger_config,
+    )
+    status_code = 200
+    if result.get("status") == "error":
+        code = (result.get("error") or {}).get("code")
+        status_code = 409 if code == "CACHE_BUSY" else 400
+    return JSONResponse(content=result, status_code=status_code)
 
 
 # ---------------------------------------------------------------------------

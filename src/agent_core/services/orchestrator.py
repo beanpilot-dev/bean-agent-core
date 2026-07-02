@@ -572,6 +572,119 @@ class AgentOrchestrator:
                 Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
+    async def run_cache_warmup(
+        self,
+        *,
+        repo_url: str,
+        token: str | None,
+        user_id: str,
+        request_id: str | None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> dict:
+        """Warm the shared repo cache and validate a copied temp workspace."""
+        start_time = time.monotonic()
+        workspace_path: str | None = None
+
+        try:
+            self._git_service.validate_request_credentials(repo_url, token)
+            cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+            workspace_path = tempfile.mkdtemp(prefix="bean_warmup_")
+            self._git_service.copy(cache_path, workspace_path)
+            preflight = PreflightService.validate(workspace_path, ledger_config)
+            if preflight.status != "CLEAN":
+                logger.warning(
+                    "Cache warmup preflight failed user_id=%s request_id=%s status=%s",
+                    user_id,
+                    request_id,
+                    preflight.status,
+                )
+                return {
+                    "status": "error",
+                    "cache_state": "ready",
+                    "preflight_status": "error",
+                    "request_id": request_id,
+                    "error": {
+                        "code": "PREFLIGHT_FAILED",
+                        "message": "Ledger preflight failed",
+                    },
+                    "usage": {
+                        "duration_ms": int((time.monotonic() - start_time) * 1000),
+                    },
+                }
+            return {
+                "status": "ok",
+                "cache_state": "ready",
+                "preflight_status": "ok",
+                "request_id": request_id,
+                "usage": {
+                    "duration_ms": int((time.monotonic() - start_time) * 1000),
+                },
+            }
+        except SetupRequiredError:
+            logger.warning(
+                "Cache warmup preflight requires setup user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
+            return {
+                "status": "error",
+                "cache_state": "ready",
+                "preflight_status": "setup_required",
+                "request_id": request_id,
+                "error": {
+                    "code": "SETUP_REQUIRED",
+                    "message": "Workspace ledger setup is incomplete",
+                },
+                "usage": {
+                    "duration_ms": int((time.monotonic() - start_time) * 1000),
+                },
+            }
+        except CacheLockTimeoutError:
+            logger.warning(
+                "Cache warmup lock timeout user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
+            return {
+                "status": "error",
+                "cache_state": "busy",
+                "preflight_status": "not_run",
+                "request_id": request_id,
+                "error": {
+                    "code": "CACHE_BUSY",
+                    "message": "Workspace cache is busy",
+                },
+                "usage": {
+                    "duration_ms": int((time.monotonic() - start_time) * 1000),
+                },
+            }
+        except GitServiceError as e:
+            code = _git_error_code(e)
+            logger.warning(
+                "Cache warmup git failed user_id=%s request_id=%s code=%s error_type=%s",
+                user_id,
+                request_id,
+                code,
+                type(e).__name__,
+            )
+            return {
+                "status": "error",
+                "cache_state": "unavailable",
+                "preflight_status": "not_run",
+                "request_id": request_id,
+                "error": {
+                    "code": code,
+                    "message": _safe_git_message(code),
+                },
+                "usage": {
+                    "duration_ms": int((time.monotonic() - start_time) * 1000),
+                },
+            }
+        finally:
+            if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
+                self._git_service.destroy(workspace_path)
+
     async def run_onboarding_discovery(
         self,
         *,
