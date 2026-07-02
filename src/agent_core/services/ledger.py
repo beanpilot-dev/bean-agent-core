@@ -17,12 +17,13 @@ System errors (disk full, git failure) raise exceptions.
 """
 
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePosixPath
 
@@ -43,6 +44,13 @@ from .types import (
 from .workspace import GitService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _ParsedLedger:
+    fingerprint: tuple[tuple[str, int, int], ...]
+    errors: list[object]
+    error_output: str
 
 
 class LedgerServiceError(Exception):
@@ -88,6 +96,7 @@ def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
 # ---------------------------------------------------------------------------
 
 class Beancount:
+    _parsed_cache: dict[tuple[str, str], _ParsedLedger] = {}
 
     @staticmethod
     def _bean_bin(workspace: str, name: str) -> str:
@@ -104,6 +113,16 @@ class Beancount:
     def bean_check(
         workspace: str, ledger_config: LedgerConfig | None = None
     ) -> tuple[bool, str]:
+        if os.environ.get("BEANPILOT_BEANCOUNT_VALIDATE_MODE") == "cli":
+            return Beancount._bean_check_cli(workspace, ledger_config)
+
+        parsed = Beancount._load_ledger(workspace, ledger_config)
+        return not parsed.errors, parsed.error_output
+
+    @staticmethod
+    def _bean_check_cli(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> tuple[bool, str]:
         import subprocess
         main = _repo_path(workspace, _cfg(ledger_config).entry_path)
         result = subprocess.run(
@@ -111,6 +130,79 @@ class Beancount:
             cwd=workspace, capture_output=True, text=True,
         )
         return result.returncode == 0, result.stdout + result.stderr
+
+    @staticmethod
+    def _cache_key(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> tuple[str, str]:
+        config = _cfg(ledger_config)
+        return os.path.abspath(workspace), config.entry_path
+
+    @staticmethod
+    def _load_ledger(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> _ParsedLedger:
+        key = Beancount._cache_key(workspace, ledger_config)
+        fingerprint = Beancount._workspace_fingerprint(workspace)
+        cached = Beancount._parsed_cache.get(key)
+        if cached is not None and cached.fingerprint == fingerprint:
+            return cached
+
+        from beancount import loader
+        from beancount.parser import printer
+
+        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
+        try:
+            _entries, errors, _options = loader.load_file(main)
+            output = io.StringIO()
+            printer.print_errors(errors, file=output)
+            parsed = _ParsedLedger(
+                fingerprint=fingerprint,
+                errors=list(errors),
+                error_output=output.getvalue(),
+            )
+        except Exception as exc:
+            parsed = _ParsedLedger(
+                fingerprint=fingerprint,
+                errors=[exc],
+                error_output=str(exc),
+            )
+
+        Beancount._parsed_cache[key] = parsed
+        return parsed
+
+    @staticmethod
+    def _workspace_fingerprint(workspace: str) -> tuple[tuple[str, int, int], ...]:
+        fingerprint: list[tuple[str, int, int]] = []
+        try:
+            for dirpath, dirnames, filenames in os.walk(workspace):
+                dirnames[:] = [d for d in dirnames if d not in {".git", ".venv"}]
+                for filename in filenames:
+                    if not filename.endswith((".beancount", ".py")):
+                        continue
+                    path = os.path.join(dirpath, filename)
+                    try:
+                        stat = os.stat(path)
+                    except OSError:
+                        continue
+                    rel_path = os.path.relpath(path, workspace)
+                    fingerprint.append((rel_path, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            pass
+        return tuple(sorted(fingerprint))
+
+    @staticmethod
+    def invalidate_cache(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> None:
+        Beancount._parsed_cache.pop(Beancount._cache_key(workspace, ledger_config), None)
+
+    @staticmethod
+    def invalidate_workspace(workspace: str) -> None:
+        workspace_abs = os.path.abspath(workspace)
+        for key in list(Beancount._parsed_cache):
+            if key[0] == workspace_abs:
+                Beancount._parsed_cache.pop(key, None)
 
     @staticmethod
     def bean_format(workspace: str, file_path: str) -> None:
@@ -122,6 +214,7 @@ class Beancount:
         if result.returncode == 0 and result.stdout:
             with open(file_path, "w") as f:
                 f.write(result.stdout)
+            Beancount.invalidate_workspace(workspace)
         elif result.returncode != 0:
             logger.warning(
                 "bean-format failed on %s: %s", file_path, result.stderr.strip()
@@ -226,11 +319,13 @@ def _ensure_agent_sidecar(
     os.makedirs(agent_dir, exist_ok=True)
 
     chunk_path = os.path.join(agent_dir, chunk_name)
+    changed = False
     if not os.path.exists(chunk_path):
         with open(chunk_path, "w") as f:
             f.write(
                 f"; Agent-generated transactions — {today.year}-{today.month:02d}\n"
             )
+        changed = True
 
     agg_path = _repo_path(workspace, config.sidecar_main_path)
     os.makedirs(os.path.dirname(agg_path), exist_ok=True)
@@ -241,10 +336,15 @@ def _ensure_agent_sidecar(
         if chunk_name not in existing:
             with open(agg_path, "a") as f:
                 f.write(include_line)
+            changed = True
     else:
         with open(agg_path, "w") as f:
             f.write("; Agent sidecar — auto-managed, do not edit manually\n")
             f.write(include_line)
+        changed = True
+
+    if changed:
+        Beancount.invalidate_cache(workspace, config)
 
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
@@ -520,10 +620,12 @@ class LedgerService:
         with open(target_path, "a") as f:
             f.write(f"\n{transaction_text}\n")
 
+        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
+            Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
             return ValidationFailed(
                 error=check_output.strip(),
@@ -657,10 +759,12 @@ class LedgerService:
         with open(main_path, "w") as f:
             f.write(new_content)
 
+        Beancount.invalidate_cache(workspace, config)
         is_clean, check_output = Beancount.bean_check(workspace, config)
         if not is_clean:
             with open(main_path, "w") as f:
                 f.write(original)
+            Beancount.invalidate_cache(workspace, config)
             return ValidationFailed(
                 error=check_output.strip(),
                 remediation="Fix the account directive and try again.",
@@ -917,10 +1021,12 @@ class LedgerService:
         with open(file_path, "w") as f:
             f.write(new_content)
 
+        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(file_path, "w") as f:
                 f.write(original)
+            Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
             return ValidationFailed(
                 error=check_output.strip(),
@@ -1096,10 +1202,12 @@ class LedgerService:
         with open(target_path, "a") as f:
             f.write(f"\n{transactions_text.strip()}\n")
 
+        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
+            Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
             return ValidationFailed(
                 error=check_output.strip(),

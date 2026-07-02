@@ -389,6 +389,7 @@ class AgentOrchestrator:
             }
 
         finally:
+            Beancount.invalidate_workspace(workspace_path)
             self._git_service.destroy(workspace_path)
 
     async def run_stats(
@@ -457,6 +458,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
     async def run_apply_pending_action(
@@ -509,6 +511,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
     async def run_accounts(
@@ -566,6 +569,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
     async def run_onboarding_discovery(
@@ -611,6 +615,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
     async def run_onboarding_setup_preview(
@@ -648,6 +653,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
     async def run_onboarding_setup_confirm(
@@ -690,6 +696,7 @@ class AgentOrchestrator:
             }
         finally:
             if workspace_path:
+                Beancount.invalidate_workspace(workspace_path)
                 self._git_service.destroy(workspace_path)
 
 

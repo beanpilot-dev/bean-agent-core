@@ -104,6 +104,62 @@ def test_get_accounts_includes_open_only_accounts(ledger_workspace: Path) -> Non
     assert "Expenses:Tax:Federal" in accounts
 
 
+def test_bean_check_uses_in_process_loader_by_default(
+    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Beancount.invalidate_workspace(str(ledger_workspace))
+
+    def fail_subprocess_run(*_args, **_kwargs):
+        raise AssertionError("bean_check should not shell out by default")
+
+    monkeypatch.setattr("subprocess.run", fail_subprocess_run)
+
+    ok, output = Beancount.bean_check(str(ledger_workspace))
+
+    assert ok is True
+    assert output == ""
+
+
+def test_confirm_commit_invalidates_cached_validation_before_checking(
+    ledger_workspace: Path, git_service: Mock
+) -> None:
+    ok, output = Beancount.bean_check(str(ledger_workspace))
+    assert ok is True
+    assert output == ""
+
+    result = LedgerService().confirm_commit(
+        str(ledger_workspace),
+        '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        "bad",
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ValidationFailed)
+    assert "does not balance" in result.error
+    git_service.commit_and_push.assert_not_called()
+
+
+def test_bean_check_fingerprint_detects_external_file_edits(
+    ledger_workspace: Path,
+) -> None:
+    ok, output = Beancount.bean_check(str(ledger_workspace))
+    assert ok is True
+    assert output == ""
+
+    sidecar = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    sidecar.write_text(
+        sidecar.read_text()
+        + '\n2026-06-16 * "External bad edit"\n'
+        + "  Expenses:Food:Dining  100 CNY\n"
+    )
+
+    ok, output = Beancount.bean_check(str(ledger_workspace))
+
+    assert ok is False
+    assert "does not balance" in output
+
+
 def test_prepare_commit_materializes_pending_action_contract(ledger_workspace: Path) -> None:
     result = LedgerService().prepare_commit(
         str(ledger_workspace), TXN, "record dinner", ["Expenses:Food", "Assets:Cash"]
