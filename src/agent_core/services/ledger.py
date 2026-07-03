@@ -22,10 +22,13 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePosixPath
+from typing import Callable
 
 from .types import (
     DEFAULT_LEDGER_CONFIG,
@@ -35,11 +38,13 @@ from .types import (
     IntegrityFailed,
     InvariantViolation,
     LedgerConfig,
+    LedgerMutationAction,
     PendingAction,
     PreflightResult,
     Preview,
     QueryResult,
     ValidationFailed,
+    ValidationSummary,
 )
 from .workspace import GitService
 
@@ -51,6 +56,13 @@ class _ParsedLedger:
     fingerprint: tuple[tuple[str, int, int], ...]
     errors: list[object]
     error_output: str
+
+
+@dataclass(frozen=True)
+class _DryRunResult:
+    target_file: str | None
+    validation: ValidationSummary
+    failure: ValidationFailed | None = None
 
 
 class LedgerServiceError(Exception):
@@ -260,6 +272,57 @@ _PENDING_ACTION_SCHEMA_VERSION = 1
 _PENDING_ACTION_TTL_MINUTES = 30
 
 
+def _summarize_validation_failure(output: str) -> ValidationSummary:
+    lower = output.lower()
+    messages: list[str]
+    error_type = "beancount_validation_error"
+    if "does not balance" in lower:
+        error_type = "transaction_not_balanced"
+        messages = [
+            "One or more transactions do not balance.",
+            "Check posting signs, commodities, and whether one posting should be inferred.",
+        ]
+    elif "syntax error" in lower or "parser" in lower:
+        error_type = "syntax_error"
+        messages = [
+            "The draft contains Beancount syntax that could not be parsed.",
+            "Check dates, quotes, indentation, directives, and posting lines.",
+        ]
+    elif "balance failed" in lower or "balance assertion" in lower:
+        error_type = "balance_assertion_failed"
+        messages = [
+            "The draft changes ledger balances in a way that violates an assertion.",
+            "Review whether the proposed mutation belongs in the sidecar ledger.",
+        ]
+    else:
+        messages = [
+            "The draft does not pass deterministic Beancount validation.",
+            "Revise the proposed ledger text and run the mutation tool again.",
+        ]
+
+    error_count = max(1, len([line for line in output.splitlines() if line.strip()]))
+    return ValidationSummary(
+        status="failed",
+        error_type=error_type,
+        error_count=error_count,
+        messages=messages,
+        retryable=True,
+    )
+
+
+def _validation_failure(output: str, remediation: str) -> ValidationFailed:
+    summary = _summarize_validation_failure(output)
+    return ValidationFailed(
+        error=summary.error_type or "beancount_validation_error",
+        remediation=remediation,
+        advisory=asdict(summary),
+    )
+
+
+def _validation_success(isolated: bool) -> ValidationSummary:
+    return ValidationSummary(status="validated", isolated=isolated)
+
+
 def _canonical_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -295,6 +358,13 @@ def _classify_action_risk(action_type: str, validation: dict[str, object]) -> di
 # ---------------------------------------------------------------------------
 # Sidecar helpers
 # ---------------------------------------------------------------------------
+
+def _agent_sidecar_target_file(ledger_config: LedgerConfig | None = None) -> str:
+    config = _cfg(ledger_config)
+    today = date.today()
+    chunk_name = f"{today.year}-{today.month:02d}.beancount"
+    return f"{config.sidecar_write_dir}/{chunk_name}"
+
 
 def _check_sidecar_include(
     workspace: str, ledger_config: LedgerConfig | None = None
@@ -349,6 +419,119 @@ def _ensure_agent_sidecar(
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
 
+def _copy_workspace_for_dry_run(workspace: str, target: str) -> None:
+    shutil.copytree(
+        workspace,
+        target,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".ruff_cache",
+        ),
+    )
+
+
+def _run_isolated_validation(
+    workspace: str,
+    ledger_config: LedgerConfig | None,
+    mutator: Callable[[str], str | None],
+    remediation: str,
+) -> _DryRunResult:
+    config = _cfg(ledger_config)
+    try:
+        with tempfile.TemporaryDirectory(prefix="beanpilot-dry-run-") as tmp:
+            dry_workspace = os.path.join(tmp, "workspace")
+            _copy_workspace_for_dry_run(workspace, dry_workspace)
+            try:
+                target_file = mutator(dry_workspace)
+                Beancount.invalidate_cache(dry_workspace, config)
+                is_clean, check_output = Beancount.bean_check(dry_workspace, config)
+                if not is_clean:
+                    return _DryRunResult(
+                        target_file=target_file,
+                        validation=_summarize_validation_failure(check_output),
+                        failure=_validation_failure(check_output, remediation),
+                    )
+                return _DryRunResult(
+                    target_file=target_file,
+                    validation=_validation_success(isolated=True),
+                )
+            finally:
+                Beancount.invalidate_workspace(dry_workspace)
+    except OSError as exc:
+        raise LedgerServiceError("Dry-run validation workspace unavailable") from exc
+
+
+def _append_to_sidecar(
+    workspace: str,
+    text: str,
+    ledger_config: LedgerConfig | None = None,
+) -> str:
+    target = _ensure_agent_sidecar(workspace, ledger_config)
+    target_path = os.path.join(workspace, target)
+    with open(target_path, "a") as f:
+        f.write(f"\n{text.strip()}\n")
+    Beancount.invalidate_cache(workspace, ledger_config)
+    return target
+
+
+def _write_open_directive(
+    workspace: str,
+    account_name: str,
+    directive_text: str,
+    ledger_config: LedgerConfig | None = None,
+) -> str:
+    config = _cfg(ledger_config)
+    _ensure_agent_sidecar(workspace, config)
+    main_path = _repo_path(workspace, config.sidecar_main_path)
+
+    with open(main_path) as f:
+        original = f.read()
+
+    directive_lines = directive_text.split("\n")
+    account_type = account_name.split(":")[0]
+    lines = original.splitlines()
+    insert_after = -1
+    for i, line in enumerate(lines):
+        if re.match(rf"^\d{{4}}-\d{{2}}-\d{{2}} open {account_type}", line):
+            insert_after = i
+    if insert_after == -1:
+        for i, line in enumerate(lines):
+            if re.match(r"^\d{4}-\d{2}-\d{2} open ", line):
+                insert_after = i
+
+    if insert_after >= 0:
+        for j, dl in enumerate(directive_lines):
+            lines.insert(insert_after + 1 + j, dl)
+        new_content = "\n".join(lines) + "\n"
+    else:
+        new_content = original.rstrip("\n") + "\n\n" + directive_text + "\n"
+
+    with open(main_path, "w") as f:
+        f.write(new_content)
+    Beancount.invalidate_cache(workspace, config)
+    return config.sidecar_main_path
+
+
+def _replace_transaction_block(
+    workspace: str,
+    rel_path: str,
+    old_block: str,
+    new_transaction_text: str,
+    ledger_config: LedgerConfig | None = None,
+) -> str:
+    file_path = os.path.join(workspace, rel_path)
+    with open(file_path) as f:
+        original = f.read()
+    new_content = original.replace(old_block, new_transaction_text.strip(), 1)
+    with open(file_path, "w") as f:
+        f.write(new_content)
+    Beancount.invalidate_cache(workspace, ledger_config)
+    return rel_path
+
+
 # ---------------------------------------------------------------------------
 # LedgerService
 # ---------------------------------------------------------------------------
@@ -374,26 +557,33 @@ class LedgerService:
         display: dict[str, object],
         validation: dict[str, object],
     ) -> PendingAction:
+        mutation = LedgerMutationAction(
+            action_type=action_type,
+            schema_version=_PENDING_ACTION_SCHEMA_VERSION,
+            execution_spec=execution_spec,
+            display=display,
+            validation=validation,
+        )
         pending_action_id = f"pa_{uuid.uuid4().hex[:16]}"
         expires_at = (
             datetime.now(timezone.utc) + timedelta(minutes=_PENDING_ACTION_TTL_MINUTES)
         ).isoformat()
         idempotency_key = _digest_payload({
-            "action_type": action_type,
-            "execution_spec": execution_spec,
-            "validation": validation,
+            "action_type": mutation.action_type,
+            "execution_spec": mutation.execution_spec,
+            "validation": mutation.validation,
         })
         payload = {
             "pending_action_id": pending_action_id,
-            "action_type": action_type,
-            "schema_version": _PENDING_ACTION_SCHEMA_VERSION,
-            "execution_spec": execution_spec,
-            "display": display,
-            "validation": validation,
+            "action_type": mutation.action_type,
+            "schema_version": mutation.schema_version,
+            "execution_spec": mutation.execution_spec,
+            "display": mutation.display,
+            "validation": mutation.validation,
             "policy": {
                 "version": "pending-action-v1",
                 "requires_approval": True,
-                **_classify_action_risk(action_type, validation),
+                **_classify_action_risk(mutation.action_type, mutation.validation),
             },
             "expires_at": expires_at,
             "idempotency_key": idempotency_key,
@@ -529,10 +719,8 @@ class LedgerService:
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> Preview | InvariantViolation:
-        """Validate a transaction proposal. Returns Preview with proposal_id."""
-        target = _ensure_agent_sidecar(workspace, ledger_config)
-
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Validate a transaction proposal in an isolated dry-run."""
         violation = self.validate_accounts(
             workspace, transaction_text, whitelist, ledger_config
         )
@@ -540,6 +728,18 @@ class LedgerService:
             return violation
 
         accounts = LedgerService._extract_accounts(transaction_text)
+        dry_run = _run_isolated_validation(
+            workspace,
+            ledger_config,
+            lambda dry_workspace: _append_to_sidecar(
+                dry_workspace, transaction_text, ledger_config
+            ),
+            "Fix the transaction syntax or balancing and prepare it again.",
+        )
+        if dry_run.failure:
+            return dry_run.failure
+
+        target = dry_run.target_file or _agent_sidecar_target_file(ledger_config)
         pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
@@ -550,11 +750,11 @@ class LedgerService:
                 "accounts_validated": accounts,
                 "target_file": target,
                 "commit_message": commit_message,
+                "validation": asdict(dry_run.validation),
             },
             message=(
-                "All accounts validated. Show this preview to the user and "
-                "call confirm_commit with the same transaction_text and "
-                "commit_message after approval."
+                "All accounts and dry-run validation passed. Show this preview "
+                "to the user and request explicit approval."
             ),
         )
 
@@ -565,7 +765,7 @@ class LedgerService:
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> PendingAction | InvariantViolation:
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
         preview = self.preview_commit(
             workspace, transaction_text, commit_message, whitelist, ledger_config
         )
@@ -587,6 +787,7 @@ class LedgerService:
                 "status": "validated",
                 "accounts": preview.preview.get("accounts_validated", []),
                 "target_file": preview.preview.get("target_file"),
+                "dry_run": preview.preview.get("validation"),
             },
         )
 
@@ -609,6 +810,7 @@ class LedgerService:
             return preview
 
         target = preview.preview["target_file"]
+        _ensure_agent_sidecar(workspace, ledger_config)
         target_path = os.path.join(workspace, target)
         backup_path = target_path + ".bak"
 
@@ -617,19 +819,17 @@ class LedgerService:
         with open(backup_path, "w") as f:
             f.write(original)
 
-        with open(target_path, "a") as f:
-            f.write(f"\n{transaction_text}\n")
+        _append_to_sidecar(workspace, transaction_text, ledger_config)
 
-        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
             Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
-            return ValidationFailed(
-                error=check_output.strip(),
-                remediation="Fix the transaction syntax and try again.",
+            return _validation_failure(
+                check_output,
+                "Fix the transaction syntax or balancing and prepare it again.",
             )
 
         os.remove(backup_path)
@@ -663,8 +863,8 @@ class LedgerService:
         open_date: str,
         display_name: str | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> Preview | InvariantViolation:
-        """Validate an open-account proposal. Returns Preview with proposal_id."""
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Validate an open-account proposal in an isolated dry-run."""
         if not _ACCOUNT_NAME_RE.match(account_name):
             return InvariantViolation(
                 invariant="ACCOUNT_NAME_FORMAT",
@@ -690,6 +890,18 @@ class LedgerService:
         if display_name:
             directive_lines.append(f'  name: "{display_name}"')
         directive_text = "\n".join(directive_lines)
+
+        dry_run = _run_isolated_validation(
+            workspace,
+            ledger_config,
+            lambda dry_workspace: _write_open_directive(
+                dry_workspace, account_name, directive_text, ledger_config
+            ),
+            "Fix the account directive and prepare it again.",
+        )
+        if dry_run.failure:
+            return dry_run.failure
+
         pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
@@ -700,9 +912,11 @@ class LedgerService:
                 "account": account_name,
                 "currency": currency,
                 "open_date": open_date,
+                "target_file": dry_run.target_file,
+                "validation": asdict(dry_run.validation),
             },
             message=(
-                "Call confirm_open with the same account details after user approval."
+                "Account directive passed dry-run validation. Request explicit approval."
             ),
         )
 
@@ -726,7 +940,6 @@ class LedgerService:
             return preview
 
         directive_text = preview.preview["directive"]
-        directive_lines = directive_text.split("\n")
 
         config = _cfg(ledger_config)
         _ensure_agent_sidecar(workspace, config)
@@ -738,36 +951,16 @@ class LedgerService:
         except OSError as e:
             return DependencyUnavailable(error=f"Cannot read main.beancount: {e}")
 
-        account_type = account_name.split(":")[0]
-        lines = original.splitlines()
-        insert_after = -1
-        for i, line in enumerate(lines):
-            if re.match(rf"^\d{{4}}-\d{{2}}-\d{{2}} open {account_type}", line):
-                insert_after = i
-        if insert_after == -1:
-            for i, line in enumerate(lines):
-                if re.match(r"^\d{4}-\d{2}-\d{2} open ", line):
-                    insert_after = i
+        _write_open_directive(workspace, account_name, directive_text, config)
 
-        if insert_after >= 0:
-            for j, dl in enumerate(directive_lines):
-                lines.insert(insert_after + 1 + j, dl)
-            new_content = "\n".join(lines) + "\n"
-        else:
-            new_content = original.rstrip("\n") + "\n\n" + directive_text + "\n"
-
-        with open(main_path, "w") as f:
-            f.write(new_content)
-
-        Beancount.invalidate_cache(workspace, config)
         is_clean, check_output = Beancount.bean_check(workspace, config)
         if not is_clean:
             with open(main_path, "w") as f:
                 f.write(original)
             Beancount.invalidate_cache(workspace, config)
-            return ValidationFailed(
-                error=check_output.strip(),
-                remediation="Fix the account directive and try again.",
+            return _validation_failure(
+                check_output,
+                "Fix the account directive and prepare it again.",
             )
 
         Beancount.bean_format(workspace, main_path)
@@ -799,7 +992,7 @@ class LedgerService:
         open_date: str,
         display_name: str | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> PendingAction | InvariantViolation:
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
         preview = self.preview_open(
             workspace, account_name, currency, open_date, display_name, ledger_config
         )
@@ -822,6 +1015,7 @@ class LedgerService:
             validation={
                 "status": "validated",
                 "account": account_name,
+                "dry_run": preview.preview.get("validation"),
             },
         )
 
@@ -928,8 +1122,8 @@ class LedgerService:
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> Preview | InvariantViolation:
-        """Find and validate a replacement transaction. Returns Preview."""
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Find and validate a replacement transaction in an isolated dry-run."""
         matches = self.find_transaction_block(
             workspace, target_date, narration, ledger_config
         )
@@ -968,6 +1162,21 @@ class LedgerService:
             return violation
 
         advisory = self._detect_value_change(old_block, new_transaction_text)
+        dry_run = _run_isolated_validation(
+            workspace,
+            ledger_config,
+            lambda dry_workspace: _replace_transaction_block(
+                dry_workspace,
+                rel_path,
+                old_block,
+                new_transaction_text,
+                ledger_config,
+            ),
+            "bean-check failed after replacement. Adjust the transaction and prepare it again.",
+        )
+        if dry_run.failure:
+            return dry_run.failure
+
         pid = f"prop_{uuid.uuid4().hex[:12]}"
 
         return Preview(
@@ -979,9 +1188,10 @@ class LedgerService:
                 "file": rel_path,
                 "commit_message": commit_message,
                 "advisory": advisory,
+                "validation": asdict(dry_run.validation),
             },
             message=(
-                "Call confirm_update with the same parameters after user approval."
+                "Replacement passed dry-run validation. Request explicit approval."
             ),
         )
 
@@ -1017,23 +1227,19 @@ class LedgerService:
         with open(backup_path, "w") as f:
             f.write(original)
 
-        new_content = original.replace(old_block, new_transaction_text.strip(), 1)
-        with open(file_path, "w") as f:
-            f.write(new_content)
+        _replace_transaction_block(
+            workspace, rel_path, old_block, new_transaction_text, ledger_config
+        )
 
-        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(file_path, "w") as f:
                 f.write(original)
             Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
-            return ValidationFailed(
-                error=check_output.strip(),
-                remediation=(
-                    "bean-check failed after replacement. "
-                    "Adjust the transaction and try again."
-                ),
+            return _validation_failure(
+                check_output,
+                "bean-check failed after replacement. Adjust the transaction and prepare it again.",
             )
 
         os.remove(backup_path)
@@ -1064,7 +1270,7 @@ class LedgerService:
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> PendingAction | InvariantViolation:
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
         preview = self.preview_update(
             workspace, target_date, narration, new_transaction_text,
             commit_message, whitelist, ledger_config,
@@ -1089,6 +1295,7 @@ class LedgerService:
                 "status": "validated",
                 "file": preview.preview.get("file"),
                 "advisory": preview.preview.get("advisory"),
+                "dry_run": preview.preview.get("validation"),
             },
         )
 
@@ -1104,8 +1311,8 @@ class LedgerService:
         transactions_file: str | None = None,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> Preview | InvariantViolation:
-        """Validate a bulk-commit proposal. Returns Preview with proposal_id."""
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Validate a bulk-commit proposal in an isolated dry-run."""
         if transactions_file:
             try:
                 with open(transactions_file, encoding="utf-8") as f:
@@ -1125,13 +1332,24 @@ class LedgerService:
                 remediation="Provide transactions_text or transactions_file.",
             )
 
-        target = _ensure_agent_sidecar(workspace, ledger_config)
-
         violation = self.validate_accounts(
             workspace, transactions_text, whitelist, ledger_config,
         )
         if violation:
             return violation
+
+        dry_run = _run_isolated_validation(
+            workspace,
+            ledger_config,
+            lambda dry_workspace: _append_to_sidecar(
+                dry_workspace, transactions_text, ledger_config
+            ),
+            "bean-check failed. Revise the transaction batch and prepare it again.",
+        )
+        if dry_run.failure:
+            return dry_run.failure
+
+        target = dry_run.target_file or _agent_sidecar_target_file(ledger_config)
 
         txn_lines = [
             line for line in transactions_text.splitlines()
@@ -1152,8 +1370,9 @@ class LedgerService:
                 "sample": sample,
                 "target_file": target,
                 "commit_message": commit_message,
+                "validation": asdict(dry_run.validation),
             },
-            message=f"{txn_count} transactions validated. Confirm to commit.",
+            message=f"{txn_count} transactions passed dry-run validation.",
         )
 
     def confirm_bulk(
@@ -1191,6 +1410,7 @@ class LedgerService:
         target = preview.preview["target_file"]
         txn_count = preview.preview["transaction_count"]
 
+        _ensure_agent_sidecar(workspace, ledger_config)
         target_path = os.path.join(workspace, target)
         backup_path = target_path + ".bak"
 
@@ -1199,19 +1419,17 @@ class LedgerService:
         with open(backup_path, "w") as f:
             f.write(original)
 
-        with open(target_path, "a") as f:
-            f.write(f"\n{transactions_text.strip()}\n")
+        _append_to_sidecar(workspace, transactions_text, ledger_config)
 
-        Beancount.invalidate_cache(workspace, ledger_config)
         is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
         if not is_clean:
             with open(target_path, "w") as f:
                 f.write(original)
             Beancount.invalidate_cache(workspace, ledger_config)
             os.remove(backup_path)
-            return ValidationFailed(
-                error=check_output.strip(),
-                remediation="bean-check failed — all transactions auto-reverted.",
+            return _validation_failure(
+                check_output,
+                "bean-check failed. Revise the transaction batch and prepare it again.",
             )
 
         os.remove(backup_path)
@@ -1245,17 +1463,7 @@ class LedgerService:
         transactions_file: str | None = None,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
-    ) -> PendingAction | InvariantViolation:
-        preview = self.preview_bulk(
-            workspace,
-            transactions_text,
-            commit_message,
-            transactions_file,
-            whitelist,
-            ledger_config,
-        )
-        if not isinstance(preview, Preview):
-            return preview
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
         if transactions_file:
             try:
                 with open(transactions_file, encoding="utf-8") as f:
@@ -1267,6 +1475,18 @@ class LedgerService:
                     provided=transactions_file,
                     remediation=f"Cannot read staging file: {e}",
                 )
+            transactions_file = None
+
+        preview = self.preview_bulk(
+            workspace,
+            transactions_text,
+            commit_message,
+            transactions_file,
+            whitelist,
+            ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
         return self._make_pending_action(
             action_type="bulk_commit",
             execution_spec={
@@ -1283,6 +1503,7 @@ class LedgerService:
                 "status": "validated",
                 "transaction_count": preview.preview.get("transaction_count", 0),
                 "target_file": preview.preview.get("target_file"),
+                "dry_run": preview.preview.get("validation"),
             },
         )
 

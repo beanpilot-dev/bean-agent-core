@@ -11,6 +11,7 @@ The agent accepts per-request credentials (repo URL + short-lived token) and
 executes ledger operations in an ephemeral workspace. No persistent state.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -122,6 +123,64 @@ def _error_envelope(
     )
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _digest_object(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _verify_apply_request(
+    req: "ApplyPendingActionRequest",
+    pending_action: dict[str, Any],
+) -> JSONResponse | None:
+    if not req.pending_action_id or not req.payload_digest or not req.integrity_digest:
+        return _error_envelope(
+            "INVALID_PENDING_ACTION",
+            "top-level pending_action_id, payload_digest, and integrity_digest are required",
+            400,
+        )
+
+    embedded_action_id = pending_action.get("pending_action_id")
+    if not isinstance(embedded_action_id, str) or not embedded_action_id:
+        return _error_envelope(
+            "INTEGRITY_FAILED",
+            "Pending action payload is missing an immutable identifier.",
+            409,
+        )
+    if req.pending_action_id != embedded_action_id:
+        return _error_envelope(
+            "INTEGRITY_FAILED",
+            "Pending action identifier does not match payload.",
+            409,
+        )
+
+    expected_payload_digest = _digest_object(pending_action)
+    if req.payload_digest != expected_payload_digest:
+        return _error_envelope(
+            "INTEGRITY_FAILED",
+            "Pending action payload digest does not match payload.",
+            409,
+        )
+
+    embedded_digest = pending_action.get("digest")
+    embedded_signature = pending_action.get("signature")
+    if embedded_digest != req.integrity_digest:
+        return _error_envelope(
+            "INTEGRITY_FAILED",
+            "Pending action integrity digest does not match payload.",
+            409,
+        )
+    if embedded_signature and embedded_signature != f"sha256:{req.integrity_digest}":
+        return _error_envelope(
+            "INTEGRITY_FAILED",
+            "Pending action signature does not match payload.",
+            409,
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -187,9 +246,9 @@ class ApplyPendingActionRequest(BaseModel):
     user_id: str
     request_id: str | None = None
     workflow_id: str | None = None
-    pending_action_id: str | None = None
-    payload_digest: str | None = None
-    integrity_digest: str | None = None
+    pending_action_id: str
+    payload_digest: str
+    integrity_digest: str
     opaque_payload: dict[str, Any] | None = None
     pending_action: dict[str, Any] | None = None
     ledger: LedgerPayload | None = None
@@ -366,6 +425,9 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
     pending_action = req.pending_action or req.opaque_payload
     if not pending_action:
         return _error_envelope("INVALID_PENDING_ACTION", "pending action payload is required", 400)
+    apply_integrity_error = _verify_apply_request(req, pending_action)
+    if apply_integrity_error:
+        return apply_integrity_error
     result = await _orchestrator.run_apply_pending_action(
         repo_url=req.repo.url,
         token=req.repo.token,

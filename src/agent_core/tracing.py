@@ -13,12 +13,24 @@ all tracing operations are no-ops.
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from typing import Any
 
 from langchain_core.callbacks.base import BaseCallbackHandler
 
 logger = logging.getLogger(__name__)
+
+_SAFE_METADATA_KEYS = {
+    "agent_run_id",
+    "conversation_id",
+    "conversation_name",
+    "conversation_tag",
+    "request_id",
+    "workflow_id",
+    "model",
+}
+_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:#@/-]{1,200}$")
 
 
 def _read_env() -> dict:
@@ -41,7 +53,7 @@ def _read_env() -> dict:
         "base_url": base_url,
         "public_key": os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
         "secret_key": secret,
-        "trace_level": os.environ.get("LANGFUSE_TRACE_LEVEL", "full"),
+        "trace_level": os.environ.get("LANGFUSE_TRACE_LEVEL", "metadata"),
     }
 
 
@@ -85,7 +97,8 @@ class TracingManager:
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to initialize LangFuse: %s — tracing disabled", e
+                    "Failed to initialize LangFuse error_type=%s — tracing disabled",
+                    type(e).__name__,
                 )
 
     @property
@@ -145,7 +158,7 @@ class TracingManager:
           user_id: user identifier for propagate_attributes
           conversation_id: session identifier for propagate_attributes
           conversation_tag: passed as a tag for filtering
-          All other kwargs become metadata values (str, <=200 chars).
+          Safe metadata kwargs are propagated; message and tool payloads are not.
         """
         self._root_span = None
         self._trace_id = None
@@ -165,24 +178,17 @@ class TracingManager:
                 handler = _NoopCallback()
 
             task_name = metadata.pop("task", "agent-run")
-            root_input = metadata.pop("input", None)
+            metadata.pop("input", None)
+            root_input = None
             user_id = metadata.pop("user_id", None)
             session_id = metadata.pop("conversation_id", None)
             conversation_tag = metadata.pop("conversation_tag", None)
 
             tags: list[str] | None = None
-            if conversation_tag:
-                tags = [conversation_tag]
+            if conversation_tag and _is_safe_trace_value(str(conversation_tag)):
+                tags = [str(conversation_tag)]
 
-            trace_metadata: dict[str, str] | None = None
-            if metadata:
-                trace_metadata = {}
-                for k, v in metadata.items():
-                    if v is not None:
-                        val = str(v)
-                        if len(val) > 200:
-                            val = val[:197] + "..."
-                        trace_metadata[k] = val
+            trace_metadata = _safe_trace_metadata(metadata)
 
             with self._client.start_as_current_observation(
                 as_type="span",
@@ -203,7 +209,8 @@ class TracingManager:
 
         except Exception as e:
             logger.warning(
-                "LangFuse trace error: %s — falling back to noop", e
+                "LangFuse trace error error_type=%s — falling back to noop",
+                type(e).__name__,
             )
             yield _NoopCallback()
         finally:
@@ -219,3 +226,20 @@ def get_tracing_manager() -> TracingManager:
     if _manager is None:
         _manager = TracingManager()
     return _manager
+
+
+def _safe_trace_metadata(metadata: dict[str, Any]) -> dict[str, str] | None:
+    """Return metadata allowed in traces without user financial content."""
+    safe: dict[str, str] = {}
+    for key, value in metadata.items():
+        if key not in _SAFE_METADATA_KEYS or value is None:
+            continue
+        val = str(value)
+        if not _is_safe_trace_value(val):
+            continue
+        safe[key] = val[:200]
+    return safe or None
+
+
+def _is_safe_trace_value(value: str) -> bool:
+    return bool(_SAFE_TOKEN_RE.fullmatch(value))

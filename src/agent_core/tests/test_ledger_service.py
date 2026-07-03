@@ -13,6 +13,7 @@ from agent_core.services.ledger import (
 )
 from agent_core.services.types import (
     ApplyReceipt,
+    ApprovalRequired,
     CommitResult,
     DependencyUnavailable,
     IntegrityFailed,
@@ -136,7 +137,9 @@ def test_confirm_commit_invalidates_cached_validation_before_checking(
     )
 
     assert isinstance(result, ValidationFailed)
-    assert "does not balance" in result.error
+    assert result.error == "transaction_not_balanced"
+    assert result.advisory is not None
+    assert result.advisory["error_type"] == "transaction_not_balanced"
     git_service.commit_and_push.assert_not_called()
 
 
@@ -166,6 +169,7 @@ def test_prepare_commit_materializes_pending_action_contract(ledger_workspace: P
     )
 
     assert isinstance(result, PendingAction)
+    assert isinstance(result, ApprovalRequired)
     assert result.status == "PENDING_ACTION"
     assert result.action_type == "commit_transaction"
     assert result.execution_spec["transaction_text"] == TXN
@@ -174,6 +178,28 @@ def test_prepare_commit_materializes_pending_action_contract(ledger_workspace: P
     assert result.signature == f"sha256:{result.digest}"
     assert result.policy["risk"] == "normal"
     assert result.policy["requires_elevated_review"] is False
+    assert result.validation["dry_run"]["status"] == "validated"
+
+
+def test_prepare_commit_dry_run_rejects_invalid_without_pending_action(
+    ledger_workspace: Path,
+) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original = target.read_text()
+
+    result = LedgerService().prepare_commit(
+        str(ledger_workspace),
+        '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        "bad",
+    )
+
+    assert isinstance(result, ValidationFailed)
+    assert result.status == "VALIDATION_FAILED"
+    assert result.error == "transaction_not_balanced"
+    assert result.advisory is not None
+    assert result.advisory["retryable"] is True
+    assert "Bad" not in target.read_text()
+    assert target.read_text() == original
 
 
 def test_pending_action_integrity_detects_mutation(ledger_workspace: Path) -> None:
@@ -262,7 +288,38 @@ def test_confirm_commit_reverts_invalid_transaction(
     )
 
     assert isinstance(result, ValidationFailed)
+    assert result.error == "transaction_not_balanced"
     target = ledger_workspace / "data" / "agent_inc" / date.today().strftime("%Y-%m.beancount")
+    assert "Bad" not in target.read_text()
+    git_service.commit_and_push.assert_not_called()
+
+
+def test_apply_pending_action_revalidates_and_rejects_stale_invalid_contract(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = LedgerService().prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    assert isinstance(pending, PendingAction)
+
+    def pass_integrity(_action):
+        return None
+
+    monkeypatch.setattr(LedgerService, "verify_pending_action", staticmethod(pass_integrity))
+    payload = pending.__dict__.copy()
+    payload["execution_spec"] = {
+        **pending.execution_spec,
+        "transaction_text": '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+    }
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        payload,
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ValidationFailed)
+    assert result.error == "transaction_not_balanced"
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
     assert "Bad" not in target.read_text()
     git_service.commit_and_push.assert_not_called()
 
@@ -347,6 +404,25 @@ def test_update_preview_and_confirm(
     assert "95 CNY" in (ledger_workspace / result.result["file"]).read_text()
 
 
+def test_prepare_update_materializes_pending_action_contract(
+    ledger_workspace: Path,
+) -> None:
+    replacement = (
+        '2026-05-12 * "Lunch"\n  Expenses:Food:Dining  95 CNY\n  Assets:Cash          -95 CNY'
+    )
+
+    result = LedgerService().prepare_update(
+        str(ledger_workspace), "2026-05-12", "Lunch", replacement, "update lunch"
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.action_type == "update_transaction"
+    assert result.execution_spec["target_date"] == "2026-05-12"
+    assert result.execution_spec["new_transaction_text"] == replacement
+    assert result.validation["dry_run"]["status"] == "validated"
+    assert result.policy["risk"] == "elevated"
+
+
 def test_update_reports_missing_transaction(ledger_workspace: Path) -> None:
     result = LedgerService().preview_update(
         str(ledger_workspace), "2026-05-12", "Missing", TXN, "update"
@@ -368,6 +444,18 @@ def test_bulk_preview_and_confirm(
     assert isinstance(preview, Preview)
     assert preview.preview["transaction_count"] == 1
     assert isinstance(result, CommitResult)
+
+
+def test_prepare_bulk_materializes_pending_action_contract(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_bulk(str(ledger_workspace), TXN, "bulk")
+
+    assert isinstance(result, PendingAction)
+    assert result.action_type == "bulk_commit"
+    assert result.execution_spec["transactions_text"] == TXN
+    assert result.validation["transaction_count"] == 1
+    assert result.validation["dry_run"]["status"] == "validated"
 
 
 def test_bulk_supports_staging_file(

@@ -5,7 +5,6 @@ caller (Tool Layer or API Layer) can pattern-match on the type rather
 than inspecting string dict keys.
 """
 
-import uuid
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -36,8 +35,19 @@ class Preview(ServiceResult):
 
 
 @dataclass
-class PendingAction(ServiceResult):
-    """Immutable approval-gated action prepared by agent-core.
+class LedgerMutationAction:
+    """Runtime-neutral ledger mutation intent validated before approval."""
+
+    action_type: str = ""
+    schema_version: int = 1
+    execution_spec: dict[str, Any] = field(default_factory=dict)
+    display: dict[str, Any] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ApprovalRequired(ServiceResult):
+    """Runtime-neutral outcome for a validated mutation awaiting approval.
 
     SaaS may persist the payload opaquely and use the digest/signature metadata
     for idempotency and tamper detection. The display fields are informational;
@@ -60,6 +70,11 @@ class PendingAction(ServiceResult):
 
 
 @dataclass
+class PendingAction(ApprovalRequired):
+    """Backward-compatible name for approval-gated ledger mutations."""
+
+
+@dataclass
 class ApplyReceipt(ServiceResult):
     """Deterministic apply result for a previously approved pending action."""
 
@@ -76,6 +91,64 @@ class IntegrityFailed(ServiceResult):
     status: Literal["INTEGRITY_FAILED"] = "INTEGRITY_FAILED"
     pending_action_id: str = ""
     error: str = ""
+
+
+# ── Runtime-neutral tool outcomes ────────────────────────────────────────────
+
+ToolExecutionStatus = Literal["completed", "repairable_error", "approval_required"]
+
+
+@dataclass
+class ToolCompleted(ServiceResult):
+    """Runtime-neutral outcome for a tool call that completed."""
+
+    status: Literal["completed"] = "completed"
+    tool_name: str = ""
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolRepairableError(ServiceResult):
+    """Runtime-neutral outcome for a tool error the caller may revise and retry."""
+
+    status: Literal["repairable_error"] = "repairable_error"
+    tool_name: str = ""
+    error_type: str = ""
+    message: str = ""
+    remediation: str = ""
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolApprovalRequired(ServiceResult):
+    """Runtime-neutral outcome for a validated mutation awaiting host approval.
+
+    pending_action is the immutable executable contract. Hosts may store it
+    opaquely and later submit the same payload with approval proof to a trusted
+    apply surface.
+    """
+
+    status: Literal["approval_required"] = "approval_required"
+    tool_name: str = ""
+    action_type: str = ""
+    pending_action: dict[str, Any] = field(default_factory=dict)
+    display: dict[str, Any] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=dict)
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class ApprovalProof:
+    """Host-controlled proof that a human approved the immutable action payload."""
+
+    approved_by: str
+    approved_at: str
+    approval_id: str
+    pending_action_id: str = ""
+    payload_digest: str = ""
+    integrity_digest: str = ""
+    host: str = ""
 
 
 # ── Success ───────────────────────────────────────────────────────────────────
@@ -110,6 +183,19 @@ class ValidationFailed(ServiceResult):
     reverted: bool = True
     remediation: str = ""
     advisory: dict[str, Any] | None = None
+
+
+@dataclass
+class ValidationSummary:
+    """Sanitized deterministic validation details for previews and repairs."""
+
+    status: Literal["validated", "failed"] = "validated"
+    validator: str = "bean-check"
+    isolated: bool = True
+    error_type: str | None = None
+    error_count: int = 0
+    messages: list[str] = field(default_factory=list)
+    retryable: bool = False
 
 
 @dataclass
@@ -236,31 +322,3 @@ class SandboxResult(ServiceResult):
     transaction_count: int = 0
     sample: str = ""
     error: str | None = None
-
-
-# ── Proposal store ────────────────────────────────────────────────────────────
-
-class ProposalStore:
-    """Per-request in-memory store for in-flight preview proposals.
-
-    Created by the orchestrator at request start and shared with LedgerService
-    so preview_* methods can stash proposal data and confirm_* methods can
-    retrieve it by proposal_id.
-    """
-
-    def __init__(self):
-        self._store: dict[str, dict[str, Any]] = {}
-
-    def create(self, operation: str, data: dict[str, Any]) -> str:
-        """Store proposal data and return a unique proposal_id."""
-        pid = f"prop_{uuid.uuid4().hex[:12]}"
-        self._store[pid] = {"operation": operation, "data": data}
-        return pid
-
-    def get(self, proposal_id: str) -> dict[str, Any] | None:
-        """Retrieve proposal data by id, or None if not found."""
-        return self._store.get(proposal_id)
-
-    def remove(self, proposal_id: str) -> None:
-        """Remove a consumed proposal."""
-        self._store.pop(proposal_id, None)

@@ -21,20 +21,28 @@ from .ledger import LedgerService
 from .orchestrator import AgentOrchestrator
 from .preflight import PreflightService
 from .prices import PriceService
+from .tool_gateway import ToolExecutionGateway
 from .types import (
     DEFAULT_LEDGER_CONFIG,
+    ApplyReceipt,
+    ApprovalProof,
+    ApprovalRequired,
     CommitResult,
     DependencyUnavailable,
     FileReadResult,
+    IntegrityFailed,
     InvariantViolation,
     LedgerConfig,
+    PendingAction,
     PreflightResult,
     Preview,
     PriceResult,
-    ProposalStore,
     QueryResult,
     SandboxResult,
     ServiceResult,
+    ToolApprovalRequired,
+    ToolCompleted,
+    ToolRepairableError,
     ValidationFailed,
 )
 from .workspace import GitService
@@ -47,19 +55,27 @@ __all__ = [
     "LedgerService",
     "PreflightService",
     "PriceService",
+    "ToolExecutionGateway",
     # Types
+    "ApprovalProof",
+    "ApprovalRequired",
+    "ApplyReceipt",
     "CommitResult",
     "DependencyUnavailable",
     "DEFAULT_LEDGER_CONFIG",
     "FileReadResult",
+    "IntegrityFailed",
     "InvariantViolation",
     "LedgerConfig",
+    "PendingAction",
     "PreflightResult",
     "Preview",
     "PriceResult",
-    "ProposalStore",
     "QueryResult",
     "SandboxResult",
     "ServiceResult",
+    "ToolApprovalRequired",
+    "ToolCompleted",
+    "ToolRepairableError",
     "ValidationFailed",
 ]

@@ -15,6 +15,7 @@ from langchain_core.messages import (
 
 from agent_core.agent import (
     PersonalFinanceAgent,
+    _pending_actions,
     _single_agent_node,
     normalize_conversation_title,
 )
@@ -168,7 +169,7 @@ async def test_single_agent_node_streams_content_to_queue():
     assert queue.get_nowait() == "response"
 
 
-def test_requires_user_input_detects_preview_string_content():
+def test_requires_user_input_ignores_legacy_preview_string_content():
     result = {
         "messages": [
             ToolMessage(
@@ -178,7 +179,51 @@ def test_requires_user_input_detects_preview_string_content():
         ]
     }
 
+    assert PersonalFinanceAgent._requires_user_input(result) is False
+
+
+def test_requires_user_input_detects_pending_action_string_content():
+    result = {
+        "messages": [
+            ToolMessage(
+                content='{"status": "PENDING_ACTION", "proposed": "transaction"}',
+                tool_call_id="pending-action-1",
+            )
+        ]
+    }
+
     assert PersonalFinanceAgent._requires_user_input(result) is True
+
+
+def test_requires_user_input_detects_gateway_approval_required_string_content():
+    result = {
+        "messages": [
+            ToolMessage(
+                content='{"status": "approval_required", "pending_action": {}}',
+                tool_call_id="pending-action-1",
+            )
+        ]
+    }
+
+    assert PersonalFinanceAgent._requires_user_input(result) is True
+
+
+def test_gateway_approval_required_streams_inner_pending_action() -> None:
+    result = {
+        "messages": [
+            ToolMessage(
+                content=(
+                    '{"status": "approval_required", '
+                    '"pending_action": {"status": "PENDING_ACTION", "pending_action_id": "pa_1"}}'
+                ),
+                tool_call_id="pending-action-1",
+            )
+        ]
+    }
+
+    assert _pending_actions(result) == [
+        {"status": "PENDING_ACTION", "pending_action_id": "pa_1"}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -191,12 +236,40 @@ def test_requires_user_input_detects_preview_string_content():
         },
     ],
 )
-def test_requires_user_input_detects_preview_list_content(part):
+def test_requires_user_input_ignores_legacy_preview_list_content(part):
     result = {
         "messages": [
             ToolMessage(
                 content=[part],
                 tool_call_id="preview-1",
+            )
+        ]
+    }
+
+    assert PersonalFinanceAgent._requires_user_input(result) is False
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"status": "PENDING_ACTION", "proposed": "transaction"},
+        {"status": "approval_required", "pending_action": {}},
+        {
+            "type": "text",
+            "text": '{"status": "PENDING_ACTION", "proposed": "transaction"}',
+        },
+        {
+            "type": "text",
+            "text": '{"status": "approval_required", "pending_action": {}}',
+        },
+    ],
+)
+def test_requires_user_input_detects_pending_action_list_content(part):
+    result = {
+        "messages": [
+            ToolMessage(
+                content=[part],
+                tool_call_id="pending-action-1",
             )
         ]
     }
@@ -391,7 +464,10 @@ def test_default_model_manifest_excludes_confirm_tools():
     assert "confirm_open" not in tool_names
     assert "confirm_update" not in tool_names
     assert "confirm_bulk" not in tool_names
-    assert "prepare_commit" in tool_names
+    assert "ledger_commit_transaction" in tool_names
+    assert "ledger_update_transaction" in tool_names
+    assert "ledger_import_transactions" in tool_names
+    assert "prepare_commit" not in tool_names
 
 
 def test_default_graph_has_no_planner_nodes():

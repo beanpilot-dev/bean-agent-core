@@ -37,21 +37,22 @@ SINGLE_LOOP_POLICY = """
 RUNTIME POLICY:
 - You are one agent loop. Do not invent planner, specialist, reviewer, or
   synthesizer handoffs.
-- You may inspect the ledger with read tools and prepare approval-gated actions
-  with prepare_* tools.
+- You may inspect the ledger with read tools and call ledger mutation tools for
+  approval-gated actions.
 - Deterministic preflight has already supplied ledger context when available.
   Use exact account names from that context or from tool results. Do not invent
   near-miss accounts or pluralization variants.
 - Account-opening tools are not available in this default loop. If no suitable
   existing account exists, ask a clarification question instead of drafting a
-  write. If a prepare tool rejects unknown accounts, retry with exact accounts
+  write. If a mutation tool rejects unknown accounts, retry with exact accounts
   from preflight rather than inventing new accounts.
 - You cannot commit, push, confirm, apply, or discard ledger changes. Those
   execution capabilities are deterministic server actions after user approval.
-- When a prepare_* tool returns status PENDING_ACTION, explain the proposed
-  action briefly, include the exact Beancount text from the prepared action's
-  display.diff field in a fenced code block, and ask the user to approve,
-  discard, or request changes.
+- When a ledger mutation tool returns status approval_required, explain the
+  proposed action briefly, include the exact Beancount text from the prepared
+  action's pending_action.display.diff field in a fenced code block, and ask the
+  user to approve, discard, or request changes. Legacy PENDING_ACTION payloads
+  mean the same thing.
 - Treat pending-action preview text as display-only. The pending action payload
   is the executable contract.
 """
@@ -66,7 +67,7 @@ def _serialize_history(messages) -> list[dict]:
     ]
 
 
-def _has_preview_status(payload: Any) -> bool:
+def _has_pending_action_status(payload: Any) -> bool:
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
@@ -74,7 +75,7 @@ def _has_preview_status(payload: Any) -> bool:
             return False
     return (
         isinstance(payload, dict)
-        and payload.get("status") in {"PREVIEW", "PENDING_ACTION"}
+        and payload.get("status") in {"PENDING_ACTION", "approval_required"}
     )
 
 
@@ -261,13 +262,13 @@ class PersonalFinanceAgent:
                 continue
 
             content = getattr(msg, "content", "") or ""
-            if _has_preview_status(content):
+            if _has_pending_action_status(content):
                 return True
             if isinstance(content, list):
                 for part in content:
-                    if _has_preview_status(part):
+                    if _has_pending_action_status(part):
                         return True
-                    if isinstance(part, dict) and _has_preview_status(part.get("text")):
+                    if isinstance(part, dict) and _has_pending_action_status(part.get("text")):
                         return True
 
         return False
@@ -502,7 +503,7 @@ class PersonalFinanceAgent:
             }
             for pending_action in pending_actions:
                 yield {
-                    "type": "awaiting_approval",
+                    "type": "approval_required",
                     "is_task_complete": True,
                     "require_user_input": True,
                     "pending_action": pending_action,
@@ -563,6 +564,12 @@ def _pending_actions(result: dict) -> list[dict[str, Any]]:
                 payload = json.loads(content)
             except json.JSONDecodeError:
                 continue
-            if isinstance(payload, dict) and payload.get("status") == "PENDING_ACTION":
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("status") == "PENDING_ACTION":
                 actions.append(payload)
+            elif payload.get("status") == "approval_required":
+                pending_action = payload.get("pending_action")
+                if isinstance(pending_action, dict):
+                    actions.append(pending_action)
     return actions

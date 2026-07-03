@@ -1,5 +1,16 @@
+import json
+from datetime import date
+from pathlib import Path
+
 from agent_core.agent import PersonalFinanceAgent
-from agent_core.workflow.tools import EXECUTION_TOOLS, MODEL_TOOLS
+from agent_core.workflow.tools import (
+    EXECUTION_TOOLS,
+    LEGACY_PREPARE_TOOLS,
+    MODEL_TOOLS,
+    tool_ledger_commit_transaction,
+)
+
+TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
 
 
 def _tool_name(tool) -> str:
@@ -9,10 +20,15 @@ def _tool_name(tool) -> str:
 def test_model_tool_manifest_excludes_execution_tools() -> None:
     model_names = {_tool_name(tool) for tool in MODEL_TOOLS}
     execution_names = {_tool_name(tool) for tool in EXECUTION_TOOLS}
+    legacy_prepare_names = {_tool_name(tool) for tool in LEGACY_PREPARE_TOOLS}
 
     assert execution_names
     assert model_names.isdisjoint(execution_names)
-    assert "prepare_commit" in model_names
+    assert model_names.isdisjoint(legacy_prepare_names)
+    assert "ledger_commit_transaction" in model_names
+    assert "ledger_update_transaction" in model_names
+    assert "ledger_import_transactions" in model_names
+    assert "prepare_commit" not in model_names
     assert "prepare_open" not in model_names
     assert "confirm_commit" not in model_names
     assert "confirm_bulk" not in model_names
@@ -28,3 +44,44 @@ def test_default_agent_uses_single_loop_manifest() -> None:
     assert "tools" in node_names
     assert "planner" not in node_names
     assert "synthesizer" not in node_names
+
+
+def test_ledger_commit_transaction_returns_approval_required_without_write(
+    ledger_workspace: Path,
+) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original = target.read_text()
+
+    raw = tool_ledger_commit_transaction.func(
+        TXN,
+        "record dinner",
+        config={"configurable": {"workspace": str(ledger_workspace)}},
+    )
+    payload = json.loads(raw)
+
+    assert payload["status"] == "approval_required"
+    assert payload["action_type"] == "commit_transaction"
+    assert payload["policy"]["requires_approval"] is True
+    assert payload["pending_action"]["status"] == "PENDING_ACTION"
+    assert payload["pending_action"]["execution_spec"]["transaction_text"] == TXN
+    assert target.read_text() == original
+
+
+def test_ledger_commit_transaction_returns_repairable_validation_failure(
+    ledger_workspace: Path,
+) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original = target.read_text()
+
+    raw = tool_ledger_commit_transaction.func(
+        '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        "bad",
+        config={"configurable": {"workspace": str(ledger_workspace)}},
+    )
+    payload = json.loads(raw)
+
+    assert payload["status"] == "repairable_error"
+    assert payload["error_type"] == "VALIDATION_FAILED"
+    assert payload["result"]["error"] == "transaction_not_balanced"
+    assert payload["result"]["advisory"]["retryable"] is True
+    assert target.read_text() == original

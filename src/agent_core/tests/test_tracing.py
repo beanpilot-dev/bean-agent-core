@@ -8,6 +8,7 @@ from agent_core.tracing import (
     TracingManager,
     _NoopCallback,
     _read_env,
+    _safe_trace_metadata,
     get_tracing_manager,
 )
 
@@ -28,10 +29,11 @@ class TestReadEnv:
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
         assert _read_env()["enabled"] is True
 
-    def test_default_level_is_full(self, monkeypatch):
+    def test_default_level_is_metadata(self, monkeypatch):
         monkeypatch.setenv("LANGFUSE_ENABLED", "true")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-        assert _read_env()["trace_level"] == "full"
+        monkeypatch.delenv("LANGFUSE_TRACE_LEVEL", raising=False)
+        assert _read_env()["trace_level"] == "metadata"
 
     def test_metadata_level(self, monkeypatch):
         monkeypatch.setenv("LANGFUSE_TRACE_LEVEL", "metadata")
@@ -141,7 +143,7 @@ class TestTracingManagerEnabledFullMode:
     @patch("langfuse.langchain.CallbackHandler")
     @patch("langfuse.propagate_attributes")
     @patch("langfuse.Langfuse")
-    def test_root_span_input_passed(
+    def test_root_span_input_is_redacted(
         self, mock_langfuse_cls, mock_propagate, mock_cb_handler
     ):
         mock_client = MagicMock()
@@ -166,12 +168,12 @@ class TestTracingManagerEnabledFullMode:
             pass
 
         call_kwargs = mock_client.start_as_current_observation.call_args.kwargs
-        assert call_kwargs["input"] == {"query": "hello"}
+        assert call_kwargs["input"] is None
 
     @patch("langfuse.langchain.CallbackHandler")
     @patch("langfuse.propagate_attributes")
     @patch("langfuse.Langfuse")
-    def test_metadata_truncated(
+    def test_long_metadata_dropped(
         self, mock_langfuse_cls, mock_propagate, mock_cb_handler
     ):
         mock_client = MagicMock()
@@ -197,8 +199,7 @@ class TestTracingManagerEnabledFullMode:
             pass
 
         attr_kwargs = mock_propagate.call_args.kwargs
-        assert len(attr_kwargs["metadata"]["model"]) <= 200
-        assert attr_kwargs["metadata"]["model"].endswith("...")
+        assert attr_kwargs["metadata"] is None
 
     @patch("langfuse.langchain.CallbackHandler")
     @patch("langfuse.propagate_attributes")
@@ -277,6 +278,16 @@ class TestTracingManagerEnabledFullMode:
         assert attr_kwargs["metadata"]["model"] == "gpt-4o"
         # conversation_tag is removed from metadata (moved to tags)
         assert "conversation_tag" not in attr_kwargs["metadata"]
+
+    def test_trace_metadata_excludes_sensitive_values(self):
+        metadata = _safe_trace_metadata({
+            "model": "gpt-4o",
+            "repo_url": "https://github.com/private/repo",
+            "transaction_text": '2026-01-01 * "Lunch"',
+            "conversation_name": "Assets:Cash 100 CNY",
+        })
+
+        assert metadata == {"model": "gpt-4o"}
 
 
 class TestTracingManagerEnabledMetadataMode:

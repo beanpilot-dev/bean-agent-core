@@ -10,10 +10,12 @@ from agent_core.services import (
     IngestionService,
     LedgerService,
     PriceService,
+    ToolExecutionGateway,
 )
 from agent_core.services.workspace import GitService
 
 _ledger = LedgerService()
+_gateway = ToolExecutionGateway(_ledger)
 _prices = PriceService()
 _ingestion = IngestionService()
 
@@ -274,7 +276,7 @@ def tool_run_python(
     """Run a Python script in a sandboxed subprocess and return its stdout.
 
     Primary use case: parse a bank CSV export and print beancount transaction
-    blocks to stdout, which the agent then reviews with ledger_preview_bulk.
+    blocks to stdout, which the agent then validates with ledger_import_transactions.
 
     Sandbox constraints:
     - Fresh temp directory per run; no access to the ledger workspace or git.
@@ -288,7 +290,7 @@ def tool_run_python(
       Use for small batches or when you need to inspect the full output.
 
     stage=True — stdout written to a /tmp staging file; only metadata returned.
-      result.staging_file   path to pass to ledger_preview_bulk(transactions_file=...)
+      result.staging_file   path to pass to ledger_import_transactions(transactions_file=...)
       result.transaction_count  total parsed
       result.sample         first 5 transaction headers
       Use for large batches (50+ transactions) — the full text never enters LLM
@@ -297,8 +299,7 @@ def tool_run_python(
     Typical workflow for large batch import:
         1. ledger_ingest_file(path)                        — inspect columns
         2. ledger_run_python(code, [path], stage=True)      — parse + stage
-        3. ledger_preview_bulk(transactions_file=..., msg)  — preview
-        4. ledger_confirm_bulk(transactions_file=..., msg)  — commit
+        3. ledger_import_transactions(transactions_file=..., msg)  — approval request
 
     Example script:
 
@@ -331,8 +332,119 @@ def tool_run_python(
 
 
 # ---------------------------------------------------------------------------
-# Write tools — prepare-only model tools plus execution-only confirm functions
+# Write tools — model-visible mutation intents plus execution-only confirm functions
 # ---------------------------------------------------------------------------
+
+@tool("ledger_commit_transaction")
+def tool_ledger_commit_transaction(
+    transaction_text: str,
+    commit_message: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate a transaction mutation and return an approval-required outcome.
+
+    This looks like a write tool, but it never performs a durable ledger write.
+    It validates accounts, runs an isolated dry-run bean-check, and returns a
+    signed/digested pending action for explicit user approval.
+
+    Args:
+        transaction_text: The complete beancount transaction text.
+        commit_message: Git commit message for the later approved apply step.
+
+    Returns a JSON string. Possible statuses:
+        approval_required — dry-run validated; host/user approval is required
+        repairable_error  — revise the draft and retry the mutation tool
+    """
+    c = config.get("configurable", {})
+    ws: str = c.get("workspace", "")
+    whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
+    result = _gateway.prepare_commit(
+        ws, transaction_text, commit_message, whitelist, ledger_config
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
+@tool("ledger_update_transaction")
+def tool_ledger_update_transaction(
+    date: str,
+    narration: str,
+    new_transaction_text: str,
+    commit_message: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate a transaction replacement and return an approval-required outcome.
+
+    Workflow:
+    1. Use ledger_find_transactions to locate the entry and confirm which one to edit.
+    2. Call this tool with the replacement text.
+    3. Show the returned approval-required action to the user.
+
+    Args:
+        date: Transaction date in ISO format (e.g. '2026-04-10').
+        narration: Substring of the narration or payee that uniquely identifies it.
+        new_transaction_text: The complete replacement Beancount transaction text.
+        commit_message: Git commit message for the later approved apply step.
+
+    Returns a JSON string. Possible statuses:
+        approval_required — replacement dry-run validated; approval is required
+        repairable_error  — revise the replacement or search target and retry
+    """
+    c = config.get("configurable", {})
+    ws: str = c.get("workspace", "")
+    whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
+    result = _gateway.prepare_update(
+        ws,
+        date,
+        narration,
+        new_transaction_text,
+        commit_message,
+        whitelist,
+        ledger_config,
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
+@tool("ledger_import_transactions")
+def tool_ledger_import_transactions(
+    transactions_text: str = "",
+    commit_message: str = "",
+    transactions_file: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate a batch import and return one approval-required outcome.
+
+    Two input modes:
+    - transactions_text: raw Beancount transaction blocks for small batches.
+    - transactions_file: staging file path returned by ledger_run_python(stage=True).
+
+    The tool reads staged text when provided, validates accounts, runs isolated
+    bean-check, and returns a pending action. It does not append, commit, or push.
+
+    Args:
+        transactions_text: Raw Beancount transaction blocks separated by blank lines.
+        commit_message: Git commit message for the later approved apply step.
+        transactions_file: Optional /tmp staging file from ledger_run_python(stage=True).
+
+    Returns a JSON string. Possible statuses:
+        approval_required — batch dry-run validated; approval is required
+        repairable_error  — revise the batch input and retry
+    """
+    c = config.get("configurable", {})
+    ws: str = c.get("workspace", "")
+    whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
+    result = _gateway.prepare_bulk(
+        ws,
+        transactions_text,
+        commit_message,
+        transactions_file or None,
+        whitelist,
+        ledger_config,
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
 
 @tool("prepare_commit")
 def tool_prepare_commit(
@@ -342,7 +454,8 @@ def tool_prepare_commit(
 ) -> str:
     """Prepare a transaction as an approval-gated pending action.
 
-    Validates all accounts against the ledger whitelist.
+    Validates all accounts against the ledger whitelist and runs an isolated
+    dry-run bean-check before approval.
     Returns a signed/digested pending action with the exact transaction that
     will be written after explicit user approval. Nothing is modified.
 
@@ -351,14 +464,14 @@ def tool_prepare_commit(
         commit_message: Git commit message (e.g. 'chore(finance): record gas expense 2026-04-21').
 
     Returns a JSON string. Possible statuses:
-        PENDING_ACTION     — accounts validated, awaiting approval
-        INVARIANT_VIOLATION — unknown accounts; use preview_open to create them
+        approval_required — accounts validated, awaiting approval
+        repairable_error  — revise the draft and retry
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.prepare_commit(
+    result = _gateway.prepare_commit(
         ws, transaction_text, commit_message, whitelist, ledger_config
     )
     return _json_mod.dumps(dataclasses.asdict(result))
@@ -424,11 +537,11 @@ def tool_prepare_open(
         open_date: ISO date when the account was opened (e.g. '2026-01-01').
         display_name: Optional human-readable label stored as account metadata.
 
-    Returns a JSON string with status PREVIEW or INVARIANT_VIOLATION.
+    Returns a JSON string with status approval_required or repairable_error.
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.prepare_open(
+    result = _gateway.prepare_open(
         ws,
         account_name,
         currency or None,
@@ -505,14 +618,14 @@ def tool_prepare_update(
         commit_message: Git commit message (e.g. 'fix(finance): correct gas amount 2026-04-10').
 
     Returns a JSON string. Possible statuses:
-        PENDING_ACTION       — transaction found, advisory emitted if values changed
-        INVARIANT_VIOLATION  — TRANSACTION_NOT_FOUND, AMBIGUOUS_MATCH, or ACCOUNT_WHITELIST
+        approval_required — transaction found, advisory emitted if values changed
+        repairable_error  — transaction not found, ambiguous match, or invalid account
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.prepare_update(
+    result = _gateway.prepare_update(
         ws,
         date,
         narration,
@@ -587,8 +700,9 @@ def tool_prepare_bulk(
       large batches (50+ transactions) to keep token cost low.
 
     Preview protocol:
-    Validates all accounts, returns PREVIEW with transaction count
-    and a sample of the first 5 transaction headers. Nothing is written.
+    Validates all accounts and runs an isolated dry-run bean-check before
+    returning a pending action with transaction count and a sample of the first
+    5 transaction headers. Nothing durable is written.
 
     Args:
         transactions_text: Raw beancount transaction blocks separated by blank lines.
@@ -598,14 +712,14 @@ def tool_prepare_bulk(
                            Takes priority over transactions_text when both are supplied.
 
     Returns a JSON string. Possible statuses:
-        PREVIEW            — accounts validated, count shown, awaiting confirmation
-        INVARIANT_VIOLATION — unknown accounts or missing input
+        approval_required — accounts and dry-run validated, awaiting approval
+        repairable_error  — unknown accounts, missing input, or validation failure
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _ledger.prepare_bulk(
+    result = _gateway.prepare_bulk(
         ws,
         transactions_text,
         commit_message,
@@ -665,9 +779,9 @@ def tool_confirm_bulk(
 # ---------------------------------------------------------------------------
 
 TRANSACTION_TOOLS = [
-    tool_prepare_commit,
-    tool_prepare_update,
-    tool_prepare_bulk,
+    tool_ledger_commit_transaction,
+    tool_ledger_update_transaction,
+    tool_ledger_import_transactions,
 ]
 
 ANALYTICS_TOOLS = [
@@ -682,10 +796,17 @@ ANALYTICS_TOOLS = [
 INGESTION_TOOLS = [
     tool_ingest_file,
     tool_run_python,
-    tool_prepare_bulk,
+    tool_ledger_import_transactions,
 ]
 
 CHITCHAT_TOOLS = []
+
+LEGACY_PREPARE_TOOLS = [
+    tool_prepare_commit,
+    tool_prepare_open,
+    tool_prepare_update,
+    tool_prepare_bulk,
+]
 
 EXECUTION_TOOLS = [
     tool_confirm_commit,

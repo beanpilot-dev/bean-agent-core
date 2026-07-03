@@ -246,19 +246,12 @@ class AgentOrchestrator:
             whitelist = conversation_meta.get("account_whitelist")
             last_requires_user_input = False
             pending_history_snapshot: dict | None = None
-            is_confirm_request = query.strip().lower() == "commit confirmed"
             working_label, working_mutation_state = _working_state_for_query(query)
             yield _processing_state(
-                state="applying_changes" if is_confirm_request else "working",
+                state="working",
                 run_id=run_id,
-                label=(
-                    "Applying approved changes"
-                    if is_confirm_request
-                    else working_label
-                ),
-                ledger_mutation_state=(
-                    "applying_changes" if is_confirm_request else working_mutation_state
-                ),
+                label=working_label,
+                ledger_mutation_state=working_mutation_state,
             )
             async for chunk in self._agent.stream(
                 query=query,
