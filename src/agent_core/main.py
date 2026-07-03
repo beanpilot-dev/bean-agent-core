@@ -124,7 +124,7 @@ def _error_envelope(
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
 
 
 def _digest_object(value: Any) -> str:

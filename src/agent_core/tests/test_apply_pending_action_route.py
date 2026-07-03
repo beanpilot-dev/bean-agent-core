@@ -38,6 +38,23 @@ def test_apply_request_verifies_top_level_digests() -> None:
     assert _verify_apply_request(_request(payload), payload) is None
 
 
+def test_apply_request_digest_matches_srv_stable_json_for_non_ascii_payload() -> None:
+    payload = {
+        "pending_action_id": "pa_123",
+        "action_type": "commit_transaction",
+        "execution_spec": {
+            "transaction_text": '2026-07-03 * "缴纳话费" "pab支付"',
+            "commit_message": "记录话费",
+        },
+        "digest": "embedded_digest",
+        "signature": "sha256:embedded_digest",
+    }
+    srv_style_digest = "ab6d250387ee187bff1f5da72a506705de98658fe2c0d768e6cc1508b0c4b2e3"
+
+    assert _digest_object(payload) == srv_style_digest
+    assert _verify_apply_request(_request(payload), payload) is None
+
+
 def test_apply_request_rejects_mismatched_pending_action_id() -> None:
     payload = {
         "pending_action_id": "pa_123",

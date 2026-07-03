@@ -324,7 +324,7 @@ def _validation_success(isolated: bool) -> ValidationSummary:
 
 
 def _canonical_json(value: dict) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
 
 
 def _digest_payload(payload: dict) -> str:
