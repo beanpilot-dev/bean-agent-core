@@ -6,3 +6,5 @@ __pycache__/
 .env.*
 !.env.example
 .env
+benchmark/results/
+benchmark-report.html

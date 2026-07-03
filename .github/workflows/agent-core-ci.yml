@@ -52,7 +52,7 @@ jobs:
             -v "$PWD:/workspace" \
             -w /workspace \
             python:3.13-slim \
-            sh -lc '
+            sh -euc '
               apt-get update
               apt-get install -y --no-install-recommends git
               rm -rf /var/lib/apt/lists/*
