@@ -8,6 +8,7 @@ from agent_core.workflow.tools import (
     LEGACY_PREPARE_TOOLS,
     MODEL_TOOLS,
     tool_ledger_commit_transaction,
+    tool_ledger_open_account,
 )
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
@@ -28,6 +29,8 @@ def test_model_tool_manifest_excludes_execution_tools() -> None:
     assert "ledger_commit_transaction" in model_names
     assert "ledger_update_transaction" in model_names
     assert "ledger_import_transactions" in model_names
+    assert "ledger_open_account" in model_names
+    assert "ledger_preflight" not in model_names
     assert "prepare_commit" not in model_names
     assert "prepare_open" not in model_names
     assert "confirm_commit" not in model_names
@@ -64,6 +67,30 @@ def test_ledger_commit_transaction_returns_approval_required_without_write(
     assert payload["policy"]["requires_approval"] is True
     assert payload["pending_action"]["status"] == "PENDING_ACTION"
     assert payload["pending_action"]["execution_spec"]["transaction_text"] == TXN
+    assert target.read_text() == original
+
+
+def test_ledger_open_account_returns_approval_required_without_write(
+    ledger_workspace: Path,
+) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    original = target.read_text()
+
+    raw = tool_ledger_open_account.func(
+        "Assets:Bank:Savings",
+        "CNY",
+        "2026-06-15",
+        "Savings",
+        config={"configurable": {"workspace": str(ledger_workspace)}},
+    )
+    payload = json.loads(raw)
+
+    assert payload["status"] == "approval_required"
+    assert payload["tool_name"] == "ledger_open_account"
+    assert payload["action_type"] == "open_account"
+    assert payload["pending_action"]["status"] == "PENDING_ACTION"
+    assert payload["pending_action"]["execution_spec"]["account_name"] == "Assets:Bank:Savings"
+    assert payload["display"]["diff"].startswith("2026-06-15 open Assets:Bank:Savings")
     assert target.read_text() == original
 
 

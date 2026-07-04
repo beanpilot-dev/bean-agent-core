@@ -89,7 +89,7 @@ def run_python(
     When the output may be large (hundreds of transactions), set stage=True.
     The stdout is written to a /tmp staging file instead of returned inline.
     The response includes staging_file (path), transaction_count, and sample
-    (first 5 transaction headers). Pass staging_file to ledger_bulk_commit
+    (first 5 transaction headers). Pass staging_file to ledger_import_transactions
     as transactions_file — the full text never flows through LLM context.
 
     Example script that parses a bank CSV and prints beancount transactions:
@@ -190,7 +190,7 @@ def run_python(
                 "stderr": stderr,
                 "note": (
                     f"Output staged to {staging_file} ({txn_count} transactions). "
-                    "Pass staging_file to ledger_bulk_commit as transactions_file."
+                    "Pass staging_file to ledger_import_transactions as transactions_file."
                 ),
             },
         })

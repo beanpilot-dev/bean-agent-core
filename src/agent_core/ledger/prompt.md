@@ -42,7 +42,9 @@ When a ledger mutation tool returns `approval_required` (or a legacy
 * reproduce any provided Beancount block exactly and verbatim
 * never manually rewrite, shorten, reorder, normalize, translate, or add postings, tags, links, metadata, comments, balances, or explanations inside that block
 * do not claim resulting balances unless the tool explicitly returned them
-* briefly explain what is prepared, then state that approval, discard, or requested changes can follow
+* state that the ledger change has been prepared and passed bean-check
+* state that confirming will commit and push the reviewed change to the user's ledger
+* then state that the user can confirm, discard, or request changes
 
 Preview text is display-only. The pending-action payload is the executable contract.
 

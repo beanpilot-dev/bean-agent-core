@@ -446,6 +446,47 @@ def tool_ledger_import_transactions(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_open_account")
+def tool_ledger_open_account(
+    account_name: str,
+    currency: str = "",
+    open_date: str = "",
+    display_name: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate opening a Beancount account and return an approval-required outcome.
+
+    Use this when the user explicitly asks to create an account, or when a
+    requested ledger mutation needs a new account that does not yet exist.
+    This tool never performs a durable ledger write. It validates the account
+    directive, runs isolated dry-run bean-check, and returns a pending action
+    for explicit user approval.
+
+    Args:
+        account_name: Full Beancount account path (e.g. 'Assets:Liquid:Bank:NewBank').
+                      Must start with Assets, Liabilities, Equity, Income, or Expenses.
+        currency: Optional commodity constraint (e.g. 'USD'). Pass empty string for none.
+        open_date: ISO date when the account should be opened (e.g. '2026-01-01').
+        display_name: Optional human-readable label stored as account metadata.
+
+    Returns a JSON string. Possible statuses:
+        approval_required — account directive dry-run validated; approval is required
+        repairable_error  — revise the account details and retry
+    """
+    c = config.get("configurable", {})
+    ws: str = c.get("workspace", "")
+    ledger_config = c.get("ledger_config")
+    result = _gateway.prepare_open(
+        ws,
+        account_name,
+        currency or None,
+        open_date,
+        display_name or None,
+        ledger_config,
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
 @tool("prepare_commit")
 def tool_prepare_commit(
     transaction_text: str,
@@ -494,7 +535,7 @@ def tool_confirm_commit(
 
     Returns a JSON string. Possible statuses:
         SUCCESS            — transaction committed and pushed
-        INVARIANT_VIOLATION — unknown accounts; use preview_open to create them
+        INVARIANT_VIOLATION — unknown accounts; use ledger_open_account to create them
         VALIDATION_FAILED  — bean-check syntax error; transaction was auto-reverted
         DEPENDENCY_UNAVAILABLE — git or file system error
     """
@@ -775,13 +816,14 @@ def tool_confirm_bulk(
 
 
 # ---------------------------------------------------------------------------
-# Tool groups — partitioned by pillar
+# Tool groups — default model tools plus compatibility-only legacy wrappers.
 # ---------------------------------------------------------------------------
 
 TRANSACTION_TOOLS = [
     tool_ledger_commit_transaction,
     tool_ledger_update_transaction,
     tool_ledger_import_transactions,
+    tool_ledger_open_account,
 ]
 
 ANALYTICS_TOOLS = [
@@ -808,6 +850,8 @@ LEGACY_PREPARE_TOOLS = [
     tool_prepare_bulk,
 ]
 
+# Execution tools are host-controlled compatibility wrappers. They must never
+# be added to MODEL_TOOLS.
 EXECUTION_TOOLS = [
     tool_confirm_commit,
     tool_confirm_open,
@@ -816,7 +860,6 @@ EXECUTION_TOOLS = [
 ]
 
 MODEL_TOOLS = [
-    tool_preflight,
     *ANALYTICS_TOOLS,
     tool_ingest_file,
     tool_run_python,

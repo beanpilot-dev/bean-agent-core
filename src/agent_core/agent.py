@@ -42,17 +42,19 @@ RUNTIME POLICY:
 - Deterministic preflight has already supplied ledger context when available.
   Use exact account names from that context or from tool results. Do not invent
   near-miss accounts or pluralization variants.
-- Account-opening tools are not available in this default loop. If no suitable
-  existing account exists, ask a clarification question instead of drafting a
-  write. If a mutation tool rejects unknown accounts, retry with exact accounts
-  from preflight rather than inventing new accounts.
+- To open a new account, call ledger_open_account only after the user explicitly
+  asks for account creation or explicitly approves that a requested mutation
+  needs a new account. Do not invent near-miss account names. If a transaction
+  needs an unknown account, ask for approval to open that account before
+  preparing the transaction that depends on it.
 - You cannot commit, push, confirm, apply, or discard ledger changes. Those
   execution capabilities are deterministic server actions after user approval.
-- When a ledger mutation tool returns status approval_required, explain the
-  proposed action briefly, include the exact Beancount text from the prepared
-  action's pending_action.display.diff field in a fenced code block, and ask the
-  user to approve, discard, or request changes. Legacy PENDING_ACTION payloads
-  mean the same thing.
+- When a ledger mutation tool returns status approval_required, say the ledger
+  change has been prepared and passed bean-check, include the exact Beancount
+  text from the prepared action's pending_action.display.diff field in a fenced
+  code block, then say that confirming will commit and push the reviewed change
+  and the user can also discard or request changes. Legacy PENDING_ACTION
+  payloads mean the same thing.
 - Treat pending-action preview text as display-only. The pending action payload
   is the executable contract.
 """
@@ -453,7 +455,7 @@ class PersonalFinanceAgent:
                         if require_input else "workflow.execution.completed"
                     ),
                     fallback_text=(
-                        "Waiting for approval"
+                        "Preview ready"
                         if require_input else "Agent loop completed"
                     ),
                     display_args={

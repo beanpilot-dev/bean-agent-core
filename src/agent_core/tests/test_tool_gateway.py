@@ -139,6 +139,23 @@ def test_gateway_maps_validation_failure_to_repairable_error(
     assert outcome.result["status"] == "VALIDATION_FAILED"
 
 
+def test_gateway_prepare_open_uses_model_visible_tool_name(
+    ledger_workspace: Path,
+) -> None:
+    outcome = ToolExecutionGateway().prepare_open(
+        str(ledger_workspace),
+        "Assets:Bank:Savings",
+        "CNY",
+        "2026-06-15",
+        "Savings",
+    )
+
+    assert isinstance(outcome, ToolApprovalRequired)
+    assert outcome.tool_name == "ledger_open_account"
+    assert outcome.action_type == "open_account"
+    assert outcome.pending_action["execution_spec"]["account_name"] == "Assets:Bank:Savings"
+
+
 def test_gateway_maps_successful_read_result_to_completed() -> None:
     result = ToolExecutionGateway().normalize(
         "ledger_account_balance",

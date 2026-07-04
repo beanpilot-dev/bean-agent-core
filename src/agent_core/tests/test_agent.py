@@ -361,7 +361,8 @@ async def test_stream_sets_preferred_language_before_graph_invocation(monkeypatc
     chunks = []
 
     monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
-    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: FakeLLM())
+    CapturingLLM.bound_tool_names = []
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
 
     async for chunk in agent.stream(
         query="请查询 Assets:Bank:Checking 的可用现金",
@@ -390,7 +391,8 @@ async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeyp
     }
 
     monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
-    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: FakeLLM())
+    CapturingLLM.bound_tool_names = []
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
 
     async for _chunk in agent.stream(
         query="How much cash is available?",
@@ -404,6 +406,8 @@ async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeyp
     assert graph.captured_config is not None
     assert graph.captured_config["configurable"]["ledger_context"] == ledger_context
     assert graph.captured_input is not None
+    assert "ledger_preflight" not in CapturingLLM.bound_tool_names
+    assert "ledger_open_account" in CapturingLLM.bound_tool_names
 
 
 @pytest.mark.asyncio
@@ -460,6 +464,7 @@ def test_default_model_manifest_excludes_confirm_tools():
     agent = PersonalFinanceAgent()
     tool_names = [tool.name for tool in agent.model_tools]
 
+    assert "ledger_preflight" not in tool_names
     assert "confirm_commit" not in tool_names
     assert "confirm_open" not in tool_names
     assert "confirm_update" not in tool_names
@@ -467,6 +472,7 @@ def test_default_model_manifest_excludes_confirm_tools():
     assert "ledger_commit_transaction" in tool_names
     assert "ledger_update_transaction" in tool_names
     assert "ledger_import_transactions" in tool_names
+    assert "ledger_open_account" in tool_names
     assert "prepare_commit" not in tool_names
 
 

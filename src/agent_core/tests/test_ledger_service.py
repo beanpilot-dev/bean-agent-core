@@ -365,6 +365,40 @@ def test_open_preview_and_confirm(
     )
 
 
+def test_prepare_open_materializes_pending_action_and_apply(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    target = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    original = target.read_text()
+
+    pending = LedgerService().prepare_open(
+        str(ledger_workspace),
+        "Assets:Bank:Savings",
+        "CNY",
+        "2026-06-15",
+        "Savings",
+    )
+
+    assert isinstance(pending, PendingAction)
+    assert isinstance(pending, ApprovalRequired)
+    assert pending.action_type == "open_account"
+    assert pending.execution_spec["account_name"] == "Assets:Bank:Savings"
+    assert pending.display["kind"] == "account_open_preview"
+    assert target.read_text() == original
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        pending.__dict__.copy(),
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ApplyReceipt)
+    assert result.action_type == "open_account"
+    assert "Assets:Bank:Savings" in target.read_text()
+
+
 def test_open_rejects_bad_name_and_existing_account(ledger_workspace: Path) -> None:
     service = LedgerService()
     bad = service.preview_open(str(ledger_workspace), "assets:cash", None, "2026-06-15")

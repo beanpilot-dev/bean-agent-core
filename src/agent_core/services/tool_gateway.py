@@ -127,7 +127,7 @@ class ToolExecutionGateway:
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult:
         return self._prepare(
-            "prepare_open",
+            "ledger_open_account",
             lambda: self._ledger.prepare_open(
                 workspace,
                 account_name,
