@@ -64,6 +64,9 @@ class ApprovalRequired(ServiceResult):
     policy: dict[str, Any] = field(default_factory=dict)
     expires_at: str = ""
     idempotency_key: str = ""
+    continue_after_approval: bool = False
+    continuation_reason: str = ""
+    next_intent_summary: str = ""
     digest: str = ""
     signature: str = ""
     message: str = ""

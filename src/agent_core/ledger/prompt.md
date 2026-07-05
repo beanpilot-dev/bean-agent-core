@@ -46,6 +46,20 @@ When a ledger mutation tool returns `approval_required` (or a legacy
 * state that confirming will commit and push the reviewed change to the user's ledger
 * then state that the user can confirm, discard, or request changes
 
+When the user's request clearly requires multiple related ledger mutations and
+the needed facts are already known, prepare every clear required mutation in the
+same run before asking the user for approval. Do not stop after the first
+obvious mutation merely because it produced an approval-gated pending action.
+The host will group multiple prepared pending actions into one change set.
+
+If a later mutation truly cannot be planned safely until an earlier prepared
+action is approved, make that dependency explicit through the pending-action
+continuation fields (`continue_after_approval`, `continuation_reason`, and a
+safe `next_intent_summary`) rather than silently ending the turn. The summary
+must not include secrets, raw ledger contents, or unsupported account/amount
+claims; it should only describe the next intent that should resume after
+deterministic apply succeeds.
+
 Preview text is display-only. The pending-action payload is the executable contract.
 
 ## Ledger Literals

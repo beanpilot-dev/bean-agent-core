@@ -178,6 +178,9 @@ def test_prepare_commit_materializes_pending_action_contract(ledger_workspace: P
     assert result.signature == f"sha256:{result.digest}"
     assert result.policy["risk"] == "normal"
     assert result.policy["requires_elevated_review"] is False
+    assert result.continue_after_approval is False
+    assert result.continuation_reason == ""
+    assert result.next_intent_summary == ""
     assert result.validation["dry_run"]["status"] == "validated"
 
 
@@ -211,6 +214,19 @@ def test_pending_action_integrity_detects_mutation(ledger_workspace: Path) -> No
         **result.execution_spec,
         "transaction_text": TXN.replace("Dinner", "Tampered"),
     }
+
+    integrity = LedgerService.verify_pending_action(payload)
+    assert isinstance(integrity, IntegrityFailed)
+
+
+def test_pending_action_integrity_covers_continuation_fields(ledger_workspace: Path) -> None:
+    result = LedgerService().prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    assert isinstance(result, PendingAction)
+
+    payload = result.__dict__.copy()
+    payload["continue_after_approval"] = True
+    payload["continuation_reason"] = "Need approval before the dependent transaction can be planned."
+    payload["next_intent_summary"] = "Record the dependent transaction after approval."
 
     integrity = LedgerService.verify_pending_action(payload)
     assert isinstance(integrity, IntegrityFailed)

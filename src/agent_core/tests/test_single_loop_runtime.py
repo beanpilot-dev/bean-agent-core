@@ -12,6 +12,7 @@ from agent_core.workflow.tools import (
 )
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
+PROMPT = Path(__file__).parents[1] / "ledger" / "prompt.md"
 
 
 def _tool_name(tool) -> str:
@@ -47,6 +48,15 @@ def test_default_agent_uses_single_loop_manifest() -> None:
     assert "tools" in node_names
     assert "planner" not in node_names
     assert "synthesizer" not in node_names
+
+
+def test_system_prompt_requires_complete_change_sets_before_approval() -> None:
+    prompt = " ".join(PROMPT.read_text().split())
+
+    assert "prepare every clear required mutation in the same run" in prompt
+    assert "Do not stop after the first obvious mutation" in prompt
+    assert "continue_after_approval" in prompt
+    assert "next_intent_summary" in prompt
 
 
 def test_ledger_commit_transaction_returns_approval_required_without_write(

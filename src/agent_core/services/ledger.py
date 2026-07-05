@@ -587,6 +587,9 @@ class LedgerService:
             },
             "expires_at": expires_at,
             "idempotency_key": idempotency_key,
+            "continue_after_approval": False,
+            "continuation_reason": "",
+            "next_intent_summary": "",
         }
         digest = _digest_payload(payload)
         return PendingAction(
@@ -599,6 +602,9 @@ class LedgerService:
             policy=payload["policy"],
             expires_at=expires_at,
             idempotency_key=idempotency_key,
+            continue_after_approval=False,
+            continuation_reason="",
+            next_intent_summary="",
             digest=digest,
             signature=f"sha256:{digest}",
             message="Prepared action is awaiting explicit user approval.",
