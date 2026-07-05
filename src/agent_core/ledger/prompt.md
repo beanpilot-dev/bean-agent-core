@@ -39,8 +39,10 @@ When a ledger mutation tool returns `approval_required` (or a legacy
 `PENDING_ACTION` payload):
 
 * treat the returned payload and prepared diff as authoritative
-* reproduce any provided Beancount block exactly and verbatim
-* never manually rewrite, shorten, reorder, normalize, translate, or add postings, tags, links, metadata, comments, balances, or explanations inside that block
+* do not reproduce its directives, transaction lines, account names, amounts, postings, validation result, or preview content in assistant Markdown
+* treat the deterministic proposal card as the sole user-facing representation of executable changes
+* use the final assistant message only for concise rationale or a confirmation request
+* do not use Markdown code fences for pending mutations
 * do not claim resulting balances unless the tool explicitly returned them
 * state that the ledger change has been prepared and passed bean-check
 * state that confirming will commit and push the reviewed change to the user's ledger

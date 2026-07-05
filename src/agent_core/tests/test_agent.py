@@ -15,6 +15,8 @@ from langchain_core.messages import (
 
 from agent_core.agent import (
     PersonalFinanceAgent,
+    SINGLE_LOOP_POLICY,
+    SYSTEM_PROMPT,
     _pending_actions,
     _single_agent_node,
     normalize_conversation_title,
@@ -332,6 +334,17 @@ def test_response_language_instruction_preserves_ledger_literals():
     assert "Beancount syntax" in instruction
     assert "account names" in instruction
     assert "machine-readable codes" in instruction
+
+
+def test_pending_action_prompt_avoids_duplicate_preview_code_blocks():
+    combined = f"{SYSTEM_PROMPT}\n{SINGLE_LOOP_POLICY}"
+
+    assert "do not reproduce its\n  directives, transaction lines" in combined
+    assert "do not reproduce its directives, transaction lines" in combined
+    assert "deterministic proposal card" in combined
+    assert "Do not use Markdown code fences for pending mutations" in combined
+    assert "include the exact Beancount" not in combined
+    assert "in a fenced\n  code block" not in combined
 
 
 @pytest.mark.parametrize(
