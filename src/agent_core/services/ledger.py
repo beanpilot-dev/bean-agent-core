@@ -65,6 +65,14 @@ class _DryRunResult:
     failure: ValidationFailed | None = None
 
 
+@dataclass(frozen=True)
+class _ChangeSetReplay:
+    touched_files: list[str]
+    display_items: list[dict[str, object]]
+    affected_accounts: list[str]
+    transaction_count: int
+
+
 class LedgerServiceError(Exception):
     """Unrecoverable ledger operation failure."""
 
@@ -343,7 +351,11 @@ def _classify_action_risk(action_type: str, validation: dict[str, object]) -> di
     reasons: list[str] = []
     risk = "normal"
     txn_count = validation.get("transaction_count")
-    if action_type == "bulk_commit" and isinstance(txn_count, int) and txn_count >= 25:
+    if (
+        action_type in {"bulk_commit", "change_set"}
+        and isinstance(txn_count, int)
+        and txn_count >= 25
+    ):
         risk = "high"
         reasons.append("bulk_transaction_count")
     if action_type == "update_transaction":
@@ -513,6 +525,34 @@ def _write_open_directive(
         f.write(new_content)
     Beancount.invalidate_cache(workspace, config)
     return config.sidecar_main_path
+
+
+def _read_repo_file(workspace: str, rel_path: str) -> str | None:
+    path = _repo_path(workspace, rel_path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def _write_repo_file(workspace: str, rel_path: str, content: str | None) -> None:
+    path = _repo_path(workspace, rel_path)
+    if content is None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _restore_repo_files(workspace: str, originals: dict[str, str | None]) -> None:
+    for rel_path, content in originals.items():
+        _write_repo_file(workspace, rel_path, content)
+    Beancount.invalidate_workspace(workspace)
 
 
 def _replace_transaction_block(
@@ -1513,6 +1553,288 @@ class LedgerService:
             },
         )
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # change_set → ordered open_account + commit_transaction operations
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _operation_type(operation: dict[str, object]) -> str:
+        value = operation.get("type") or operation.get("operation")
+        return str(value or "")
+
+    @staticmethod
+    def _operation_error(
+        *,
+        operation_index: int,
+        invariant: str,
+        provided: object,
+        remediation: str,
+        detail: dict[str, object] | None = None,
+    ) -> InvariantViolation:
+        return InvariantViolation(
+            invariant=invariant,
+            severity="HARD",
+            provided=provided,
+            remediation=remediation,
+            detail={"operation_index": operation_index, **(detail or {})},
+        )
+
+    def _replay_change_set_operations(
+        self,
+        workspace: str,
+        operations: list[dict[str, object]],
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> _ChangeSetReplay | InvariantViolation:
+        touched: list[str] = []
+        display_items: list[dict[str, object]] = []
+        affected_accounts: set[str] = set()
+        transaction_count = 0
+
+        for index, operation in enumerate(operations):
+            operation_type = self._operation_type(operation)
+            if operation_type == "open_account":
+                account_name = str(operation.get("account_name") or "")
+                currency = (
+                    operation.get("currency")
+                    if isinstance(operation.get("currency"), str)
+                    else None
+                )
+                open_date = str(operation.get("open_date") or "")
+                display_name = (
+                    operation.get("display_name")
+                    if isinstance(operation.get("display_name"), str)
+                    else None
+                )
+                if not _ACCOUNT_NAME_RE.match(account_name):
+                    return self._operation_error(
+                        operation_index=index,
+                        invariant="ACCOUNT_NAME_FORMAT",
+                        provided=account_name,
+                        remediation=(
+                            "Account names must follow Beancount format: "
+                            "Type:Component (e.g. Assets:Liquid:Bank:NewAccount)."
+                        ),
+                    )
+                existing = self.get_accounts(workspace, ledger_config)
+                if account_name in existing:
+                    return self._operation_error(
+                        operation_index=index,
+                        invariant="ACCOUNT_ALREADY_EXISTS",
+                        provided=account_name,
+                        remediation=f"Account '{account_name}' already exists.",
+                    )
+
+                currency_part = f"  {currency}" if currency else ""
+                directive_lines = [f"{open_date} open {account_name}{currency_part}"]
+                if display_name:
+                    directive_lines.append(f'  name: "{display_name}"')
+                directive_text = "\n".join(directive_lines)
+                target = _write_open_directive(
+                    workspace, account_name, directive_text, ledger_config
+                )
+                if target not in touched:
+                    touched.append(target)
+                affected_accounts.add(account_name)
+                display_items.append({
+                    "operation_index": index,
+                    "type": "open_account",
+                    "summary": f"Open {account_name}",
+                    "diff": directive_text,
+                    "target_file": target,
+                })
+            elif operation_type == "commit_transaction":
+                transaction_text = str(operation.get("transaction_text") or "")
+                violation = self.validate_accounts(
+                    workspace, transaction_text, whitelist, ledger_config
+                )
+                if violation:
+                    return InvariantViolation(
+                        invariant=violation.invariant,
+                        severity=violation.severity,
+                        provided=violation.provided,
+                        remediation=violation.remediation,
+                        detail={
+                            "operation_index": index,
+                            **violation.detail,
+                        },
+                    )
+                target = _append_to_sidecar(workspace, transaction_text, ledger_config)
+                if target not in touched:
+                    touched.append(target)
+                accounts = self._extract_accounts(transaction_text)
+                affected_accounts.update(accounts)
+                transaction_count += 1
+                display_items.append({
+                    "operation_index": index,
+                    "type": "commit_transaction",
+                    "summary": "Record a transaction",
+                    "diff": transaction_text,
+                    "target_file": target,
+                    "accounts": accounts,
+                })
+            else:
+                return self._operation_error(
+                    operation_index=index,
+                    invariant="UNSUPPORTED_CHANGE_SET_OPERATION",
+                    provided=operation_type,
+                    remediation=(
+                        "Only open_account and commit_transaction operations "
+                        "are supported in change sets."
+                    ),
+                )
+
+        return _ChangeSetReplay(
+            touched_files=touched,
+            display_items=display_items,
+            affected_accounts=sorted(affected_accounts),
+            transaction_count=transaction_count,
+        )
+
+    def prepare_change_set(
+        self,
+        workspace: str,
+        operations: list[dict[str, object]],
+        commit_message: str,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
+        if not operations:
+            return InvariantViolation(
+                invariant="MISSING_OPERATIONS",
+                severity="HARD",
+                provided=operations,
+                remediation="Provide at least one change-set operation.",
+            )
+        config = _cfg(ledger_config)
+        try:
+            with tempfile.TemporaryDirectory(prefix="beanpilot-change-set-") as tmp:
+                dry_workspace = os.path.join(tmp, "workspace")
+                _copy_workspace_for_dry_run(workspace, dry_workspace)
+                try:
+                    replay = self._replay_change_set_operations(
+                        dry_workspace, operations, whitelist, config
+                    )
+                    if isinstance(replay, InvariantViolation):
+                        return replay
+                    Beancount.invalidate_cache(dry_workspace, config)
+                    is_clean, check_output = Beancount.bean_check(dry_workspace, config)
+                    if not is_clean:
+                        return _validation_failure(
+                            check_output,
+                            "Fix the change-set operations and prepare them again.",
+                        )
+                finally:
+                    Beancount.invalidate_workspace(dry_workspace)
+        except OSError as exc:
+            raise LedgerServiceError("Change-set dry-run workspace unavailable") from exc
+
+        diff = "\n\n".join(str(item.get("diff") or "") for item in replay.display_items)
+        return self._make_pending_action(
+            action_type="change_set",
+            execution_spec={
+                "operations": operations,
+                "commit_message": commit_message,
+            },
+            display={
+                "kind": "change_set_preview",
+                "summary": f"Apply {len(operations)} related ledger changes",
+                "diff": diff,
+                "items": replay.display_items,
+            },
+            validation={
+                "status": "validated",
+                "operation_count": len(operations),
+                "transaction_count": replay.transaction_count,
+                "accounts": replay.affected_accounts,
+                "target_files": replay.touched_files,
+                "dry_run": asdict(_validation_success(isolated=True)),
+            },
+        )
+
+    def confirm_change_set(
+        self,
+        workspace: str,
+        operations: list[dict[str, object]],
+        commit_message: str,
+        repo_url: str,
+        git_service: GitService,
+        github_token: str | None = None,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
+        if not operations:
+            return InvariantViolation(
+                invariant="MISSING_OPERATIONS",
+                severity="HARD",
+                provided=operations,
+                remediation="Provide at least one change-set operation.",
+            )
+
+        config = _cfg(ledger_config)
+        try:
+            with tempfile.TemporaryDirectory(prefix="beanpilot-change-set-apply-") as tmp:
+                apply_workspace = os.path.join(tmp, "workspace")
+                _copy_workspace_for_dry_run(workspace, apply_workspace)
+                try:
+                    replay = self._replay_change_set_operations(
+                        apply_workspace, operations, whitelist, config
+                    )
+                    if isinstance(replay, InvariantViolation):
+                        return replay
+                    Beancount.invalidate_cache(apply_workspace, config)
+                    is_clean, check_output = Beancount.bean_check(apply_workspace, config)
+                    if not is_clean:
+                        return _validation_failure(
+                            check_output,
+                            "Fix the change-set operations and prepare them again.",
+                        )
+                    for rel_path in replay.touched_files:
+                        Beancount.bean_format(
+                            apply_workspace, _repo_path(apply_workspace, rel_path)
+                        )
+
+                    originals = {
+                        rel_path: _read_repo_file(workspace, rel_path)
+                        for rel_path in replay.touched_files
+                    }
+                    try:
+                        for rel_path in replay.touched_files:
+                            _write_repo_file(
+                                workspace,
+                                rel_path,
+                                _read_repo_file(apply_workspace, rel_path),
+                            )
+                        Beancount.invalidate_workspace(workspace)
+                    except OSError:
+                        _restore_repo_files(workspace, originals)
+                        raise
+                finally:
+                    Beancount.invalidate_workspace(apply_workspace)
+        except OSError as exc:
+            raise LedgerServiceError("Change-set apply workspace unavailable") from exc
+
+        try:
+            git = git_service.commit_and_push(
+                workspace, commit_message, repo_url, github_token
+            )
+        except Exception:
+            _restore_repo_files(workspace, originals)
+            raise
+        if dependency_error := _git_dependency_error(git):
+            _restore_repo_files(workspace, originals)
+            return dependency_error
+
+        return CommitResult(
+            outcome=f"{len(operations)} ledger changes validated and committed",
+            result={
+                "operation_count": len(operations),
+                "transaction_count": replay.transaction_count,
+                "target_files": replay.touched_files,
+            },
+            push_status=git["push"],
+        )
+
     def apply_pending_action(
         self,
         workspace: str,
@@ -1586,6 +1908,25 @@ class LedgerService:
                 repo_url,
                 git_service,
                 None,
+                github_token,
+                whitelist,
+                ledger_config,
+            )
+        elif action_type == "change_set":
+            raw_operations = spec.get("operations")
+            if not isinstance(raw_operations, list) or not all(
+                isinstance(operation, dict) for operation in raw_operations
+            ):
+                return IntegrityFailed(
+                    pending_action_id=str(action.get("pending_action_id") or ""),
+                    error="Change-set operations are invalid.",
+                )
+            result = self.confirm_change_set(
+                workspace,
+                raw_operations,
+                str(spec.get("commit_message") or ""),
+                repo_url,
+                git_service,
                 github_token,
                 whitelist,
                 ledger_config,

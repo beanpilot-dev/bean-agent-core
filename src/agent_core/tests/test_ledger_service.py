@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import agent_core.services.ledger as ledger_module
 from agent_core.services.ledger import (
     Beancount,
     LedgerService,
@@ -26,6 +27,11 @@ from agent_core.services.types import (
 )
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
+DEPENDENT_TXN = (
+    '2026-06-16 * "Savings transfer"\n'
+    "  Assets:Bank:Savings   100 CNY\n"
+    "  Assets:Cash          -100 CNY"
+)
 
 
 @pytest.fixture
@@ -508,6 +514,281 @@ def test_prepare_bulk_materializes_pending_action_contract(
     assert result.execution_spec["transactions_text"] == TXN
     assert result.validation["transaction_count"] == 1
     assert result.validation["dry_run"]["status"] == "validated"
+
+
+def test_prepare_change_set_validates_dependent_open_and_transaction_without_write(
+    ledger_workspace: Path,
+) -> None:
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original_main = sidecar_main.read_text()
+    original_month = month_file.read_text()
+
+    result = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+                "display_name": "Savings",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.action_type == "change_set"
+    assert result.execution_spec["commit_message"] == "record savings transfer"
+    assert result.validation["operation_count"] == 2
+    assert result.validation["transaction_count"] == 1
+    assert "Assets:Bank:Savings" in result.validation["accounts"]
+    assert result.display["kind"] == "change_set_preview"
+    assert len(result.display["items"]) == 2
+    assert sidecar_main.read_text() == original_main
+    assert month_file.read_text() == original_month
+
+
+def test_prepare_change_set_reports_operation_index_for_unknown_account(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            }
+        ],
+        "record savings transfer",
+    )
+
+    assert isinstance(result, InvariantViolation)
+    assert result.invariant == "ACCOUNT_WHITELIST"
+    assert result.detail["operation_index"] == 0
+    assert result.provided == ["Assets:Bank:Savings"]
+
+
+def test_apply_change_set_writes_both_changes_and_commits_once(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formatted: list[str] = []
+    monkeypatch.setattr(Beancount, "bean_format", lambda _workspace, path: formatted.append(path))
+    pending = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+    assert isinstance(pending, PendingAction)
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        pending.__dict__.copy(),
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ApplyReceipt)
+    assert result.action_type == "change_set"
+    assert "Assets:Bank:Savings" in (
+        ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    ).read_text()
+    assert "Savings transfer" in (
+        ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    ).read_text()
+    assert len(formatted) == 2
+    git_service.commit_and_push.assert_called_once()
+
+
+def test_apply_change_set_validation_failure_leaves_no_partial_write(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+    assert isinstance(pending, PendingAction)
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original_main = sidecar_main.read_text()
+    original_month = month_file.read_text()
+
+    payload = pending.__dict__.copy()
+    payload["execution_spec"] = {
+        **pending.execution_spec,
+        "operations": [
+            *pending.execution_spec["operations"][:1],
+            {
+                "type": "commit_transaction",
+                "transaction_text": (
+                    '2026-06-16 * "Bad transfer"\n'
+                    "  Assets:Bank:Savings   100 CNY\n"
+                ),
+            },
+        ],
+    }
+    monkeypatch.setattr(LedgerService, "verify_pending_action", staticmethod(lambda _action: None))
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        payload,
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, ValidationFailed)
+    assert sidecar_main.read_text() == original_main
+    assert month_file.read_text() == original_month
+    git_service.commit_and_push.assert_not_called()
+
+
+def test_apply_change_set_commit_failure_restores_sidecar_files(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    git_service.commit_and_push.return_value = {
+        "ok": False,
+        "error": "commit failed",
+        "push": None,
+    }
+    pending = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+    assert isinstance(pending, PendingAction)
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original_main = sidecar_main.read_text()
+    original_month = month_file.read_text()
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace),
+        pending.__dict__.copy(),
+        "repo",
+        git_service,
+    )
+
+    assert isinstance(result, DependencyUnavailable)
+    assert sidecar_main.read_text() == original_main
+    assert month_file.read_text() == original_month
+
+
+def test_apply_change_set_copy_failure_restores_partial_sidecar_copy(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    pending = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+    assert isinstance(pending, PendingAction)
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original_main = sidecar_main.read_text()
+    original_month = month_file.read_text()
+    original_write_repo_file = ledger_module._write_repo_file
+    calls = 0
+
+    def fail_second_write(workspace: str, rel_path: str, content: str | None) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("copy failed")
+        original_write_repo_file(workspace, rel_path, content)
+
+    monkeypatch.setattr(ledger_module, "_write_repo_file", fail_second_write)
+
+    with pytest.raises(LedgerServiceError):
+        LedgerService().apply_pending_action(
+            str(ledger_workspace),
+            pending.__dict__.copy(),
+            "repo",
+            git_service,
+        )
+
+    assert sidecar_main.read_text() == original_main
+    assert month_file.read_text() == original_month
+    git_service.commit_and_push.assert_not_called()
+
+
+def test_prepare_change_set_bulk_sized_transaction_set_is_high_risk(
+    ledger_workspace: Path,
+) -> None:
+    operations = [
+        {
+            "type": "commit_transaction",
+            "transaction_text": (
+                f'2026-06-{day:02d} * "Small purchase {day}"\n'
+                "  Expenses:Food:Dining    1 CNY\n"
+                "  Assets:Cash            -1 CNY"
+            ),
+        }
+        for day in range(1, 26)
+    ]
+
+    result = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        operations,
+        "record many small purchases",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.action_type == "change_set"
+    assert result.validation["transaction_count"] == 25
+    assert result.policy["risk"] == "high"
+    assert result.policy["requires_elevated_review"] is True
 
 
 def test_bulk_supports_staging_file(

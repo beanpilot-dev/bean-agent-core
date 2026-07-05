@@ -19,6 +19,11 @@ from agent_core.services.types import (
 from agent_core.workflow.tools import MODEL_TOOLS
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
+DEPENDENT_TXN = (
+    '2026-06-16 * "Savings transfer"\n'
+    "  Assets:Bank:Savings   100 CNY\n"
+    "  Assets:Cash          -100 CNY"
+)
 
 
 @pytest.fixture
@@ -154,6 +159,32 @@ def test_gateway_prepare_open_uses_model_visible_tool_name(
     assert outcome.tool_name == "ledger_open_account"
     assert outcome.action_type == "open_account"
     assert outcome.pending_action["execution_spec"]["account_name"] == "Assets:Bank:Savings"
+
+
+def test_gateway_prepare_change_set_uses_model_visible_tool_name(
+    ledger_workspace: Path,
+) -> None:
+    outcome = ToolExecutionGateway().prepare_change_set(
+        str(ledger_workspace),
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+    )
+
+    assert isinstance(outcome, ToolApprovalRequired)
+    assert outcome.tool_name == "ledger_prepare_change_set"
+    assert outcome.action_type == "change_set"
+    assert outcome.pending_action["execution_spec"]["commit_message"] == "record savings transfer"
 
 
 def test_gateway_maps_successful_read_result_to_completed() -> None:

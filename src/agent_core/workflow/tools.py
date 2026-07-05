@@ -487,6 +487,46 @@ def tool_ledger_open_account(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_prepare_change_set")
+def tool_ledger_prepare_change_set(
+    operations: list[dict],
+    commit_message: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate related ledger mutations as one approval-required change set.
+
+    Use this when a user-approved transaction depends on a new account in the
+    same request. The tool replays operations in order in one isolated dry-run,
+    so a later transaction can use an account opened by an earlier operation.
+    It never performs a durable ledger write.
+
+    Supported operations:
+      {"type": "open_account", "account_name": "...", "currency": "CNY",
+       "open_date": "2026-01-01", "display_name": "..."}
+      {"type": "commit_transaction", "transaction_text": "..."}
+
+    Args:
+        operations: Ordered open_account and commit_transaction operation objects.
+        commit_message: One Git commit message for the whole approved change set.
+
+    Returns a JSON string. Possible statuses:
+        approval_required — ordered dry-run validated; approval is required
+        repairable_error  — revise the operation at the reported index and retry
+    """
+    c = config.get("configurable", {})
+    ws: str = c.get("workspace", "")
+    whitelist = c.get("whitelist")
+    ledger_config = c.get("ledger_config")
+    result = _gateway.prepare_change_set(
+        ws,
+        operations,
+        commit_message,
+        whitelist,
+        ledger_config,
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
 @tool("prepare_commit")
 def tool_prepare_commit(
     transaction_text: str,
@@ -824,6 +864,7 @@ TRANSACTION_TOOLS = [
     tool_ledger_update_transaction,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
+    tool_ledger_prepare_change_set,
 ]
 
 ANALYTICS_TOOLS = [

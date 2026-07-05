@@ -52,7 +52,11 @@ When the user's request clearly requires multiple related ledger mutations and
 the needed facts are already known, prepare every clear required mutation in the
 same run before asking the user for approval. Do not stop after the first
 obvious mutation merely because it produced an approval-gated pending action.
-The host will group multiple prepared pending actions into one change set.
+When later operations mechanically depend on earlier operations, such as
+opening an account and then recording a transaction that uses it, use
+`ledger_prepare_change_set` so the ordered operations validate and apply as one
+approval-gated pending action. For related but mechanically independent
+mutations, the host can group multiple prepared pending actions into one review.
 
 If a later mutation truly cannot be planned safely until an earlier prepared
 action is approved, make that dependency explicit through the pending-action

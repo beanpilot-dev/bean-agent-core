@@ -9,9 +9,15 @@ from agent_core.workflow.tools import (
     MODEL_TOOLS,
     tool_ledger_commit_transaction,
     tool_ledger_open_account,
+    tool_ledger_prepare_change_set,
 )
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
+DEPENDENT_TXN = (
+    '2026-06-16 * "Savings transfer"\n'
+    "  Assets:Bank:Savings   100 CNY\n"
+    "  Assets:Cash          -100 CNY"
+)
 PROMPT = Path(__file__).parents[1] / "ledger" / "prompt.md"
 
 
@@ -31,6 +37,7 @@ def test_model_tool_manifest_excludes_execution_tools() -> None:
     assert "ledger_update_transaction" in model_names
     assert "ledger_import_transactions" in model_names
     assert "ledger_open_account" in model_names
+    assert "ledger_prepare_change_set" in model_names
     assert "ledger_preflight" not in model_names
     assert "prepare_commit" not in model_names
     assert "prepare_open" not in model_names
@@ -55,6 +62,7 @@ def test_system_prompt_requires_complete_change_sets_before_approval() -> None:
 
     assert "prepare every clear required mutation in the same run" in prompt
     assert "Do not stop after the first obvious mutation" in prompt
+    assert "ledger_prepare_change_set" in prompt
     assert "continue_after_approval" in prompt
     assert "next_intent_summary" in prompt
 
@@ -102,6 +110,45 @@ def test_ledger_open_account_returns_approval_required_without_write(
     assert payload["pending_action"]["execution_spec"]["account_name"] == "Assets:Bank:Savings"
     assert payload["display"]["diff"].startswith("2026-06-15 open Assets:Bank:Savings")
     assert target.read_text() == original
+
+
+def test_ledger_prepare_change_set_returns_approval_required_without_write(
+    ledger_workspace: Path,
+) -> None:
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original_main = sidecar_main.read_text()
+    original_month = month_file.read_text()
+
+    raw = tool_ledger_prepare_change_set.func(
+        [
+            {
+                "type": "open_account",
+                "account_name": "Assets:Bank:Savings",
+                "currency": "CNY",
+                "open_date": "2026-06-16",
+            },
+            {
+                "type": "commit_transaction",
+                "transaction_text": DEPENDENT_TXN,
+            },
+        ],
+        "record savings transfer",
+        config={"configurable": {"workspace": str(ledger_workspace)}},
+    )
+    payload = json.loads(raw)
+
+    assert payload["status"] == "approval_required"
+    assert payload["tool_name"] == "ledger_prepare_change_set"
+    assert payload["action_type"] == "change_set"
+    assert payload["pending_action"]["status"] == "PENDING_ACTION"
+    assert (
+        payload["pending_action"]["execution_spec"]["commit_message"]
+        == "record savings transfer"
+    )
+    assert len(payload["display"]["items"]) == 2
+    assert sidecar_main.read_text() == original_main
+    assert month_file.read_text() == original_month
 
 
 def test_ledger_commit_transaction_returns_repairable_validation_failure(

@@ -159,6 +159,25 @@ class ToolExecutionGateway:
             ),
         )
 
+    def prepare_change_set(
+        self,
+        workspace: str,
+        operations: list[dict[str, Any]],
+        commit_message: str,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_change_set",
+            lambda: self._ledger.prepare_change_set(
+                workspace,
+                operations,
+                commit_message,
+                whitelist,
+                ledger_config,
+            ),
+        )
+
     def apply_approved_action(
         self,
         *,
