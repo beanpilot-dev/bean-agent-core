@@ -225,7 +225,9 @@ def test_pending_action_integrity_covers_continuation_fields(ledger_workspace: P
 
     payload = result.__dict__.copy()
     payload["continue_after_approval"] = True
-    payload["continuation_reason"] = "Need approval before the dependent transaction can be planned."
+    payload["continuation_reason"] = (
+        "Need approval before the dependent transaction can be planned."
+    )
     payload["next_intent_summary"] = "Record the dependent transaction after approval."
 
     integrity = LedgerService.verify_pending_action(payload)
