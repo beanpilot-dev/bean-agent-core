@@ -53,6 +53,9 @@ load_dotenv(_project_root / ".env.local", override=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+if os.environ.get("AGENT_MODE") == "cloud" and not os.environ.get("OPENAI_API_KEY"):
+    logger.warning("OPENAI_API_KEY is not set (AGENT_MODE=cloud)")
+
 app = FastAPI(title="Agent Core", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
