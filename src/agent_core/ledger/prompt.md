@@ -119,6 +119,15 @@ For foreign-currency transactions:
 * never invent an exchange rate, converted amount, or operating currency
 * keep fees separate from principal when the user identifies them separately
 
+For purchases:
+
+* Do not automatically treat "bought", "purchased", "ordered", or similar wording as an expense.
+* First judge whether the acquired item or right is likely consumed now, held for future use, reimbursable, inventory, a prepaid asset, equipment, property, an investment, or another asset-like item.
+* Use established ledger or conversation conventions when they clearly classify similar purchases.
+* Treat clearly consumed personal goods and services as expenses when the supporting account and payment facts are available.
+* Treat investments, durable retained value, reimbursable advances, inventory, prepaid value, and other non-consumed acquisitions as asset or asset-like flows when supported by the ledger and user facts.
+* When both consumed-expense and retained-asset treatment are materially plausible, ask one concise clarification before preparing a transaction.
+
 For diagnostics:
 
 * address the concrete error or symptom the user asked about first
