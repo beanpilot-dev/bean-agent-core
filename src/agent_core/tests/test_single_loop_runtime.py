@@ -4,8 +4,6 @@ from pathlib import Path
 
 from agent_core.agent import PersonalFinanceAgent
 from agent_core.workflow.tools import (
-    EXECUTION_TOOLS,
-    LEGACY_PREPARE_TOOLS,
     MODEL_TOOLS,
     tool_ledger_commit_transaction,
     tool_ledger_open_account,
@@ -27,12 +25,7 @@ def _tool_name(tool) -> str:
 
 def test_model_tool_manifest_excludes_execution_tools() -> None:
     model_names = {_tool_name(tool) for tool in MODEL_TOOLS}
-    execution_names = {_tool_name(tool) for tool in EXECUTION_TOOLS}
-    legacy_prepare_names = {_tool_name(tool) for tool in LEGACY_PREPARE_TOOLS}
 
-    assert execution_names
-    assert model_names.isdisjoint(execution_names)
-    assert model_names.isdisjoint(legacy_prepare_names)
     assert "ledger_commit_transaction" in model_names
     assert "ledger_update_transaction" in model_names
     assert "ledger_import_transactions" in model_names

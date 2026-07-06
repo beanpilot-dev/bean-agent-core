@@ -72,40 +72,6 @@ def _processing_state(
     return chunk
 
 
-def _working_state_for_query(query: str) -> tuple[str, str]:
-    normalized = query.strip().lower()
-    write_markers = (
-        "record ",
-        "add ",
-        "create ",
-        "log ",
-        "bought ",
-        "paid ",
-        "commit confirmed",
-    )
-    query_markers = (
-        "what ",
-        "how ",
-        "show ",
-        "find ",
-        "list ",
-        "lookup ",
-        "look up ",
-        "search ",
-        "recent",
-        "balance",
-        "spend",
-        "spent",
-        "transaction",
-        "?",
-    )
-    if any(marker in normalized for marker in write_markers):
-        return "Preparing a transaction preview", "draft_created"
-    if any(marker in normalized for marker in query_markers):
-        return "Querying your ledger", "read_only"
-    return "Working on your request", "read_only"
-
-
 class AgentOrchestrator:
     """Full lifecycle orchestrator for agent requests.
 
@@ -246,7 +212,8 @@ class AgentOrchestrator:
             whitelist = conversation_meta.get("account_whitelist")
             last_requires_user_input = False
             pending_history_snapshot: dict | None = None
-            working_label, working_mutation_state = _working_state_for_query(query)
+            working_label = "Working on your request"
+            working_mutation_state = "read_only"
             yield _processing_state(
                 state="working",
                 run_id=run_id,
