@@ -522,8 +522,13 @@ class PersonalFinanceAgent:
                 "usage": {"tokens": total_tokens, "duration_ms": duration_ms},
             }
         except Exception as e:
-            logger.exception("Agent error")
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            logger.exception(
+                "Agent error conversation_id=%s model=%s duration_ms=%d",
+                conversation_id,
+                model,
+                duration_ms,
+            )
             if activity_emitter:
                 yield activity_emitter.emit(
                     category="node",
@@ -535,7 +540,7 @@ class PersonalFinanceAgent:
                     fallback_text="Agent workflow failed",
                     safe_detail_summary=type(e).__name__,
                 )
-            yield {"is_task_complete": True, "require_user_input": False, "content": f"Error: {e}"}
+            yield {"is_task_complete": True, "require_user_input": False, "content": "Agent request failed. Please try again."}
             yield {
                 "type": "history_snapshot",
                 "messages": (
