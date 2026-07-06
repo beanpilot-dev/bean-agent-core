@@ -43,6 +43,12 @@ testpaths = ["src/agent_core/tests"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_core"]
 

@@ -17,7 +17,6 @@ System errors (disk full, git failure) raise exceptions.
 """
 
 import hashlib
-import io
 import json
 import logging
 import os
@@ -31,7 +30,6 @@ from pathlib import PurePosixPath
 from typing import Callable
 
 from .types import (
-    DEFAULT_LEDGER_CONFIG,
     ApplyReceipt,
     CommitResult,
     DependencyUnavailable,
@@ -47,23 +45,15 @@ from .types import (
     ValidationSummary,
 )
 from .workspace import GitService
+from .beancount import Beancount, LedgerServiceError, _cfg, _repo_path
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _ParsedLedger:
-    fingerprint: tuple[tuple[str, int, int], ...]
-    errors: list[object]
-    error_output: str
-
 
 @dataclass(frozen=True)
 class _DryRunResult:
     target_file: str | None
     validation: ValidationSummary
     failure: ValidationFailed | None = None
-
 
 @dataclass(frozen=True)
 class _ChangeSetReplay:
@@ -72,30 +62,12 @@ class _ChangeSetReplay:
     affected_accounts: list[str]
     transaction_count: int
 
-
-class LedgerServiceError(Exception):
-    """Unrecoverable ledger operation failure."""
-
-
-def _cfg(ledger_config: LedgerConfig | None) -> LedgerConfig:
-    return ledger_config or DEFAULT_LEDGER_CONFIG
-
-
-def _repo_path(workspace: str, rel_path: str) -> str:
-    normalized = PurePosixPath(rel_path).as_posix().strip("/")
-    parts = PurePosixPath(normalized).parts
-    if not normalized or rel_path.startswith("/") or ".." in parts:
-        raise LedgerServiceError("Ledger path must stay inside the repository")
-    return os.path.join(workspace, *parts)
-
-
 def _include_line(entry_path: str, sidecar_main_path: str) -> str:
     relative = os.path.relpath(
         sidecar_main_path,
         start=PurePosixPath(entry_path).parent.as_posix(),
     ).replace(os.sep, "/")
     return f'include "{relative}"'
-
 
 def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
     if not git["ok"]:
@@ -109,154 +81,6 @@ def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
             retryable=True,
         )
     return None
-
-
-# ---------------------------------------------------------------------------
-# Beancount CLI helpers (lightweight local copy)
-# ---------------------------------------------------------------------------
-
-class Beancount:
-    _parsed_cache: dict[tuple[str, str], _ParsedLedger] = {}
-
-    @staticmethod
-    def _bean_bin(workspace: str, name: str) -> str:
-        import sys
-        candidate = os.path.join(workspace, ".venv", "bin", name)
-        if os.path.exists(candidate):
-            return candidate
-        candidate = os.path.join(os.path.dirname(sys.executable), name)
-        if os.path.exists(candidate):
-            return candidate
-        return name
-
-    @staticmethod
-    def bean_check(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> tuple[bool, str]:
-        if os.environ.get("BEANPILOT_BEANCOUNT_VALIDATE_MODE") == "cli":
-            return Beancount._bean_check_cli(workspace, ledger_config)
-
-        parsed = Beancount._load_ledger(workspace, ledger_config)
-        return not parsed.errors, parsed.error_output
-
-    @staticmethod
-    def _bean_check_cli(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> tuple[bool, str]:
-        import subprocess
-        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
-        result = subprocess.run(
-            [Beancount._bean_bin(workspace, "bean-check"), main],
-            cwd=workspace, capture_output=True, text=True,
-        )
-        return result.returncode == 0, result.stdout + result.stderr
-
-    @staticmethod
-    def _cache_key(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> tuple[str, str]:
-        config = _cfg(ledger_config)
-        return os.path.abspath(workspace), config.entry_path
-
-    @staticmethod
-    def _load_ledger(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> _ParsedLedger:
-        key = Beancount._cache_key(workspace, ledger_config)
-        fingerprint = Beancount._workspace_fingerprint(workspace)
-        cached = Beancount._parsed_cache.get(key)
-        if cached is not None and cached.fingerprint == fingerprint:
-            return cached
-
-        from beancount import loader
-        from beancount.parser import printer
-
-        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
-        try:
-            _entries, errors, _options = loader.load_file(main)
-            output = io.StringIO()
-            printer.print_errors(errors, file=output)
-            parsed = _ParsedLedger(
-                fingerprint=fingerprint,
-                errors=list(errors),
-                error_output=output.getvalue(),
-            )
-        except Exception as exc:
-            parsed = _ParsedLedger(
-                fingerprint=fingerprint,
-                errors=[exc],
-                error_output=str(exc),
-            )
-
-        Beancount._parsed_cache[key] = parsed
-        return parsed
-
-    @staticmethod
-    def _workspace_fingerprint(workspace: str) -> tuple[tuple[str, int, int], ...]:
-        fingerprint: list[tuple[str, int, int]] = []
-        try:
-            for dirpath, dirnames, filenames in os.walk(workspace):
-                dirnames[:] = [d for d in dirnames if d not in {".git", ".venv"}]
-                for filename in filenames:
-                    if not filename.endswith((".beancount", ".py")):
-                        continue
-                    path = os.path.join(dirpath, filename)
-                    try:
-                        stat = os.stat(path)
-                    except OSError:
-                        continue
-                    rel_path = os.path.relpath(path, workspace)
-                    fingerprint.append((rel_path, stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            pass
-        return tuple(sorted(fingerprint))
-
-    @staticmethod
-    def invalidate_cache(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> None:
-        Beancount._parsed_cache.pop(Beancount._cache_key(workspace, ledger_config), None)
-
-    @staticmethod
-    def invalidate_workspace(workspace: str) -> None:
-        workspace_abs = os.path.abspath(workspace)
-        for key in list(Beancount._parsed_cache):
-            if key[0] == workspace_abs:
-                Beancount._parsed_cache.pop(key, None)
-
-    @staticmethod
-    def bean_format(workspace: str, file_path: str) -> None:
-        import subprocess
-        result = subprocess.run(
-            [Beancount._bean_bin(workspace, "bean-format"), file_path],
-            cwd=workspace, capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout:
-            with open(file_path, "w") as f:
-                f.write(result.stdout)
-            Beancount.invalidate_workspace(workspace)
-        elif result.returncode != 0:
-            logger.warning(
-                "bean-format failed on %s: %s", file_path, result.stderr.strip()
-            )
-
-    @staticmethod
-    def run_bql_rows(
-        workspace: str, bql: str, ledger_config: LedgerConfig | None = None
-    ) -> tuple[list[dict], str | None]:
-        import csv
-        import io
-        import subprocess
-        main = _repo_path(workspace, _cfg(ledger_config).entry_path)
-        result = subprocess.run(
-            [Beancount._bean_bin(workspace, "bean-query"), "-f", "csv", main, bql],
-            cwd=workspace, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return [], result.stderr.strip()
-        rows = list(csv.DictReader(io.StringIO(result.stdout)))
-        return [{k: v.strip() for k, v in row.items()} for row in rows], None
-
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -278,7 +102,6 @@ _AMOUNT_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*\s+[A-Z][A-Z0-9\-]+")
 
 _PENDING_ACTION_SCHEMA_VERSION = 1
 _PENDING_ACTION_TTL_MINUTES = 30
-
 
 def _summarize_validation_failure(output: str) -> ValidationSummary:
     lower = output.lower()
@@ -317,7 +140,6 @@ def _summarize_validation_failure(output: str) -> ValidationSummary:
         retryable=True,
     )
 
-
 def _validation_failure(output: str, remediation: str) -> ValidationFailed:
     summary = _summarize_validation_failure(output)
     return ValidationFailed(
@@ -326,18 +148,14 @@ def _validation_failure(output: str, remediation: str) -> ValidationFailed:
         advisory=asdict(summary),
     )
 
-
 def _validation_success(isolated: bool) -> ValidationSummary:
     return ValidationSummary(status="validated", isolated=isolated)
-
 
 def _canonical_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
 
-
 def _digest_payload(payload: dict) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-
 
 def _pending_action_digest_input(action: dict) -> dict:
     return {
@@ -345,7 +163,6 @@ def _pending_action_digest_input(action: dict) -> dict:
         for key, value in action.items()
         if key not in {"digest", "signature", "status", "message"}
     }
-
 
 def _classify_action_risk(action_type: str, validation: dict[str, object]) -> dict[str, object]:
     reasons: list[str] = []
@@ -377,7 +194,6 @@ def _agent_sidecar_target_file(ledger_config: LedgerConfig | None = None) -> str
     chunk_name = f"{today.year}-{today.month:02d}.beancount"
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
-
 def _check_sidecar_include(
     workspace: str, ledger_config: LedgerConfig | None = None
 ) -> bool:
@@ -389,7 +205,6 @@ def _check_sidecar_include(
             return include in f.read()
     except OSError:
         return False
-
 
 def _ensure_agent_sidecar(
     workspace: str, ledger_config: LedgerConfig | None = None
@@ -430,7 +245,6 @@ def _ensure_agent_sidecar(
 
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
-
 def _copy_workspace_for_dry_run(workspace: str, target: str) -> None:
     shutil.copytree(
         workspace,
@@ -443,7 +257,6 @@ def _copy_workspace_for_dry_run(workspace: str, target: str) -> None:
             ".ruff_cache",
         ),
     )
-
 
 def _run_isolated_validation(
     workspace: str,
@@ -475,7 +288,6 @@ def _run_isolated_validation(
     except OSError as exc:
         raise LedgerServiceError("Dry-run validation workspace unavailable") from exc
 
-
 def _append_to_sidecar(
     workspace: str,
     text: str,
@@ -487,7 +299,6 @@ def _append_to_sidecar(
         f.write(f"\n{text.strip()}\n")
     Beancount.invalidate_cache(workspace, ledger_config)
     return target
-
 
 def _write_open_directive(
     workspace: str,
@@ -526,7 +337,6 @@ def _write_open_directive(
     Beancount.invalidate_cache(workspace, config)
     return config.sidecar_main_path
 
-
 def _read_repo_file(workspace: str, rel_path: str) -> str | None:
     path = _repo_path(workspace, rel_path)
     try:
@@ -534,7 +344,6 @@ def _read_repo_file(workspace: str, rel_path: str) -> str | None:
             return f.read()
     except FileNotFoundError:
         return None
-
 
 def _write_repo_file(workspace: str, rel_path: str, content: str | None) -> None:
     path = _repo_path(workspace, rel_path)
@@ -548,12 +357,10 @@ def _write_repo_file(workspace: str, rel_path: str, content: str | None) -> None
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
-
 def _restore_repo_files(workspace: str, originals: dict[str, str | None]) -> None:
     for rel_path, content in originals.items():
         _write_repo_file(workspace, rel_path, content)
     Beancount.invalidate_workspace(workspace)
-
 
 def _replace_transaction_block(
     workspace: str,
@@ -570,7 +377,6 @@ def _replace_transaction_block(
         f.write(new_content)
     Beancount.invalidate_cache(workspace, ledger_config)
     return rel_path
-
 
 # ---------------------------------------------------------------------------
 # LedgerService
