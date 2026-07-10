@@ -263,7 +263,11 @@ class AgentOrchestrator:
                 yield pending_history_snapshot
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run() user_id=%s request_id=%s", user_id, request_id)
+            logger.error(
+                "Cache lock timeout in run() user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
             yield emitter.emit(
                 category="run",
                 state="failed",
@@ -405,7 +409,11 @@ class AgentOrchestrator:
             }
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run_stats() user_id=%s request_id=%s", user_id, request_id)
+            logger.error(
+                "Cache lock timeout in run_stats() user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
             return {
                 "status": "error",
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
@@ -516,7 +524,11 @@ class AgentOrchestrator:
             }
 
         except CacheLockTimeoutError as e:
-            logger.error("Cache lock timeout in run_accounts() user_id=%s request_id=%s", user_id, request_id)
+            logger.error(
+                "Cache lock timeout in run_accounts() user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
             return {
                 "status": "error",
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
@@ -668,7 +680,11 @@ class AgentOrchestrator:
                 expected_head_sha=expected_head_sha,
             )
         except CacheLockTimeoutError:
-            logger.error("Cache lock timeout in run_onboarding_discovery() user_id=%s request_id=%s", user_id, request_id)
+            logger.error(
+                "Cache lock timeout in run_onboarding_discovery() user_id=%s request_id=%s",
+                user_id,
+                request_id,
+            )
             return {
                 "status": "error",
                 "discovery_status": "invalid_request",

@@ -540,7 +540,11 @@ class PersonalFinanceAgent:
                     fallback_text="Agent workflow failed",
                     safe_detail_summary=type(e).__name__,
                 )
-            yield {"is_task_complete": True, "require_user_input": False, "content": "Agent request failed. Please try again."}
+            yield {
+                "is_task_complete": True,
+                "require_user_input": False,
+                "content": "Agent request failed. Please try again.",
+            }
             yield {
                 "type": "history_snapshot",
                 "messages": (

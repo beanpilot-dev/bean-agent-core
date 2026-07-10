@@ -12,7 +12,6 @@ from agent_core.services import (
     PriceService,
     ToolExecutionGateway,
 )
-from agent_core.services.workspace import GitService
 
 _ledger = LedgerService()
 _gateway = ToolExecutionGateway(_ledger)
