@@ -332,6 +332,7 @@ async def health():
 
 @app.post("/agent/chat")
 async def agent_chat(req: ChatRequest):
+    start_time = time.monotonic()
     workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
     try:
         ledger_config = _ledger_config(req.ledger)
@@ -361,6 +362,10 @@ async def agent_chat(req: ChatRequest):
         api_tok = agent_api_key.set(req.api_key)
         uid_tok = agent_user_id.set(req.user_id)
         rid_tok = agent_request_id.set(req.request_id)
+        chunk_count = 0
+        terminal_code = "OK"
+        terminal_status = "completed"
+        history_snapshot_seen = False
 
         try:
             async for chunk in _orchestrator.run(
@@ -382,6 +387,12 @@ async def agent_chat(req: ChatRequest):
                 messages=req.messages,
                 ledger_config=ledger_config,
             ):
+                chunk_count += 1
+                if chunk.get("type") == "history_snapshot":
+                    history_snapshot_seen = True
+                if chunk.get("type") == "fatal":
+                    terminal_status = "failed"
+                    terminal_code = str(chunk.get("code") or "INTERNAL_ERROR")
                 if chunk.get("type") == "history_snapshot":
                     yield f"data: {json.dumps(chunk, default=str)}\n\n"
                 else:
@@ -389,10 +400,28 @@ async def agent_chat(req: ChatRequest):
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error("agent-chat error error_type=%s", type(e).__name__)
-            fatal = {"type": "fatal", "code": "INTERNAL_ERROR", "message": str(e)}
+            terminal_status = "failed"
+            terminal_code = "INTERNAL_ERROR"
+            fatal = {
+                "type": "fatal",
+                "code": "INTERNAL_ERROR",
+                "message": "Internal agent-core error",
+            }
             yield f"data: {json.dumps(fatal)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
+            logger.info(
+                "agent-chat completed user_id=%s request_id=%s conv_id=%s "
+                "status=%s code=%s chunk_count=%s history_snapshot=%s duration_ms=%s",
+                req.user_id,
+                req.request_id,
+                req.conversation.id,
+                terminal_status,
+                terminal_code,
+                chunk_count,
+                history_snapshot_seen,
+                int((time.monotonic() - start_time) * 1000),
+            )
             agent_request_id.reset(rid_tok)
             agent_user_id.reset(uid_tok)
             agent_api_key.reset(api_tok)
@@ -441,6 +470,15 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
     )
     if "usage" not in result:
         result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    logger.info(
+        "agent-actions-apply completed user_id=%s request_id=%s status=%s "
+        "error_code=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        result.get("status"),
+        (result.get("error") or {}).get("code"),
+        result.get("usage", {}).get("duration_ms"),
+    )
     if result.get("error"):
         code = result["error"].get("code")
         return JSONResponse(
@@ -467,7 +505,21 @@ async def agent_conversation_title(req: ConversationTitleRequest):
     )
     title = await generate_conversation_title(req.query, req.api_key, model)
     if not title:
+        logger.warning(
+            "agent-conversation-title completed user_id=%s request_id=%s "
+            "status=error error_code=TITLE_UNAVAILABLE duration_ms=%s",
+            req.user_id,
+            req.request_id,
+            int((time.monotonic() - start_time) * 1000),
+        )
         return _error_envelope("TITLE_UNAVAILABLE", "Title generation failed", 502)
+    logger.info(
+        "agent-conversation-title completed user_id=%s request_id=%s "
+        "status=ok duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        int((time.monotonic() - start_time) * 1000),
+    )
     return {
         "status": "ok",
         "title": title,
@@ -509,6 +561,14 @@ async def agent_stats(req: StatsRequest):
 
     if result.get("status") == "error":
         error = result.get("error", {})
+        logger.warning(
+            "agent-stats completed user_id=%s request_id=%s status=error "
+            "error_code=%s duration_ms=%s",
+            req.user_id,
+            req.request_id,
+            error.get("code"),
+            int((time.monotonic() - start_time) * 1000),
+        )
         return JSONResponse(
             content={
                 "status": "error",
@@ -519,6 +579,14 @@ async def agent_stats(req: StatsRequest):
             status_code=500,
         )
 
+    logger.info(
+        "agent-stats completed user_id=%s request_id=%s status=ok row_count=%s "
+        "duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        len(result.get("rows", [])),
+        int((time.monotonic() - start_time) * 1000),
+    )
     return {
         "status": "ok",
         "tag": tag,
@@ -555,11 +623,28 @@ async def agent_accounts(req: AccountsRequest):
 
     if result.get("status") == "error":
         error = result.get("error", {})
+        logger.warning(
+            "agent-accounts completed user_id=%s request_id=%s status=error "
+            "error_code=%s duration_ms=%s",
+            req.user_id,
+            req.request_id,
+            error.get("code"),
+            int((time.monotonic() - start_time) * 1000),
+        )
         return JSONResponse(
             content={"status": "error", "error": error},
             status_code=400 if error.get("code") == "SETUP_REQUIRED" else 500,
         )
 
+    logger.info(
+        "agent-accounts completed user_id=%s request_id=%s status=ok "
+        "account_count=%s raw_account_count=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        len(result.get("accounts", [])),
+        len(result.get("raw_accounts", [])),
+        int((time.monotonic() - start_time) * 1000),
+    )
     return {
         "status": "ok",
         "accounts": result.get("accounts", []),
@@ -574,6 +659,7 @@ async def agent_accounts(req: AccountsRequest):
 
 @app.post("/agent/cache/warm")
 async def agent_cache_warm(req: CacheWarmRequest):
+    start_time = time.monotonic()
     try:
         ledger_config = _ledger_config(req.ledger)
     except ValueError:
@@ -597,6 +683,18 @@ async def agent_cache_warm(req: CacheWarmRequest):
     if result.get("status") == "error":
         code = (result.get("error") or {}).get("code")
         status_code = 409 if code == "CACHE_BUSY" else 400
+    logger.info(
+        "agent-cache-warm completed user_id=%s request_id=%s status=%s "
+        "cache_state=%s preflight_status=%s error_code=%s http_status=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        result.get("status"),
+        result.get("cache_state"),
+        result.get("preflight_status"),
+        (result.get("error") or {}).get("code"),
+        status_code,
+        int((time.monotonic() - start_time) * 1000),
+    )
     return JSONResponse(content=result, status_code=status_code)
 
 
@@ -626,6 +724,17 @@ async def agent_onboarding_discover(req: OnboardingDiscoveryRequest):
     status_code = 200 if result.get("status") != "error" else 400
     result["request_id"] = req.request_id
     result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    logger.info(
+        "agent-onboarding-discover completed user_id=%s request_id=%s status=%s "
+        "discovery_status=%s error_code=%s http_status=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        result.get("status"),
+        result.get("discovery_status"),
+        (result.get("error") or {}).get("code"),
+        status_code,
+        result["usage"]["duration_ms"],
+    )
     return JSONResponse(content=result, status_code=status_code)
 
 
@@ -656,9 +765,21 @@ async def agent_onboarding_setup_preview(req: OnboardingSetupRequest):
     )
     result["request_id"] = req.request_id
     result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
+    status_code = 200 if result.get("status") == "preview" else 400
+    logger.info(
+        "agent-onboarding-setup-preview completed user_id=%s request_id=%s "
+        "operation=%s status=%s error_code=%s http_status=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        req.operation,
+        result.get("status"),
+        (result.get("error") or {}).get("code"),
+        status_code,
+        result["usage"]["duration_ms"],
+    )
     return JSONResponse(
         content=result,
-        status_code=200 if result.get("status") == "preview" else 400,
+        status_code=status_code,
     )
 
 
@@ -691,9 +812,21 @@ async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
     result["request_id"] = req.request_id
     result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
     success_statuses = {"success", "stale", "validation_failed"}
+    status_code = 200 if result.get("status") in success_statuses else 400
+    logger.info(
+        "agent-onboarding-setup-confirm completed user_id=%s request_id=%s "
+        "operation=%s status=%s error_code=%s http_status=%s duration_ms=%s",
+        req.user_id,
+        req.request_id,
+        req.operation,
+        result.get("status"),
+        (result.get("error") or {}).get("code"),
+        status_code,
+        result["usage"]["duration_ms"],
+    )
     return JSONResponse(
         content=result,
-        status_code=200 if result.get("status") in success_statuses else 400,
+        status_code=status_code,
     )
 
 
