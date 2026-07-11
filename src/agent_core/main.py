@@ -281,6 +281,8 @@ class OnboardingSetupRequest(BaseModel):
     entry_path: str | None = None
     sidecar_main_path: str | None = None
     sidecar_write_dir: str | None = None
+    ledger_title: str | None = None
+    operating_currency: str | None = None
     expected_head_sha: str | None = None
 
 
@@ -762,6 +764,8 @@ async def agent_onboarding_setup_preview(req: OnboardingSetupRequest):
         entry_path=req.entry_path,
         sidecar_main_path=req.sidecar_main_path,
         sidecar_write_dir=req.sidecar_write_dir,
+        ledger_title=req.ledger_title,
+        operating_currency=req.operating_currency,
     )
     result["request_id"] = req.request_id
     result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}
@@ -808,6 +812,8 @@ async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
         entry_path=req.entry_path,
         sidecar_main_path=req.sidecar_main_path,
         sidecar_write_dir=req.sidecar_write_dir,
+        ledger_title=req.ledger_title,
+        operating_currency=req.operating_currency,
     )
     result["request_id"] = req.request_id
     result["usage"] = {"duration_ms": int((time.monotonic() - start_time) * 1000)}

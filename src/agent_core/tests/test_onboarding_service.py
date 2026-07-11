@@ -191,6 +191,58 @@ def test_confirm_initialize_ledger_clean_repo(tmp_path: Path) -> None:
     assert (tmp_path / "data" / "agent_inc" / "main.beancount").exists()
 
 
+def test_initialize_ledger_uses_selected_title_and_currency(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    preview = OnboardingService.preview_setup(
+        str(tmp_path),
+        operation="initialize_ledger",
+        ledger_title="Family Books",
+        operating_currency="cny",
+    )
+
+    assert preview["status"] == "preview"
+    assert preview["ledger_title"] == "Family Books"
+    assert preview["operating_currency"] == "CNY"
+
+    result = OnboardingService.confirm_setup(
+        str(tmp_path),
+        operation="initialize_ledger",
+        expected_head_sha="",
+        repo_url="ignored",
+        git_service=FakeGit(),
+        token=None,
+        ledger_title="Family Books",
+        operating_currency="cny",
+    )
+
+    assert result["status"] == "success"
+    entry = (tmp_path / "data" / "main.beancount").read_text()
+    assert 'option "title" "Family Books"' in entry
+    assert 'option "operating_currency" "CNY"' in entry
+
+
+def test_install_sidecar_preview_does_not_include_clean_ledger_metadata(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    entry = data / "main.beancount"
+    entry.write_text('option "title" "Existing"\n')
+
+    result = OnboardingService.preview_setup(
+        str(tmp_path),
+        operation="install_sidecar",
+        entry_path="data/main.beancount",
+        ledger_title="Ignored",
+        operating_currency="EUR",
+    )
+
+    assert result["status"] == "preview"
+    assert result["ledger_title"] is None
+    assert result["operating_currency"] is None
+
+
 def test_initialize_rejects_non_clean_repo(tmp_path: Path) -> None:
     init_repo(tmp_path)
     (tmp_path / "README.md").write_text("existing content")

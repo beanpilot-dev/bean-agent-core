@@ -718,6 +718,8 @@ class AgentOrchestrator:
         entry_path: str | None,
         sidecar_main_path: str | None,
         sidecar_write_dir: str | None,
+        ledger_title: str | None = None,
+        operating_currency: str | None = None,
     ) -> dict:
         """Build deterministic onboarding setup preview without mutation."""
         workspace_path: str | None = None
@@ -732,6 +734,8 @@ class AgentOrchestrator:
                 entry_path=entry_path,
                 sidecar_main_path=sidecar_main_path,
                 sidecar_write_dir=sidecar_write_dir,
+                ledger_title=ledger_title,
+                operating_currency=operating_currency,
             )
         except GitServiceError as e:
             code = _git_error_code(e)
@@ -757,6 +761,8 @@ class AgentOrchestrator:
         entry_path: str | None,
         sidecar_main_path: str | None,
         sidecar_write_dir: str | None,
+        ledger_title: str | None = None,
+        operating_currency: str | None = None,
     ) -> dict:
         """Apply deterministic onboarding setup after explicit confirmation."""
         workspace_path: str | None = None
@@ -775,6 +781,8 @@ class AgentOrchestrator:
                 entry_path=entry_path,
                 sidecar_main_path=sidecar_main_path,
                 sidecar_write_dir=sidecar_write_dir,
+                ledger_title=ledger_title,
+                operating_currency=operating_currency,
             )
         except GitServiceError as e:
             code = _git_error_code(e)

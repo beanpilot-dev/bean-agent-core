@@ -43,6 +43,8 @@ class OnboardingService:
     DEFAULT_SIDECAR_MAIN_PATH = "data/agent_inc/main.beancount"
     DEFAULT_SIDECAR_WRITE_DIR = "data/agent_inc"
     DEFAULT_INCLUDE_LINE = 'include "agent_inc/main.beancount"'
+    DEFAULT_LEDGER_TITLE = "Personal Ledger"
+    DEFAULT_OPERATING_CURRENCY = "USD"
     MAX_DISCOVERY_VALIDATIONS = 8
     ROOT_NAME_HINTS = {"main.beancount", "root.beancount", "ledger.beancount"}
 
@@ -153,6 +155,8 @@ class OnboardingService:
         entry_path: str | None = None,
         sidecar_main_path: str | None = None,
         sidecar_write_dir: str | None = None,
+        ledger_title: str | None = None,
+        operating_currency: str | None = None,
     ) -> dict[str, Any]:
         head_sha = OnboardingService.current_head(workspace)
         paths = OnboardingService._setup_paths(
@@ -192,6 +196,14 @@ class OnboardingService:
             "sidecar_main_path": paths["sidecar_main_path"],
             "sidecar_write_dir": paths["sidecar_write_dir"],
             "include_line": paths["include_line"],
+            "ledger_title": OnboardingService._starter_ledger_title(ledger_title)
+            if operation == "initialize_ledger"
+            else None,
+            "operating_currency": OnboardingService._starter_operating_currency(
+                operating_currency
+            )
+            if operation == "initialize_ledger"
+            else None,
             "changes": changes,
             "events": [{"code": f"{operation}_previewed", "severity": "info"}],
         }
@@ -208,6 +220,8 @@ class OnboardingService:
         entry_path: str | None = None,
         sidecar_main_path: str | None = None,
         sidecar_write_dir: str | None = None,
+        ledger_title: str | None = None,
+        operating_currency: str | None = None,
     ) -> dict[str, Any]:
         current_head = OnboardingService.current_head(workspace)
         if expected_head_sha != current_head:
@@ -224,6 +238,8 @@ class OnboardingService:
             entry_path=entry_path,
             sidecar_main_path=sidecar_main_path,
             sidecar_write_dir=sidecar_write_dir,
+            ledger_title=ledger_title,
+            operating_currency=operating_currency,
         )
         if preview["status"] != "preview":
             return preview
@@ -238,6 +254,8 @@ class OnboardingService:
                 "sidecar_main_path": preview["sidecar_main_path"],
                 "sidecar_write_dir": preview["sidecar_write_dir"],
                 "include_line": preview["include_line"],
+                "ledger_title": preview.get("ledger_title"),
+                "operating_currency": preview.get("operating_currency"),
             }
             if operation == "initialize_ledger":
                 OnboardingService._apply_initialize(workspace, paths)
@@ -625,9 +643,13 @@ class OnboardingService:
         sidecar = Path(workspace, paths["sidecar_main_path"])
         entry.parent.mkdir(parents=True, exist_ok=True)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
+        title = OnboardingService._escape_beancount_string(paths.get("ledger_title"))
+        currency = OnboardingService._starter_operating_currency(
+            paths.get("operating_currency")
+        )
         entry.write_text(
-            'option "title" "Personal Ledger"\n'
-            'option "operating_currency" "USD"\n\n'
+            f'option "title" "{title}"\n'
+            f'option "operating_currency" "{currency}"\n\n'
             f'{paths["include_line"]}\n',
             encoding="utf-8",
         )
@@ -664,6 +686,31 @@ class OnboardingService:
                 shutil.copytree(child, target, symlinks=True)
             else:
                 shutil.copy2(child, target)
+
+    @staticmethod
+    def _starter_ledger_title(value: str | None) -> str:
+        title = (value or OnboardingService.DEFAULT_LEDGER_TITLE).strip()
+        return title[:80] or OnboardingService.DEFAULT_LEDGER_TITLE
+
+    @staticmethod
+    def _starter_operating_currency(value: str | None) -> str:
+        currency = (value or OnboardingService.DEFAULT_OPERATING_CURRENCY).strip().upper()
+        if (
+            len(currency) < 2
+            or len(currency) > 12
+            or not currency[0].isalpha()
+            or any(not char.isalnum() and char not in "._-" for char in currency)
+        ):
+            return OnboardingService.DEFAULT_OPERATING_CURRENCY
+        return currency
+
+    @staticmethod
+    def _escape_beancount_string(value: str | None) -> str:
+        return (
+            OnboardingService._starter_ledger_title(value)
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+        )
 
     @staticmethod
     def _commit_and_push_setup(
