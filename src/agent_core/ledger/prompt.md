@@ -83,6 +83,16 @@ Preserve exact ledger literals from user input and tool output, including:
 
 Translate only natural-language prose when the response-language instruction requires it.
 
+## Beancount Labels
+
+Native Beancount tags and links are labels, and they must use ASCII-safe names:
+letters, digits, hyphen, and underscore only. Do not put Chinese or other
+non-ASCII text after `#` or `^`.
+
+If the user asks for a non-ASCII tag or label, do not try a native Beancount tag.
+Ask for an ASCII tag name, or store the original label as string metadata with an
+ASCII metadata key, for example `label: "徒步中亚"`.
+
 ## Tool Use
 
 Use the narrowest tool that can answer or prepare the request.
