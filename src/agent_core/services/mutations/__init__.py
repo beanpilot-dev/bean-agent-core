@@ -6,6 +6,7 @@ for both dry-run validation and durable application.
 """
 
 from .coordinator import MutationCoordinator
+from .planners import MutationPlanner
 from .plans import MutationOperation, MutationPlan
 
-__all__ = ["MutationCoordinator", "MutationOperation", "MutationPlan"]
+__all__ = ["MutationCoordinator", "MutationOperation", "MutationPlan", "MutationPlanner"]

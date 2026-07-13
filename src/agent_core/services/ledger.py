@@ -32,7 +32,7 @@ from beancount import loader
 
 from .beancount import Beancount, LedgerServiceError, _cfg, _repo_path
 from .inspection import preflight_report as _read_only_preflight_report
-from .mutations import MutationCoordinator, MutationOperation, MutationPlan
+from .mutations import MutationCoordinator, MutationOperation, MutationPlan, MutationPlanner
 from .pending_actions import PendingActionService
 from .queries import LedgerQueryService
 from .types import (
@@ -544,11 +544,7 @@ class LedgerService:
             return violation
 
         accounts = LedgerService._extract_accounts(transaction_text)
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=transaction_text)],
-            commit_message=commit_message,
-            remediation="Fix the transaction syntax or balancing and prepare it again.",
-        )
+        plan = MutationPlanner.commit(transaction_text, commit_message)
         dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
@@ -590,11 +586,7 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [MutationOperation(kind="append", text=transaction_text)],
-                        commit_message=commit_message,
-                        remediation="Fix the transaction syntax or balancing and prepare it again.",
-                    ),
+                    MutationPlanner.commit(transaction_text, commit_message),
                     ledger_config,
                 ),
                 "transaction_text": transaction_text,
@@ -632,11 +624,7 @@ class LedgerService:
         if not isinstance(preview, Preview):
             return preview
 
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=transaction_text)],
-            commit_message=commit_message,
-            remediation="Fix the transaction syntax or balancing and prepare it again.",
-        )
+        plan = MutationPlanner.commit(transaction_text, commit_message)
         touched, git, failure = _apply_plan(
             workspace, ledger_config, plan, repo_url, git_service, github_token
         )
@@ -695,11 +683,7 @@ class LedgerService:
             directive_lines.append(f'  name: "{display_name}"')
         directive_text = "\n".join(directive_lines)
 
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="open", account_name=account_name, text=directive_text)],
-            commit_message=f"chore(accounts): open {account_name}",
-            remediation="Fix the account directive and prepare it again.",
-        )
+        plan = MutationPlanner.open_account(account_name, directive_text)
         dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
@@ -742,11 +726,7 @@ class LedgerService:
         directive_text = preview.preview["directive"]
 
         config = _cfg(ledger_config)
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="open", account_name=account_name, text=str(directive_text))],
-            commit_message=f"chore(accounts): open {account_name}",
-            remediation="Fix the account directive and prepare it again.",
-        )
+        plan = MutationPlanner.open_account(account_name, str(directive_text))
         _, git, failure = _apply_plan(workspace, config, plan, repo_url, git_service, github_token)
         if failure:
             return failure
@@ -783,16 +763,8 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [
-                            MutationOperation(
-                                kind="open",
-                                account_name=account_name,
-                                text=str(preview.preview["directive"]),
-                            )
-                        ],
-                        commit_message=f"chore(accounts): open {account_name}",
-                        remediation="Fix the account directive and prepare it again.",
+                    MutationPlanner.open_account(
+                        account_name, str(preview.preview["directive"])
                     ),
                     ledger_config,
                 ),
@@ -947,20 +919,7 @@ class LedgerService:
             return violation
 
         advisory = self._detect_value_change(old_block, new_transaction_text)
-        plan = MutationPlan.from_operations(
-            [
-                MutationOperation(
-                    kind="replace",
-                    target_file=rel_path,
-                    old_text=old_block,
-                    text=new_transaction_text,
-                )
-            ],
-            commit_message=commit_message,
-            remediation=(
-                "bean-check failed after replacement. Adjust the transaction and prepare it again."
-            ),
-        )
+        plan = MutationPlanner.update(rel_path, old_block, new_transaction_text, commit_message)
         dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
@@ -1010,19 +969,8 @@ class LedgerService:
         rel_path = preview.preview["file"]
         old_block = preview.preview["found_block"]
 
-        plan = MutationPlan.from_operations(
-            [
-                MutationOperation(
-                    kind="replace",
-                    target_file=str(rel_path),
-                    old_text=str(old_block),
-                    text=new_transaction_text,
-                )
-            ],
-            commit_message=commit_message,
-            remediation=(
-                "bean-check failed after replacement. Adjust the transaction and prepare it again."
-            ),
+        plan = MutationPlanner.update(
+            str(rel_path), str(old_block), new_transaction_text, commit_message
         )
         _, git, failure = _apply_plan(
             workspace, ledger_config, plan, repo_url, git_service, github_token
@@ -1068,20 +1016,11 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [
-                            MutationOperation(
-                                kind="replace",
-                                target_file=str(preview.preview["file"]),
-                                old_text=str(preview.preview["found_block"]),
-                                text=new_transaction_text,
-                            )
-                        ],
-                        commit_message=commit_message,
-                        remediation=(
-                            "bean-check failed after replacement. Adjust the "
-                            "transaction and prepare it again."
-                        ),
+                    MutationPlanner.update(
+                        str(preview.preview["file"]),
+                        str(preview.preview["found_block"]),
+                        new_transaction_text,
+                        commit_message,
                     ),
                     ledger_config,
                 ),
@@ -1146,11 +1085,7 @@ class LedgerService:
         if violation:
             return violation
 
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=transactions_text)],
-            commit_message=commit_message,
-            remediation="bean-check failed. Revise the transaction batch and prepare it again.",
-        )
+        plan = MutationPlanner.bulk(transactions_text, commit_message)
         dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
@@ -1222,11 +1157,7 @@ class LedgerService:
 
         if git_service is None:
             return DependencyUnavailable(error="Git service is not configured")
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=transactions_text)],
-            commit_message=commit_message,
-            remediation="bean-check failed. Revise the transaction batch and prepare it again.",
-        )
+        plan = MutationPlanner.bulk(transactions_text, commit_message)
         touched, git, failure = _apply_plan(
             workspace, ledger_config, plan, repo_url, git_service, github_token
         )
@@ -1284,14 +1215,7 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [MutationOperation(kind="append", text=transactions_text)],
-                        commit_message=commit_message,
-                        remediation=(
-                            "bean-check failed. Revise the transaction batch "
-                            "and prepare it again."
-                        ),
-                    ),
+                    MutationPlanner.bulk(transactions_text, commit_message),
                     ledger_config,
                 ),
                 "transactions_text": transactions_text,
@@ -1365,11 +1289,7 @@ class LedgerService:
                 )
             else:
                 raise ValueError(f"Unsupported change-set operation: {operation_type}")
-        return MutationPlan.from_operations(
-            plan_operations,
-            commit_message=commit_message,
-            remediation="Fix the change-set operations and prepare them again.",
-        )
+        return MutationPlanner.change_set(plan_operations, commit_message)
 
     def _replay_change_set_operations(
         self,
@@ -1861,11 +1781,7 @@ class LedgerService:
             f"{transaction_text}\n\n{assertion_text}" if include_assertion else transaction_text
         )
 
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=generated_text)],
-            commit_message="chore(ledger): reconcile balance",
-            remediation="Fix the reconciliation inputs and prepare it again.",
-        )
+        plan = MutationPlanner.reconciliation(generated_text, "chore(ledger): reconcile balance")
         dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
@@ -1923,11 +1839,7 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [MutationOperation(kind="append", text=str(details["generated_text"]))],
-                        commit_message=commit_message or "chore(ledger): reconcile balance",
-                        remediation="Fix the reconciliation inputs and prepare it again.",
-                    ),
+                    MutationPlanner.reconciliation(str(details["generated_text"]), commit_message),
                     ledger_config,
                 ),
                 "observed_date": observed_date,
@@ -2007,10 +1919,8 @@ class LedgerService:
             execution_spec={
                 "mutation_plan": self._serialized_plan(
                     workspace,
-                    MutationPlan.from_operations(
-                        [MutationOperation(kind="append", text=str(details["generated_text"]))],
-                        commit_message=commit_message or "chore(ledger): update balance checkpoint",
-                        remediation="Fix the reconciliation inputs and prepare it again.",
+                    MutationPlanner.reconciliation(
+                        str(details["generated_text"]), commit_message, checkpoint_update=True
                     ),
                     ledger_config,
                 ),
@@ -2083,11 +1993,7 @@ class LedgerService:
         if not isinstance(preview, Preview):
             return preview
         directives = str(preview.preview["generated_text"])
-        plan = MutationPlan.from_operations(
-            [MutationOperation(kind="append", text=directives)],
-            commit_message=commit_message or "chore(ledger): reconcile balance",
-            remediation="Fix the reconciliation inputs and prepare it again.",
-        )
+        plan = MutationPlanner.reconciliation(directives, commit_message)
         touched, git, failure = _apply_plan(
             workspace, ledger_config, plan, repo_url, git_service, github_token
         )
