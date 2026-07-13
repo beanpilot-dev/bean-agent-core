@@ -19,6 +19,7 @@ The tool layer (agent.py) wraps services for LLM consumption.
 from .ingestion import IngestionService
 from .ledger import LedgerService
 from .orchestrator import AgentOrchestrator
+from .pending_actions import PendingActionService, digest_payload
 from .preflight import PreflightService
 from .prices import PriceService
 from .tool_gateway import ToolExecutionGateway
@@ -53,6 +54,7 @@ __all__ = [
     "GitService",
     "IngestionService",
     "LedgerService",
+    "PendingActionService",
     "PreflightService",
     "PriceService",
     "ToolExecutionGateway",
@@ -78,4 +80,5 @@ __all__ = [
     "ToolCompleted",
     "ToolRepairableError",
     "ValidationFailed",
+    "digest_payload",
 ]

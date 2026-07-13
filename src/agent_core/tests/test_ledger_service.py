@@ -12,6 +12,7 @@ from agent_core.services.ledger import (
     LedgerService,
     LedgerServiceError,
 )
+from agent_core.services.pending_actions import PendingActionService
 from agent_core.services.types import (
     ApplyReceipt,
     ApprovalRequired,
@@ -221,7 +222,7 @@ def test_pending_action_integrity_detects_mutation(ledger_workspace: Path) -> No
         "transaction_text": TXN.replace("Dinner", "Tampered"),
     }
 
-    integrity = LedgerService.verify_pending_action(payload)
+    integrity = PendingActionService.verify_pending_action(payload)
     assert isinstance(integrity, IntegrityFailed)
 
 
@@ -236,7 +237,7 @@ def test_pending_action_integrity_covers_continuation_fields(ledger_workspace: P
     )
     payload["next_intent_summary"] = "Record the dependent transaction after approval."
 
-    integrity = LedgerService.verify_pending_action(payload)
+    integrity = PendingActionService.verify_pending_action(payload)
     assert isinstance(integrity, IntegrityFailed)
 
 
@@ -327,7 +328,7 @@ def test_apply_pending_action_revalidates_and_rejects_stale_invalid_contract(
     def pass_integrity(_action):
         return None
 
-    monkeypatch.setattr(LedgerService, "verify_pending_action", staticmethod(pass_integrity))
+    monkeypatch.setattr(PendingActionService, "verify_pending_action", staticmethod(pass_integrity))
     payload = pending.__dict__.copy()
     payload["execution_spec"] = {
         **pending.execution_spec,
@@ -655,7 +656,11 @@ def test_apply_change_set_validation_failure_leaves_no_partial_write(
             },
         ],
     }
-    monkeypatch.setattr(LedgerService, "verify_pending_action", staticmethod(lambda _action: None))
+    monkeypatch.setattr(
+        PendingActionService,
+        "verify_pending_action",
+        staticmethod(lambda _action: None),
+    )
 
     result = LedgerService().apply_pending_action(
         str(ledger_workspace),

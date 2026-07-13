@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from agent_core.services.ledger import Beancount, _digest_payload
+from agent_core.services.ledger import Beancount
+from agent_core.services.pending_actions import digest_payload
 from agent_core.services.tool_gateway import ToolExecutionGateway
 from agent_core.services.types import (
     ApprovalProof,
@@ -60,7 +61,7 @@ def test_fake_host_receives_approval_required_and_applies_after_proof(
         approved_at="2026-07-02T00:00:00Z",
         approval_id="approval_123",
         pending_action_id=str(outcome.pending_action["pending_action_id"]),
-        payload_digest=_digest_payload(outcome.pending_action),
+        payload_digest=digest_payload(outcome.pending_action),
         integrity_digest=str(outcome.pending_action["digest"]),
         host="fake-mcp-host",
     )
@@ -117,7 +118,7 @@ def test_gateway_rejects_apply_with_unbound_approval_proof(
             "approved_at": "2026-07-02T00:00:00Z",
             "approval_id": "approval_123",
             "pending_action_id": "pa_other",
-            "payload_digest": _digest_payload(outcome.pending_action),
+            "payload_digest": digest_payload(outcome.pending_action),
             "integrity_digest": outcome.pending_action["digest"],
         },
         repo_url="repo",

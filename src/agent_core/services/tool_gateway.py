@@ -10,7 +10,8 @@ of the model tool manifest.
 from dataclasses import asdict
 from typing import Any, Callable
 
-from agent_core.services.ledger import LedgerService, _digest_payload
+from agent_core.services.ledger import LedgerService
+from agent_core.services.pending_actions import digest_payload
 from agent_core.services.types import (
     ApplyReceipt,
     ApprovalProof,
@@ -244,7 +245,7 @@ class ToolExecutionGateway:
             not proof.pending_action_id
             or not proof.payload_digest
             or proof.pending_action_id != pending_action_id
-            or proof.payload_digest != _digest_payload(pending_action)
+            or proof.payload_digest != digest_payload(pending_action)
         ):
             return IntegrityFailed(
                 pending_action_id=pending_action_id,
