@@ -16,6 +16,7 @@ from .fixture_manager import fixture_context
 from .llm_judge import judge_tier2, judge_tier3
 from .requestor import (
     extract_beancount_block,
+    extract_pending_action_preview,
     run_multi_turn,
     run_single_turn,
 )
@@ -233,12 +234,18 @@ async def _run_tier1(
         return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
 
     beancount_block = extract_beancount_block(resp_text)
+    preview_source = "response_markdown"
+    if beancount_block is None:
+        beancount_block = extract_pending_action_preview(resp.get("pending_actions", []))
+        if beancount_block is not None:
+            preview_source = "pending_action_display"
     eval_result = evaluate_tier1(
         beancount_block or "",
         case.deterministic_assertions,
         fixture_content=fixture_main_content,
     )
     details["extracted_block"] = eval_result.extracted_block
+    details["preview_source"] = preview_source if beancount_block is not None else None
     details["errors"] = eval_result.errors
 
     if benchmark_config is not None and not eval_result.passed:

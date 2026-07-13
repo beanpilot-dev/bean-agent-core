@@ -4,20 +4,12 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Protocol
 
 from ..beancount import Beancount, _cfg, _repo_path
 from ..types import LedgerConfig, ValidationSummary
 from . import sidecar
 from .plans import FilePrecondition, MutationPlan
-
-
-class RepositoryPublisher(Protocol):
-    """Narrow publishing dependency required after a plan is validated."""
-
-    def commit_and_push(
-        self, workspace: str, message: str, repo_url: str, github_token: str | None = None
-    ) -> dict: ...
+from .publisher import RepositoryPublisher
 
 
 @dataclass(frozen=True)

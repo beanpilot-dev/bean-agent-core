@@ -46,6 +46,7 @@ async def send_chat_request(
 
     Returns dict with keys:
       - response_text: str (full accumulated content)
+      - pending_actions: list[dict] (approval contracts emitted over SSE)
       - require_user_input: bool
       - is_task_complete: bool
       - history_messages: list[dict] (snapshot from agent)
@@ -57,6 +58,7 @@ async def send_chat_request(
     payload = _build_chat_payload(query, prior_messages, model, api_key, case_id)
     result: dict[str, Any] = {
         "response_text": "",
+        "pending_actions": [],
         "require_user_input": False,
         "is_task_complete": False,
         "history_messages": [],
@@ -97,6 +99,13 @@ async def send_chat_request(
                     result["usage"] = chunk.get("usage")
                     result["trace_id"] = chunk.get("trace_id")
                     result["trace_url"] = chunk.get("trace_url")
+
+                # Approval previews are structured SSE payloads.  Keep them
+                # separate from response_text: the product intentionally does
+                # not duplicate their diff in a Markdown code fence.
+                pending_action = chunk.get("pending_action")
+                if isinstance(pending_action, dict):
+                    result["pending_actions"].append(pending_action)
 
                 if chunk.get("type") == "activity":
                     continue
@@ -172,4 +181,22 @@ def extract_beancount_block(text: str) -> str | None:
     match = BEANCOUNT_BLOCK_RE.search(text)
     if match:
         return match.group(1).strip()
+    return None
+
+
+def extract_pending_action_preview(pending_actions: list[dict[str, Any]]) -> str | None:
+    """Return a structured approval preview suitable for deterministic checks.
+
+    Markdown remains the primary benchmark input.  This fallback lets the
+    harness evaluate the signed display preview that is already sent to the
+    client when the response deliberately omits a duplicate code fence.
+    """
+    for action in pending_actions:
+        display = action.get("display")
+        if not isinstance(display, dict):
+            continue
+        for key in ("canonical_preview", "diff"):
+            preview = display.get(key)
+            if isinstance(preview, str) and preview.strip():
+                return preview.strip()
     return None

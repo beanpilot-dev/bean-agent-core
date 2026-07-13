@@ -102,6 +102,8 @@ class MutationPlan:
         raw_conditions = value.get("preconditions")
         if not isinstance(raw_operations, list) or not isinstance(raw_conditions, list):
             raise ValueError("Mutation plan is invalid")
+        if not all(isinstance(operation, dict) for operation in raw_operations):
+            raise ValueError("Mutation plan operation is invalid")
         conditions: list[FilePrecondition] = []
         for condition in raw_conditions:
             if not isinstance(condition, dict) or not isinstance(condition.get("path"), str):
@@ -111,11 +113,7 @@ class MutationPlan:
                 raise ValueError("Mutation plan precondition is invalid")
             conditions.append(FilePrecondition(condition["path"], digest))
         return cls(
-            tuple(
-                MutationOperation.from_spec(item)
-                for item in raw_operations
-                if isinstance(item, dict)
-            ),
+            tuple(MutationOperation.from_spec(item) for item in raw_operations),
             str(value.get("commit_message") or ""),
             str(value.get("remediation") or ""),
             tuple(conditions),

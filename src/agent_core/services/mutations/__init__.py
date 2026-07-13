@@ -8,5 +8,14 @@ for both dry-run validation and durable application.
 from .coordinator import MutationCoordinator
 from .planners import MutationPlanner
 from .plans import MutationOperation, MutationPlan
+from .preparation import MutationPreparationService
+from .publisher import RepositoryPublisher
 
-__all__ = ["MutationCoordinator", "MutationOperation", "MutationPlan", "MutationPlanner"]
+__all__ = [
+    "MutationCoordinator",
+    "MutationOperation",
+    "MutationPlan",
+    "MutationPlanner",
+    "MutationPreparationService",
+    "RepositoryPublisher",
+]

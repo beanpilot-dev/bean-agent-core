@@ -122,6 +122,7 @@ def snapshot(workspace: str, rel_paths: list[str]) -> dict[str, str | None]:
 
 
 def restore(workspace: str, originals: dict[str, str | None]) -> None:
+    created_parents: set[str] = set()
     for rel_path, content in originals.items():
         path = _repo_path(workspace, rel_path)
         if content is None:
@@ -129,8 +130,17 @@ def restore(workspace: str, originals: dict[str, str | None]) -> None:
                 os.remove(path)
             except FileNotFoundError:
                 pass
+            created_parents.add(os.path.dirname(path))
             continue
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(content)
+    workspace_abs = os.path.abspath(workspace)
+    for parent in sorted(created_parents, key=len, reverse=True):
+        while parent.startswith(workspace_abs) and parent != workspace_abs:
+            try:
+                os.rmdir(parent)
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
     Beancount.invalidate_workspace(workspace)
