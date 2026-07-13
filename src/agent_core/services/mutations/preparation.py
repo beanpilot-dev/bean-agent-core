@@ -47,6 +47,10 @@ from ..types import (
     ValidationSummary,
 )
 from ..workspace import GitService
+from .action_handlers import (
+    MutationPreparationHandlerRegistry,
+    extract_posting_accounts,
+)
 from .coordinator import MutationCoordinator
 from .planners import MutationPlanner
 from .plans import MutationOperation, MutationPlan
@@ -479,9 +483,14 @@ class MutationPreparationService:
     Query operations are owned by LedgerQueryService.
     """
 
+    def __init__(self, handler_registry: MutationPreparationHandlerRegistry | None = None) -> None:
+        self._handler_registry = handler_registry or MutationPreparationHandlerRegistry()
+
     @staticmethod
     def _extract_accounts(transaction_text: str) -> list[str]:
-        return sorted({m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(transaction_text)})
+        # Compatibility helper. New transaction preparation owns this read in
+        # TransactionCommitPreparationHandler.
+        return extract_posting_accounts(transaction_text)
 
     @staticmethod
     def _serialized_plan(
@@ -526,6 +535,50 @@ class MutationPreparationService:
 
         return None
 
+    def _preview_registered(
+        self,
+        action_type: str,
+        workspace: str,
+        ledger_config: LedgerConfig | None = None,
+        **kwargs: object,
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Shared canonical preparation flow: dispatch then isolated validation.
+
+        Action-specific policy, lookup, preview facts, and plan construction
+        intentionally remain in the registered handler.
+        """
+        prepared = self._handler_registry.get(action_type).build(workspace, ledger_config, **kwargs)
+        if isinstance(prepared, InvariantViolation):
+            return prepared
+        dry_run = _run_plan_validation(workspace, ledger_config, prepared.plan)
+        if dry_run.failure:
+            return dry_run.failure
+        return prepared.preview(
+            dry_run.validation,
+            dry_run.target_file or _agent_sidecar_target_file(ledger_config),
+        )
+
+    def _prepare_registered(
+        self,
+        action_type: str,
+        workspace: str,
+        ledger_config: LedgerConfig | None = None,
+        **kwargs: object,
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
+        """Dispatch, validate, seal, and construct an action-owned pending payload."""
+        prepared = self._handler_registry.get(action_type).build(workspace, ledger_config, **kwargs)
+        if isinstance(prepared, InvariantViolation):
+            return prepared
+        dry_run = _run_plan_validation(workspace, ledger_config, prepared.plan)
+        if dry_run.failure:
+            return dry_run.failure
+        preview = prepared.preview(
+            dry_run.validation,
+            dry_run.target_file or _agent_sidecar_target_file(ledger_config),
+        )
+        sealed_plan = self._serialized_plan(workspace, prepared.plan, ledger_config)
+        return prepared.pending_action(sealed_plan, preview)
+
     # ═══════════════════════════════════════════════════════════════════════
     # commit_transaction → preview_commit + confirm_commit
     # ═══════════════════════════════════════════════════════════════════════
@@ -538,34 +591,14 @@ class MutationPreparationService:
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation | ValidationFailed:
-        """Validate a transaction proposal in an isolated dry-run."""
-        violation = self.validate_accounts(workspace, transaction_text, whitelist, ledger_config)
-        if violation:
-            return violation
-
-        accounts = MutationPreparationService._extract_accounts(transaction_text)
-        plan = MutationPlanner.commit(transaction_text, commit_message)
-        dry_run = _run_plan_validation(workspace, ledger_config, plan)
-        if dry_run.failure:
-            return dry_run.failure
-
-        target = dry_run.target_file or _agent_sidecar_target_file(ledger_config)
-        pid = f"prop_{uuid.uuid4().hex[:12]}"
-
-        return Preview(
-            proposal_id=pid,
-            operation="commit_transaction",
-            preview={
-                "transaction": transaction_text,
-                "accounts_validated": accounts,
-                "target_file": target,
-                "commit_message": commit_message,
-                "validation": asdict(dry_run.validation),
-            },
-            message=(
-                "All accounts and dry-run validation passed. Show this preview "
-                "to the user and request explicit approval."
-            ),
+        """Compatibility entry point for registered transaction preparation."""
+        return self._preview_registered(
+            "commit_transaction",
+            workspace,
+            ledger_config,
+            transaction_text=transaction_text,
+            commit_message=commit_message,
+            whitelist=whitelist,
         )
 
     def prepare_commit(
@@ -576,34 +609,13 @@ class MutationPreparationService:
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> PendingAction | InvariantViolation | ValidationFailed:
-        preview = self.preview_commit(
-            workspace, transaction_text, commit_message, whitelist, ledger_config
-        )
-        if not isinstance(preview, Preview):
-            return preview
-        return PendingActionService.create_pending_action(
-            action_type="commit_transaction",
-            execution_spec={
-                "mutation_plan": self._serialized_plan(
-                    workspace,
-                    MutationPlanner.commit(transaction_text, commit_message),
-                    ledger_config,
-                ),
-                "transaction_text": transaction_text,
-                "commit_message": commit_message,
-            },
-            display={
-                "kind": "transaction_preview",
-                "summary": "Record a transaction",
-                "diff": transaction_text,
-                "preview": preview.preview,
-            },
-            validation={
-                "status": "validated",
-                "accounts": preview.preview.get("accounts_validated", []),
-                "target_file": preview.preview.get("target_file"),
-                "dry_run": preview.preview.get("validation"),
-            },
+        return self._prepare_registered(
+            "commit_transaction",
+            workspace,
+            ledger_config,
+            transaction_text=transaction_text,
+            commit_message=commit_message,
+            whitelist=whitelist,
         )
 
     def confirm_commit(
@@ -656,52 +668,15 @@ class MutationPreparationService:
         display_name: str | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation | ValidationFailed:
-        """Validate an open-account proposal in an isolated dry-run."""
-        if not _ACCOUNT_NAME_RE.match(account_name):
-            return InvariantViolation(
-                invariant="ACCOUNT_NAME_FORMAT",
-                severity="HARD",
-                provided=account_name,
-                remediation=(
-                    "Account names must follow Beancount format: "
-                    "Type:Component (e.g. Assets:Liquid:Bank:NewAccount)."
-                ),
-            )
-
-        existing = LedgerQueryService.get_accounts(workspace, ledger_config)
-        if account_name in existing:
-            return InvariantViolation(
-                invariant="ACCOUNT_ALREADY_EXISTS",
-                severity="HARD",
-                provided=account_name,
-                remediation=f"Account '{account_name}' already exists.",
-            )
-
-        currency_part = f"  {currency}" if currency else ""
-        directive_lines = [f"{open_date} open {account_name}{currency_part}"]
-        if display_name:
-            directive_lines.append(f'  name: "{display_name}"')
-        directive_text = "\n".join(directive_lines)
-
-        plan = MutationPlanner.open_account(account_name, directive_text)
-        dry_run = _run_plan_validation(workspace, ledger_config, plan)
-        if dry_run.failure:
-            return dry_run.failure
-
-        pid = f"prop_{uuid.uuid4().hex[:12]}"
-
-        return Preview(
-            proposal_id=pid,
-            operation="open_account",
-            preview={
-                "directive": directive_text,
-                "account": account_name,
-                "currency": currency,
-                "open_date": open_date,
-                "target_file": dry_run.target_file,
-                "validation": asdict(dry_run.validation),
-            },
-            message=("Account directive passed dry-run validation. Request explicit approval."),
+        """Compatibility entry point for registered account-open preparation."""
+        return self._preview_registered(
+            "open_account",
+            workspace,
+            ledger_config,
+            account_name=account_name,
+            currency=currency,
+            open_date=open_date,
+            display_name=display_name,
         )
 
     def confirm_open(
@@ -753,37 +728,14 @@ class MutationPreparationService:
         display_name: str | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> PendingAction | InvariantViolation | ValidationFailed:
-        preview = self.preview_open(
-            workspace, account_name, currency, open_date, display_name, ledger_config
-        )
-        if not isinstance(preview, Preview):
-            return preview
-        return PendingActionService.create_pending_action(
-            action_type="open_account",
-            execution_spec={
-                "mutation_plan": self._serialized_plan(
-                    workspace,
-                    MutationPlanner.open_account(
-                        account_name, str(preview.preview["directive"])
-                    ),
-                    ledger_config,
-                ),
-                "account_name": account_name,
-                "currency": currency,
-                "open_date": open_date,
-                "display_name": display_name,
-            },
-            display={
-                "kind": "account_open_preview",
-                "summary": "Open an account",
-                "diff": preview.preview.get("directive", ""),
-                "preview": preview.preview,
-            },
-            validation={
-                "status": "validated",
-                "account": account_name,
-                "dry_run": preview.preview.get("validation"),
-            },
+        return self._prepare_registered(
+            "open_account",
+            workspace,
+            ledger_config,
+            account_name=account_name,
+            currency=currency,
+            open_date=open_date,
+            display_name=display_name,
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -2010,7 +1962,6 @@ class MutationPreparationService:
             },
             push_status=git["push"],
         )
-
 
     # ═══════════════════════════════════════════════════════════════════════
     # Reconciliation query (coupled to mutation preparation)

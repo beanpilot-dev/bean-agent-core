@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from ..beancount import _cfg, _repo_path
+from ..queries import LedgerQueryService
 from ..types import LedgerConfig
 
 _INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"\s*$')
@@ -83,11 +84,36 @@ def capture_ledger_read_facts(
     return tuple(facts)
 
 
+def capture_account_state_fact(
+    workspace: str, account_name: str, ledger_config: LedgerConfig | None = None
+) -> SemanticFact:
+    """Capture the account-lifecycle observation used by an action handler."""
+    present = account_name in set(LedgerQueryService.get_accounts(workspace, ledger_config))
+    return SemanticFact(
+        "account_state", account_name, _file_digest("present" if present else "absent")
+    )
+
+
+def _current_fact(
+    workspace: str, fact: SemanticFact, ledger_config: LedgerConfig | None
+) -> SemanticFact:
+    if fact.kind == "included_file_digest":
+        try:
+            with open(_repo_path(workspace, fact.subject), encoding="utf-8") as handle:
+                content: str | None = handle.read()
+        except FileNotFoundError:
+            content = None
+        return SemanticFact(fact.kind, fact.subject, _file_digest(content))
+    if fact.kind == "account_state":
+        return capture_account_state_fact(workspace, fact.subject, ledger_config)
+    # Unknown fact kinds are integrity failures rather than a permissive replay.
+    return SemanticFact("unsupported", fact.subject, None)
+
+
 def semantic_facts_hold(
     workspace: str,
     facts: tuple[SemanticFact, ...],
     ledger_config: LedgerConfig | None = None,
 ) -> bool:
     """Recompute canonical include-graph facts before applying a v2 plan."""
-    current = capture_ledger_read_facts(workspace, ledger_config)
-    return current == facts
+    return all(_current_fact(workspace, fact, ledger_config) == fact for fact in facts)

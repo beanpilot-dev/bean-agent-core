@@ -4,6 +4,10 @@ from pathlib import Path
 
 from agent_core.services.ledger import LedgerService
 from agent_core.services.mutations import MutationCoordinator, MutationOperation, MutationPlanner
+from agent_core.services.mutations.action_handlers import (
+    MutationPreparationHandlerRegistry,
+    PreparedMutation,
+)
 from agent_core.services.types import PendingAction
 
 
@@ -48,16 +52,18 @@ def test_change_set_and_reconciliation_plans_preserve_order_and_default_messages
 
 def test_prepare_commit_persists_the_canonical_sealed_plan(ledger_workspace: Path) -> None:
     transaction = (
-        '2026-06-15 * "Dinner"\n'
-        "  Expenses:Food:Dining  100 CNY\n"
-        "  Assets:Cash          -100 CNY"
+        '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
     )
     message = "record dinner"
 
     pending = LedgerService().prepare_commit(str(ledger_workspace), transaction, message)
 
     assert isinstance(pending, PendingAction)
-    expected = MutationCoordinator.seal(
-        str(ledger_workspace), MutationPlanner.commit(transaction, message)
-    ).to_spec()
+    prepared = (
+        MutationPreparationHandlerRegistry()
+        .get("commit_transaction")
+        .build(str(ledger_workspace), transaction_text=transaction, commit_message=message)
+    )
+    assert isinstance(prepared, PreparedMutation)
+    expected = MutationCoordinator.seal(str(ledger_workspace), prepared.plan).to_spec()
     assert pending.execution_spec["mutation_plan"] == expected

@@ -55,7 +55,11 @@ class MutationCoordinator:
         sealed = plan.with_preconditions(
             [FilePrecondition.from_content(path, content) for path, content in originals.items()]
         )
-        return sealed.with_semantic_facts(capture_ledger_read_facts(workspace, config))
+        # Handler-declared facts record action-specific policy inputs; the
+        # common include graph protects the broader ledger read surface.
+        facts = (*capture_ledger_read_facts(workspace, config), *plan.semantic_facts)
+        unique_facts = tuple(dict.fromkeys(facts))
+        return sealed.with_semantic_facts(unique_facts)
 
     @staticmethod
     def _preconditions_hold(workspace: str, plan: MutationPlan) -> bool:
