@@ -11,6 +11,7 @@ import os
 import re
 
 from .ledger import LedgerService, _check_sidecar_include
+from .queries import LedgerQueryService
 from .types import DEFAULT_LEDGER_CONFIG, LedgerConfig, PreflightResult
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ class PreflightService:
         workspace: str, ledger_config: LedgerConfig | None = None
     ) -> list[str]:
         """Return all account names from the ledger."""
-        return LedgerService.get_accounts(workspace, ledger_config)
+        return LedgerQueryService.get_accounts(workspace, ledger_config)
 
     @staticmethod
     def get_raw_open_directives(

@@ -22,6 +22,7 @@ from .orchestrator import AgentOrchestrator
 from .pending_actions import PendingActionService, digest_payload
 from .preflight import PreflightService
 from .prices import PriceService
+from .queries import LedgerQueryService
 from .tool_gateway import ToolExecutionGateway
 from .types import (
     DEFAULT_LEDGER_CONFIG,
@@ -54,6 +55,7 @@ __all__ = [
     "GitService",
     "IngestionService",
     "LedgerService",
+    "LedgerQueryService",
     "PendingActionService",
     "PreflightService",
     "PriceService",

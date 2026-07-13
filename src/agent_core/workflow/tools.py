@@ -8,12 +8,14 @@ from langchain_core.tools import InjectedToolArg, tool
 from agent_core.ledger import analytics, report
 from agent_core.services import (
     IngestionService,
+    LedgerQueryService,
     LedgerService,
     PriceService,
     ToolExecutionGateway,
 )
 
 _ledger = LedgerService()
+_queries = LedgerQueryService()
 _gateway = ToolExecutionGateway(_ledger)
 _prices = PriceService()
 _ingestion = IngestionService()
@@ -54,7 +56,7 @@ def tool_account_balance(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.get_balance(ws, account, as_of_date or None, ledger_config)
+    result = _queries.get_balance(ws, account, as_of_date or None, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -83,7 +85,7 @@ def tool_find_transactions(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.find_transactions(
+    result = _queries.find_transactions(
         ws,
         account or None,
         date_from or None,
@@ -142,7 +144,7 @@ def tool_query_template(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.query_template(ws, template_name, params, ledger_config=ledger_config)
+    result = _queries.query_template(ws, template_name, params, ledger_config=ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -194,7 +196,7 @@ def tool_query(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _ledger.query_bql(ws, bql, ledger_config)
+    result = _queries.query_bql(ws, bql, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 

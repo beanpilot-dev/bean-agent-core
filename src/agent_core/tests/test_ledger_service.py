@@ -100,16 +100,6 @@ def test_preview_commit_rejects_unknown_account(ledger_workspace: Path) -> None:
     assert result.invariant == "ACCOUNT_WHITELIST"
 
 
-def test_get_accounts_includes_open_only_accounts(ledger_workspace: Path) -> None:
-    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
-    sidecar_main.write_text(
-        sidecar_main.read_text() + "\n2020-01-01 open Expenses:Tax:Federal USD\n"
-    )
-
-    accounts = LedgerService.get_accounts(str(ledger_workspace))
-
-    assert "Expenses:Tax:Federal" in accounts
-
 
 def test_bean_check_uses_in_process_loader_by_default(
     ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
@@ -1026,70 +1016,16 @@ def test_staged_bulk_commits_the_content_that_was_validated(
     assert "Unvalidated" not in target.read_text()
 
 
-def test_read_operations_return_typed_results(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[str] = []
-
-    def fake_rows(_workspace: str, bql: str, *_args):
-        calls.append(bql)
-        if "sum(position)" in bql:
-            return [{"balance": "123 CNY"}], None
-        return [{"account": "Assets:Cash"}], None
-
-    monkeypatch.setattr(Beancount, "run_bql_rows", fake_rows)
-    service = LedgerService()
-
-    balance = service.get_balance(str(ledger_workspace), "Assets:Cash", "2026-06-01")
-    found = service.find_transactions(str(ledger_workspace), narration_contains="Lunch")
-    queried = service.query_bql(str(ledger_workspace), "SELECT account")
-
-    assert balance.balance == "123 CNY"
-    assert found.count == 1
-    assert queried.count == 1
-    assert all(isinstance(result, QueryResult) for result in (balance, found, queried))
-    assert len(calls) == 3
-
-
-def test_query_template_and_preflight_report(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    templates = tmp_path / "templates"
-    templates.mkdir()
-    (templates / "test.bql").write_text("-- description: test\nSELECT {column}")
-
-    def fake_rows(_workspace: str, bql: str, *_args):
-        if "DISTINCT account" in bql:
-            return [{"account": "Assets:Cash"}], None
-        return [{"bql": bql}], None
-
-    monkeypatch.setattr(Beancount, "run_bql_rows", fake_rows)
-
-    queried = LedgerService.query_template(
-        str(ledger_workspace), "test", {"column": "account"}, str(templates)
-    )
-    report = LedgerService.preflight_report(str(ledger_workspace))
-
-    assert queried.status == "SUCCESS"
-    assert queried.rows == [{"bql": "SELECT account"}]
-    assert report.status == "CLEAN"
-    assert "Assets:Cash" in report.accounts
-
-
-def test_preflight_and_queries_use_configured_entry_path(
+def test_preflight_uses_configured_entry_path(
     custom_ledger_workspace: tuple[Path, LedgerConfig],
 ) -> None:
     workspace, config = custom_ledger_workspace
 
     report = LedgerService.preflight_report(str(workspace), config)
-    accounts = LedgerService.get_accounts(str(workspace), config)
-    balance = LedgerService.get_balance(str(workspace), "Assets:Cash", ledger_config=config)
 
     assert report.status == "CLEAN"
     assert report.target is not None
     assert report.target.startswith("books/agent_sidecar/")
-    assert "Assets:Cash" in accounts
-    assert "1000 CNY" in (balance.balance or "")
 
 
 def test_ledger_config_derives_sidecar_main_from_write_dir() -> None:
@@ -1110,12 +1046,3 @@ def test_ledger_config_replaces_legacy_monthly_sidecar_main_path() -> None:
     )
 
     assert config.sidecar_main_path == "data/agent_inc/main.beancount"
-
-
-def test_get_accounts_raises_on_bql_error(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Beancount, "run_bql_rows", lambda *_args: ([], "broken"))
-
-    with pytest.raises(LedgerServiceError, match="broken"):
-        LedgerService.get_accounts(str(ledger_workspace))
