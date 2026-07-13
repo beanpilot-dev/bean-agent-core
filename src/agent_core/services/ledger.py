@@ -31,6 +31,8 @@ from typing import Callable
 from beancount import loader
 
 from .beancount import Beancount, LedgerServiceError, _cfg, _repo_path
+from .inspection import preflight_report as _read_only_preflight_report
+from .mutations import MutationCoordinator, MutationOperation, MutationPlan
 from .pending_actions import PendingActionService
 from .queries import LedgerQueryService
 from .types import (
@@ -314,6 +316,57 @@ def _run_isolated_validation(
         raise LedgerServiceError("Dry-run validation workspace unavailable") from exc
 
 
+def _run_plan_validation(
+    workspace: str,
+    ledger_config: LedgerConfig | None,
+    plan: MutationPlan,
+) -> _DryRunResult:
+    """Validate a replayable plan through the shared isolated coordinator."""
+    try:
+        result = MutationCoordinator().validate(workspace, plan, ledger_config)
+    except OSError as exc:
+        raise LedgerServiceError("Dry-run validation workspace unavailable") from exc
+    if result.check_output:
+        return _DryRunResult(
+            target_file=result.touched_files[-1] if result.touched_files else None,
+            validation=_summarize_validation_failure(result.check_output),
+            failure=_validation_failure(result.check_output, plan.remediation),
+        )
+    return _DryRunResult(
+        target_file=result.touched_files[-1] if result.touched_files else None,
+        validation=_validation_success(isolated=True),
+    )
+
+
+def _apply_plan(
+    workspace: str,
+    ledger_config: LedgerConfig | None,
+    plan: MutationPlan,
+    repo_url: str,
+    git_service: GitService,
+    github_token: str | None,
+) -> tuple[tuple[str, ...], dict, ValidationFailed | InvariantViolation | None]:
+    try:
+        touched, git, output = MutationCoordinator().apply_and_publish(
+            workspace, plan, repo_url, git_service, github_token, ledger_config
+        )
+    except OSError as exc:
+        raise LedgerServiceError("Ledger mutation apply workspace unavailable") from exc
+    if output == "MUTATION_PRECONDITION_FAILED":
+        return (
+            touched,
+            git,
+            InvariantViolation(
+                invariant="MUTATION_PRECONDITION_FAILED",
+                severity="HARD",
+                remediation="The ledger changed after preview. Prepare and review a new action.",
+            ),
+        )
+    if output:
+        return touched, git, _validation_failure(output, plan.remediation)
+    return touched, git, None
+
+
 def _append_to_sidecar(
     workspace: str,
     text: str,
@@ -431,6 +484,13 @@ class LedgerService:
         return sorted({m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(transaction_text)})
 
     @staticmethod
+    def _serialized_plan(
+        workspace: str, plan: MutationPlan, ledger_config: LedgerConfig | None
+    ) -> dict[str, object]:
+        """Seal the exact approved operation list with workspace preconditions."""
+        return MutationCoordinator.seal(workspace, plan, ledger_config).to_spec()
+
+    @staticmethod
     def validate_accounts(
         workspace: str,
         transaction_text: str,
@@ -484,14 +544,12 @@ class LedgerService:
             return violation
 
         accounts = LedgerService._extract_accounts(transaction_text)
-        dry_run = _run_isolated_validation(
-            workspace,
-            ledger_config,
-            lambda dry_workspace: _append_to_sidecar(
-                dry_workspace, transaction_text, ledger_config
-            ),
-            "Fix the transaction syntax or balancing and prepare it again.",
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=transaction_text)],
+            commit_message=commit_message,
+            remediation="Fix the transaction syntax or balancing and prepare it again.",
         )
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
 
@@ -530,6 +588,15 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="commit_transaction",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [MutationOperation(kind="append", text=transaction_text)],
+                        commit_message=commit_message,
+                        remediation="Fix the transaction syntax or balancing and prepare it again.",
+                    ),
+                    ledger_config,
+                ),
                 "transaction_text": transaction_text,
                 "commit_message": commit_message,
             },
@@ -565,40 +632,23 @@ class LedgerService:
         if not isinstance(preview, Preview):
             return preview
 
-        target = preview.preview["target_file"]
-        _ensure_agent_sidecar(workspace, ledger_config)
-        target_path = os.path.join(workspace, target)
-        backup_path = target_path + ".bak"
-
-        with open(target_path) as f:
-            original = f.read()
-        with open(backup_path, "w") as f:
-            f.write(original)
-
-        _append_to_sidecar(workspace, transaction_text, ledger_config)
-
-        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
-        if not is_clean:
-            with open(target_path, "w") as f:
-                f.write(original)
-            Beancount.invalidate_cache(workspace, ledger_config)
-            os.remove(backup_path)
-            return _validation_failure(
-                check_output,
-                "Fix the transaction syntax or balancing and prepare it again.",
-            )
-
-        os.remove(backup_path)
-        Beancount.bean_format(workspace, target_path)
-
-        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=transaction_text)],
+            commit_message=commit_message,
+            remediation="Fix the transaction syntax or balancing and prepare it again.",
+        )
+        touched, git, failure = _apply_plan(
+            workspace, ledger_config, plan, repo_url, git_service, github_token
+        )
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
         return CommitResult(
             outcome="Transaction recorded, validated, and committed",
             result={
-                "target_file": target,
+                "target_file": touched[-1],
                 "commit_message": commit_message,
                 "transaction": transaction_text,
             },
@@ -645,14 +695,12 @@ class LedgerService:
             directive_lines.append(f'  name: "{display_name}"')
         directive_text = "\n".join(directive_lines)
 
-        dry_run = _run_isolated_validation(
-            workspace,
-            ledger_config,
-            lambda dry_workspace: _write_open_directive(
-                dry_workspace, account_name, directive_text, ledger_config
-            ),
-            "Fix the account directive and prepare it again.",
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="open", account_name=account_name, text=directive_text)],
+            commit_message=f"chore(accounts): open {account_name}",
+            remediation="Fix the account directive and prepare it again.",
         )
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
 
@@ -694,34 +742,14 @@ class LedgerService:
         directive_text = preview.preview["directive"]
 
         config = _cfg(ledger_config)
-        _ensure_agent_sidecar(workspace, config)
-        main_path = _repo_path(workspace, config.sidecar_main_path)
-
-        try:
-            with open(main_path) as f:
-                original = f.read()
-        except OSError as e:
-            return DependencyUnavailable(error=f"Cannot read main.beancount: {e}")
-
-        _write_open_directive(workspace, account_name, directive_text, config)
-
-        is_clean, check_output = Beancount.bean_check(workspace, config)
-        if not is_clean:
-            with open(main_path, "w") as f:
-                f.write(original)
-            Beancount.invalidate_cache(workspace, config)
-            return _validation_failure(
-                check_output,
-                "Fix the account directive and prepare it again.",
-            )
-
-        Beancount.bean_format(workspace, main_path)
-        git = git_service.commit_and_push(
-            workspace,
-            f"chore(accounts): open {account_name}",
-            repo_url,
-            github_token,
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="open", account_name=account_name, text=str(directive_text))],
+            commit_message=f"chore(accounts): open {account_name}",
+            remediation="Fix the account directive and prepare it again.",
         )
+        _, git, failure = _apply_plan(workspace, config, plan, repo_url, git_service, github_token)
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -753,6 +781,21 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="open_account",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [
+                            MutationOperation(
+                                kind="open",
+                                account_name=account_name,
+                                text=str(preview.preview["directive"]),
+                            )
+                        ],
+                        commit_message=f"chore(accounts): open {account_name}",
+                        remediation="Fix the account directive and prepare it again.",
+                    ),
+                    ledger_config,
+                ),
                 "account_name": account_name,
                 "currency": currency,
                 "open_date": open_date,
@@ -904,18 +947,21 @@ class LedgerService:
             return violation
 
         advisory = self._detect_value_change(old_block, new_transaction_text)
-        dry_run = _run_isolated_validation(
-            workspace,
-            ledger_config,
-            lambda dry_workspace: _replace_transaction_block(
-                dry_workspace,
-                rel_path,
-                old_block,
-                new_transaction_text,
-                ledger_config,
+        plan = MutationPlan.from_operations(
+            [
+                MutationOperation(
+                    kind="replace",
+                    target_file=rel_path,
+                    old_text=old_block,
+                    text=new_transaction_text,
+                )
+            ],
+            commit_message=commit_message,
+            remediation=(
+                "bean-check failed after replacement. Adjust the transaction and prepare it again."
             ),
-            "bean-check failed after replacement. Adjust the transaction and prepare it again.",
         )
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
 
@@ -964,33 +1010,25 @@ class LedgerService:
         rel_path = preview.preview["file"]
         old_block = preview.preview["found_block"]
 
-        file_path = os.path.join(workspace, rel_path)
-        backup_path = file_path + ".bak"
-
-        with open(file_path) as f:
-            original = f.read()
-        with open(backup_path, "w") as f:
-            f.write(original)
-
-        _replace_transaction_block(
-            workspace, rel_path, old_block, new_transaction_text, ledger_config
+        plan = MutationPlan.from_operations(
+            [
+                MutationOperation(
+                    kind="replace",
+                    target_file=str(rel_path),
+                    old_text=str(old_block),
+                    text=new_transaction_text,
+                )
+            ],
+            commit_message=commit_message,
+            remediation=(
+                "bean-check failed after replacement. Adjust the transaction and prepare it again."
+            ),
         )
-
-        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
-        if not is_clean:
-            with open(file_path, "w") as f:
-                f.write(original)
-            Beancount.invalidate_cache(workspace, ledger_config)
-            os.remove(backup_path)
-            return _validation_failure(
-                check_output,
-                "bean-check failed after replacement. Adjust the transaction and prepare it again.",
-            )
-
-        os.remove(backup_path)
-        Beancount.bean_format(workspace, file_path)
-
-        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
+        _, git, failure = _apply_plan(
+            workspace, ledger_config, plan, repo_url, git_service, github_token
+        )
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -1028,6 +1066,25 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="update_transaction",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [
+                            MutationOperation(
+                                kind="replace",
+                                target_file=str(preview.preview["file"]),
+                                old_text=str(preview.preview["found_block"]),
+                                text=new_transaction_text,
+                            )
+                        ],
+                        commit_message=commit_message,
+                        remediation=(
+                            "bean-check failed after replacement. Adjust the "
+                            "transaction and prepare it again."
+                        ),
+                    ),
+                    ledger_config,
+                ),
                 "target_date": target_date,
                 "narration": narration,
                 "new_transaction_text": new_transaction_text,
@@ -1089,14 +1146,12 @@ class LedgerService:
         if violation:
             return violation
 
-        dry_run = _run_isolated_validation(
-            workspace,
-            ledger_config,
-            lambda dry_workspace: _append_to_sidecar(
-                dry_workspace, transactions_text, ledger_config
-            ),
-            "bean-check failed. Revise the transaction batch and prepare it again.",
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=transactions_text)],
+            commit_message=commit_message,
+            remediation="bean-check failed. Revise the transaction batch and prepare it again.",
         )
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
 
@@ -1163,37 +1218,20 @@ class LedgerService:
         if not isinstance(preview, Preview):
             return preview
 
-        target = preview.preview["target_file"]
         txn_count = preview.preview["transaction_count"]
-
-        _ensure_agent_sidecar(workspace, ledger_config)
-        target_path = os.path.join(workspace, target)
-        backup_path = target_path + ".bak"
-
-        with open(target_path) as f:
-            original = f.read()
-        with open(backup_path, "w") as f:
-            f.write(original)
-
-        _append_to_sidecar(workspace, transactions_text, ledger_config)
-
-        is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
-        if not is_clean:
-            with open(target_path, "w") as f:
-                f.write(original)
-            Beancount.invalidate_cache(workspace, ledger_config)
-            os.remove(backup_path)
-            return _validation_failure(
-                check_output,
-                "bean-check failed. Revise the transaction batch and prepare it again.",
-            )
-
-        os.remove(backup_path)
-        Beancount.bean_format(workspace, target_path)
 
         if git_service is None:
             return DependencyUnavailable(error="Git service is not configured")
-        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=transactions_text)],
+            commit_message=commit_message,
+            remediation="bean-check failed. Revise the transaction batch and prepare it again.",
+        )
+        touched, git, failure = _apply_plan(
+            workspace, ledger_config, plan, repo_url, git_service, github_token
+        )
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -1203,7 +1241,7 @@ class LedgerService:
         return CommitResult(
             outcome=f"{txn_count} transactions recorded and committed",
             result={
-                "target_file": target,
+                "target_file": touched[-1],
                 "transaction_count": txn_count,
             },
             push_status=git["push"],
@@ -1244,6 +1282,18 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="bulk_commit",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [MutationOperation(kind="append", text=transactions_text)],
+                        commit_message=commit_message,
+                        remediation=(
+                            "bean-check failed. Revise the transaction batch "
+                            "and prepare it again."
+                        ),
+                    ),
+                    ledger_config,
+                ),
                 "transactions_text": transactions_text,
                 "commit_message": commit_message,
             },
@@ -1285,6 +1335,40 @@ class LedgerService:
             provided=provided,
             remediation=remediation,
             detail={"operation_index": operation_index, **(detail or {})},
+        )
+
+    @staticmethod
+    def _change_set_plan_from_operations(
+        operations: list[dict[str, object]], commit_message: str
+    ) -> MutationPlan:
+        """Build the exact replay plan used for both preview and approved apply."""
+        plan_operations: list[MutationOperation] = []
+        for operation in operations:
+            operation_type = LedgerService._operation_type(operation)
+            if operation_type == "open_account":
+                account_name = str(operation.get("account_name") or "")
+                directive = f"{operation.get('open_date') or ''} open {account_name}"
+                currency = operation.get("currency")
+                if isinstance(currency, str) and currency:
+                    directive += f"  {currency}"
+                display_name = operation.get("display_name")
+                if isinstance(display_name, str) and display_name:
+                    directive += f'\n  name: "{display_name}"'
+                plan_operations.append(
+                    MutationOperation(kind="open", account_name=account_name, text=directive)
+                )
+            elif operation_type == "commit_transaction":
+                plan_operations.append(
+                    MutationOperation(
+                        kind="append", text=str(operation.get("transaction_text") or "")
+                    )
+                )
+            else:
+                raise ValueError(f"Unsupported change-set operation: {operation_type}")
+        return MutationPlan.from_operations(
+            plan_operations,
+            commit_message=commit_message,
+            remediation="Fix the change-set operations and prepare them again.",
         )
 
     def _replay_change_set_operations(
@@ -1418,33 +1502,109 @@ class LedgerService:
                 provided=operations,
                 remediation="Provide at least one change-set operation.",
             )
-        config = _cfg(ledger_config)
-        try:
-            with tempfile.TemporaryDirectory(prefix="beanpilot-change-set-") as tmp:
-                dry_workspace = os.path.join(tmp, "workspace")
-                _copy_workspace_for_dry_run(workspace, dry_workspace)
-                try:
-                    replay = self._replay_change_set_operations(
-                        dry_workspace, operations, whitelist, config
+        known_accounts = set(LedgerQueryService.get_accounts(workspace, ledger_config))
+        display_items: list[dict[str, object]] = []
+        affected_accounts: set[str] = set()
+        transaction_count = 0
+        for index, operation in enumerate(operations):
+            operation_type = self._operation_type(operation)
+            if operation_type == "open_account":
+                account_name = str(operation.get("account_name") or "")
+                if not _ACCOUNT_NAME_RE.match(account_name):
+                    return self._operation_error(
+                        operation_index=index,
+                        invariant="ACCOUNT_NAME_FORMAT",
+                        provided=account_name,
+                        remediation=(
+                            "Account names must follow Beancount format: "
+                            "Type:Component (e.g. Assets:Liquid:Bank:NewAccount)."
+                        ),
                     )
-                    if isinstance(replay, InvariantViolation):
-                        return replay
-                    Beancount.invalidate_cache(dry_workspace, config)
-                    is_clean, check_output = Beancount.bean_check(dry_workspace, config)
-                    if not is_clean:
-                        return _validation_failure(
-                            check_output,
-                            "Fix the change-set operations and prepare them again.",
+                if account_name in known_accounts:
+                    return self._operation_error(
+                        operation_index=index,
+                        invariant="ACCOUNT_ALREADY_EXISTS",
+                        provided=account_name,
+                        remediation=f"Account '{account_name}' already exists.",
+                    )
+                currency = operation.get("currency")
+                directive = f"{operation.get('open_date') or ''} open {account_name}"
+                if isinstance(currency, str) and currency:
+                    directive += f"  {currency}"
+                display_name = operation.get("display_name")
+                if isinstance(display_name, str) and display_name:
+                    directive += f'\n  name: "{display_name}"'
+                display_items.append(
+                    {
+                        "operation_index": index,
+                        "type": "open_account",
+                        "summary": f"Open {account_name}",
+                        "diff": directive,
+                        "target_file": _cfg(ledger_config).sidecar_main_path,
+                    }
+                )
+                known_accounts.add(account_name)
+                affected_accounts.add(account_name)
+            elif operation_type == "commit_transaction":
+                transaction_text = str(operation.get("transaction_text") or "")
+                accounts = self._extract_accounts(transaction_text)
+                unknown = [account for account in accounts if account not in known_accounts]
+                if unknown:
+                    return self._operation_error(
+                        operation_index=index,
+                        invariant="ACCOUNT_WHITELIST",
+                        provided=unknown,
+                        remediation=(
+                            "Unknown accounts detected. Use open_account to create them first."
+                        ),
+                        detail={"valid_accounts": sorted(known_accounts)},
+                    )
+                if whitelist:
+                    out_of_scope = [
+                        account
+                        for account in accounts
+                        if not any(account.startswith(prefix) for prefix in whitelist)
+                    ]
+                    if out_of_scope:
+                        return self._operation_error(
+                            operation_index=index,
+                            invariant="CONVERSATION_SCOPE",
+                            provided=out_of_scope,
+                            remediation="Use accounts within the allowed prefixes.",
+                            detail={"allowed_prefixes": whitelist},
                         )
-                finally:
-                    Beancount.invalidate_workspace(dry_workspace)
-        except OSError as exc:
-            raise LedgerServiceError("Change-set dry-run workspace unavailable") from exc
+                display_items.append(
+                    {
+                        "operation_index": index,
+                        "type": "commit_transaction",
+                        "summary": "Record a transaction",
+                        "diff": transaction_text,
+                        "target_file": _agent_sidecar_target_file(ledger_config),
+                        "accounts": accounts,
+                    }
+                )
+                affected_accounts.update(accounts)
+                transaction_count += 1
+            else:
+                return self._operation_error(
+                    operation_index=index,
+                    invariant="UNSUPPORTED_CHANGE_SET_OPERATION",
+                    provided=operation_type,
+                    remediation=(
+                        "Only open_account and commit_transaction operations "
+                        "are supported in change sets."
+                    ),
+                )
 
-        diff = "\n\n".join(str(item.get("diff") or "") for item in replay.display_items)
+        plan = self._change_set_plan_from_operations(operations, commit_message)
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
+        if dry_run.failure:
+            return dry_run.failure
+        diff = "\n\n".join(str(item["diff"]) for item in display_items)
         return PendingActionService.create_pending_action(
             action_type="change_set",
             execution_spec={
+                "mutation_plan": self._serialized_plan(workspace, plan, ledger_config),
                 "operations": operations,
                 "commit_message": commit_message,
             },
@@ -1452,14 +1612,16 @@ class LedgerService:
                 "kind": "change_set_preview",
                 "summary": f"Apply {len(operations)} related ledger changes",
                 "diff": diff,
-                "items": replay.display_items,
+                "items": display_items,
             },
             validation={
                 "status": "validated",
                 "operation_count": len(operations),
-                "transaction_count": replay.transaction_count,
-                "accounts": replay.affected_accounts,
-                "target_files": replay.touched_files,
+                "transaction_count": transaction_count,
+                "accounts": sorted(affected_accounts),
+                "target_files": list(
+                    dict.fromkeys(str(item["target_file"]) for item in display_items)
+                ),
                 "dry_run": asdict(_validation_success(isolated=True)),
             },
         )
@@ -1483,64 +1645,29 @@ class LedgerService:
                 remediation="Provide at least one change-set operation.",
             )
 
-        config = _cfg(ledger_config)
-        try:
-            with tempfile.TemporaryDirectory(prefix="beanpilot-change-set-apply-") as tmp:
-                apply_workspace = os.path.join(tmp, "workspace")
-                _copy_workspace_for_dry_run(workspace, apply_workspace)
-                try:
-                    replay = self._replay_change_set_operations(
-                        apply_workspace, operations, whitelist, config
-                    )
-                    if isinstance(replay, InvariantViolation):
-                        return replay
-                    Beancount.invalidate_cache(apply_workspace, config)
-                    is_clean, check_output = Beancount.bean_check(apply_workspace, config)
-                    if not is_clean:
-                        return _validation_failure(
-                            check_output,
-                            "Fix the change-set operations and prepare them again.",
-                        )
-                    for rel_path in replay.touched_files:
-                        Beancount.bean_format(
-                            apply_workspace, _repo_path(apply_workspace, rel_path)
-                        )
-
-                    originals = {
-                        rel_path: _read_repo_file(workspace, rel_path)
-                        for rel_path in replay.touched_files
-                    }
-                    try:
-                        for rel_path in replay.touched_files:
-                            _write_repo_file(
-                                workspace,
-                                rel_path,
-                                _read_repo_file(apply_workspace, rel_path),
-                            )
-                        Beancount.invalidate_workspace(workspace)
-                    except OSError:
-                        _restore_repo_files(workspace, originals)
-                        raise
-                finally:
-                    Beancount.invalidate_workspace(apply_workspace)
-        except OSError as exc:
-            raise LedgerServiceError("Change-set apply workspace unavailable") from exc
-
-        try:
-            git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
-        except Exception:
-            _restore_repo_files(workspace, originals)
-            raise
+        prepared = self.prepare_change_set(
+            workspace, operations, commit_message, whitelist, ledger_config
+        )
+        if not isinstance(prepared, PendingAction):
+            return prepared
+        plan = self._change_set_plan_from_operations(operations, commit_message)
+        touched, git, failure = _apply_plan(
+            workspace, ledger_config, plan, repo_url, git_service, github_token
+        )
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
-            _restore_repo_files(workspace, originals)
             return dependency_error
 
+        transaction_count = sum(
+            self._operation_type(operation) == "commit_transaction" for operation in operations
+        )
         return CommitResult(
             outcome=f"{len(operations)} ledger changes validated and committed",
             result={
                 "operation_count": len(operations),
-                "transaction_count": replay.transaction_count,
-                "target_files": replay.touched_files,
+                "transaction_count": transaction_count,
+                "target_files": list(touched),
             },
             push_status=git["push"],
         )
@@ -1734,12 +1861,12 @@ class LedgerService:
             f"{transaction_text}\n\n{assertion_text}" if include_assertion else transaction_text
         )
 
-        dry_run = _run_isolated_validation(
-            workspace,
-            ledger_config,
-            lambda dry_workspace: _append_to_sidecar(dry_workspace, generated_text, ledger_config),
-            "Fix the reconciliation inputs and prepare it again.",
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=generated_text)],
+            commit_message="chore(ledger): reconcile balance",
+            remediation="Fix the reconciliation inputs and prepare it again.",
         )
+        dry_run = _run_plan_validation(workspace, ledger_config, plan)
         if dry_run.failure:
             return dry_run.failure
 
@@ -1794,6 +1921,15 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="balance_reconciliation",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [MutationOperation(kind="append", text=str(details["generated_text"]))],
+                        commit_message=commit_message or "chore(ledger): reconcile balance",
+                        remediation="Fix the reconciliation inputs and prepare it again.",
+                    ),
+                    ledger_config,
+                ),
                 "observed_date": observed_date,
                 "cutoff": cutoff,
                 "account": account,
@@ -1869,6 +2005,15 @@ class LedgerService:
         return PendingActionService.create_pending_action(
             action_type="balance_reconciliation",
             execution_spec={
+                "mutation_plan": self._serialized_plan(
+                    workspace,
+                    MutationPlan.from_operations(
+                        [MutationOperation(kind="append", text=str(details["generated_text"]))],
+                        commit_message=commit_message or "chore(ledger): update balance checkpoint",
+                        remediation="Fix the reconciliation inputs and prepare it again.",
+                    ),
+                    ledger_config,
+                ),
                 "observed_date": observed_date,
                 "cutoff": "end_of_day",
                 "account": account,
@@ -1938,41 +2083,23 @@ class LedgerService:
         if not isinstance(preview, Preview):
             return preview
         directives = str(preview.preview["generated_text"])
-        target = str(preview.preview["target_file"])
-        target_path = _repo_path(workspace, target)
-        original = _read_repo_file(workspace, target)
-        try:
-            _append_to_sidecar(workspace, directives, ledger_config)
-            is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
-            if not is_clean:
-                _write_repo_file(workspace, target, original)
-                Beancount.invalidate_cache(workspace, ledger_config)
-                return _validation_failure(
-                    check_output, "Fix the reconciliation inputs and prepare it again."
-                )
-            Beancount.bean_format(workspace, target_path)
-        except OSError as exc:
-            _write_repo_file(workspace, target, original)
-            raise LedgerServiceError("Balance reconciliation apply failed") from exc
-
-        try:
-            git = git_service.commit_and_push(
-                workspace,
-                commit_message or "chore(ledger): reconcile balance",
-                repo_url,
-                github_token,
-            )
-        except Exception:
-            _write_repo_file(workspace, target, original)
-            raise
+        plan = MutationPlan.from_operations(
+            [MutationOperation(kind="append", text=directives)],
+            commit_message=commit_message or "chore(ledger): reconcile balance",
+            remediation="Fix the reconciliation inputs and prepare it again.",
+        )
+        touched, git, failure = _apply_plan(
+            workspace, ledger_config, plan, repo_url, git_service, github_token
+        )
+        if failure:
+            return failure
         if dependency_error := _git_dependency_error(git):
-            _write_repo_file(workspace, target, original)
             return dependency_error
         return CommitResult(
             outcome="Balance reconciliation validated and committed",
             result={
                 "observed_date": observed_date,
-                "target_file": target,
+                "target_file": touched[-1],
                 "directives": directives,
             },
             push_status=git["push"],
@@ -2005,6 +2132,34 @@ class LedgerService:
             return IntegrityFailed(
                 pending_action_id=str(action.get("pending_action_id") or ""),
                 error="Pending action execution spec is invalid.",
+            )
+
+        raw_plan = spec.get("mutation_plan")
+        if isinstance(raw_plan, dict):
+            try:
+                plan = MutationPlan.from_spec(raw_plan)
+            except ValueError:
+                return IntegrityFailed(
+                    pending_action_id=str(action.get("pending_action_id") or ""),
+                    error="Pending action mutation plan is invalid.",
+                )
+            _, git, failure = _apply_plan(
+                workspace, ledger_config, plan, repo_url, git_service, github_token
+            )
+            if failure:
+                return failure
+            if dependency_error := _git_dependency_error(git):
+                return dependency_error
+            return ApplyReceipt(
+                pending_action_id=str(action.get("pending_action_id") or ""),
+                action_type=action_type,
+                receipt=asdict(
+                    CommitResult(
+                        outcome="Approved mutation plan validated and committed",
+                        result={"plan_version": plan.schema_version},
+                        push_status=git["push"],
+                    )
+                ),
             )
 
         if action_type == "commit_transaction":
@@ -2137,38 +2292,4 @@ class LedgerService:
     def preflight_report(
         workspace: str, ledger_config: LedgerConfig | None = None
     ) -> PreflightResult:
-        config = _cfg(ledger_config)
-        if not _check_sidecar_include(workspace, config):
-            sidecar_include = _include_line(config.entry_path, config.sidecar_main_path)[9:-1]
-            return PreflightResult(
-                status="SETUP_REQUIRED",
-                action=(f'Add include "{sidecar_include}" to {config.entry_path}'),
-            )
-
-        target = _ensure_agent_sidecar(workspace, config)
-        is_clean, check_output = Beancount.bean_check(workspace, config)
-        accounts = LedgerQueryService.get_accounts(workspace, config)
-
-        # Collect recent transactions
-        recent = ""
-        path = os.path.join(workspace, target)
-        try:
-            with open(path) as f:
-                lines = f.readlines()
-            txn_indices = [
-                i for i, line in enumerate(lines) if re.match(r"^\d{4}-\d{2}-\d{2} ", line)
-            ]
-            start = (
-                txn_indices[-5] if len(txn_indices) >= 5 else (txn_indices[0] if txn_indices else 0)
-            )
-            recent = "".join(lines[start:]).strip()
-        except OSError:
-            pass
-
-        return PreflightResult(
-            status="CLEAN" if is_clean else "ERROR",
-            target=target,
-            accounts=accounts,
-            errors=check_output.strip() if not is_clean else None,
-            recent=recent,
-        )
+        return _read_only_preflight_report(workspace, ledger_config)

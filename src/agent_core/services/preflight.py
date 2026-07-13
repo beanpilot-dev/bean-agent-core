@@ -10,7 +10,7 @@ import logging
 import os
 import re
 
-from .ledger import LedgerService, _check_sidecar_include
+from .inspection import check_sidecar_include, preflight_report
 from .queries import LedgerQueryService
 from .types import DEFAULT_LEDGER_CONFIG, LedgerConfig, PreflightResult
 
@@ -33,34 +33,26 @@ class PreflightService:
     """Fail-fast deterministic ledger validation."""
 
     @staticmethod
-    def validate(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> PreflightResult:
+    def validate(workspace: str, ledger_config: LedgerConfig | None = None) -> PreflightResult:
         """Run full preflight: sidecar check + bean-check + account listing.
 
         Returns PreflightResult. Raises SetupRequiredError if sidecar
         include is missing — this is a hard block, not a soft warning.
         """
         config = ledger_config or DEFAULT_LEDGER_CONFIG
-        if not _check_sidecar_include(workspace, config):
-            msg = (
-                f"Sidecar include directive is missing from {config.entry_path}."
-            )
+        if not check_sidecar_include(workspace, config):
+            msg = f"Sidecar include directive is missing from {config.entry_path}."
             raise SetupRequiredError(msg)
 
-        return LedgerService.preflight_report(workspace, config)
+        return preflight_report(workspace, config)
 
     @staticmethod
-    def check_setup(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> bool:
+    def check_setup(workspace: str, ledger_config: LedgerConfig | None = None) -> bool:
         """Return True if the sidecar include directive is present."""
-        return _check_sidecar_include(workspace, ledger_config)
+        return check_sidecar_include(workspace, ledger_config)
 
     @staticmethod
-    def list_accounts(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> list[str]:
+    def list_accounts(workspace: str, ledger_config: LedgerConfig | None = None) -> list[str]:
         """Return all account names from the ledger."""
         return LedgerQueryService.get_accounts(workspace, ledger_config)
 
@@ -82,9 +74,7 @@ class PreflightService:
                             for line in f:
                                 if line.strip().startswith((";", "#", "*")):
                                     continue
-                                if re.match(
-                                    r"\d{4}-\d{2}-\d{2}\s+open\s+", line
-                                ):
+                                if re.match(r"\d{4}-\d{2}-\d{2}\s+open\s+", line):
                                     directives.append(line.strip())
                     except OSError:
                         pass

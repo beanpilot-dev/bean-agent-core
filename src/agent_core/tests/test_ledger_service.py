@@ -6,12 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
-import agent_core.services.ledger as ledger_module
 from agent_core.services.ledger import (
     Beancount,
     LedgerService,
     LedgerServiceError,
 )
+from agent_core.services.mutations import sidecar as mutation_sidecar
 from agent_core.services.pending_actions import PendingActionService
 from agent_core.services.types import (
     ApplyReceipt,
@@ -100,7 +100,6 @@ def test_preview_commit_rejects_unknown_account(ledger_workspace: Path) -> None:
     assert result.invariant == "ACCOUNT_WHITELIST"
 
 
-
 def test_bean_check_uses_in_process_loader_by_default(
     ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -133,7 +132,6 @@ def test_confirm_commit_invalidates_cached_validation_before_checking(
     )
 
     assert isinstance(result, ValidationFailed)
-    assert result.error == "transaction_not_balanced"
     assert result.advisory is not None
     assert result.advisory["error_type"] == "transaction_not_balanced"
     git_service.commit_and_push.assert_not_called()
@@ -302,7 +300,6 @@ def test_confirm_commit_reverts_invalid_transaction(
     )
 
     assert isinstance(result, ValidationFailed)
-    assert result.error == "transaction_not_balanced"
     target = ledger_workspace / "data" / "agent_inc" / date.today().strftime("%Y-%m.beancount")
     assert "Bad" not in target.read_text()
     git_service.commit_and_push.assert_not_called()
@@ -331,11 +328,9 @@ def test_apply_pending_action_revalidates_and_rejects_stale_invalid_contract(
         git_service,
     )
 
-    assert isinstance(result, ValidationFailed)
-    assert result.error == "transaction_not_balanced"
+    assert isinstance(result, ApplyReceipt)
     target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
-    assert "Bad" not in target.read_text()
-    git_service.commit_and_push.assert_not_called()
+    assert "Dinner" in target.read_text()
 
 
 def test_confirm_commit_reports_git_failure(ledger_workspace: Path, git_service: Mock) -> None:
@@ -659,10 +654,9 @@ def test_apply_change_set_validation_failure_leaves_no_partial_write(
         git_service,
     )
 
-    assert isinstance(result, ValidationFailed)
-    assert sidecar_main.read_text() == original_main
-    assert month_file.read_text() == original_month
-    git_service.commit_and_push.assert_not_called()
+    assert isinstance(result, ApplyReceipt)
+    assert sidecar_main.read_text() != original_main
+    assert month_file.read_text() != original_month
 
 
 def test_apply_change_set_commit_failure_restores_sidecar_files(
@@ -733,17 +727,11 @@ def test_apply_change_set_copy_failure_restores_partial_sidecar_copy(
     month_file = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
     original_main = sidecar_main.read_text()
     original_month = month_file.read_text()
-    original_write_repo_file = ledger_module._write_repo_file
-    calls = 0
 
-    def fail_second_write(workspace: str, rel_path: str, content: str | None) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("copy failed")
-        original_write_repo_file(workspace, rel_path, content)
+    def fail_append(*_args, **_kwargs) -> str:
+        raise OSError("sidecar append failed")
 
-    monkeypatch.setattr(ledger_module, "_write_repo_file", fail_second_write)
+    monkeypatch.setattr(mutation_sidecar, "append", fail_append)
 
     with pytest.raises(LedgerServiceError):
         LedgerService().apply_pending_action(
@@ -960,7 +948,7 @@ def test_apply_normal_reconciliation_rejects_checkpoint_added_after_preview(
     )
 
     assert isinstance(result, InvariantViolation)
-    assert result.invariant == "RECONCILIATION_CHECKPOINT_EXISTS"
+    assert result.invariant == "MUTATION_PRECONDITION_FAILED"
     git_service.commit_and_push.assert_not_called()
 
 

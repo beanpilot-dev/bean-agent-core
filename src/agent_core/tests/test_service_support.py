@@ -22,6 +22,22 @@ def test_preflight_validate_and_account_helpers(ledger_workspace: Path) -> None:
     )
 
 
+def test_preflight_is_read_only_when_the_monthly_sidecar_is_absent(
+    ledger_workspace: Path,
+) -> None:
+    sidecar = ledger_workspace / "data" / "agent_inc"
+    monthly_files = list(sidecar.glob("20??-??.beancount"))
+    for path in monthly_files:
+        path.unlink()
+    before = (sidecar / "main.beancount").read_text()
+
+    result = PreflightService.validate(str(ledger_workspace))
+
+    assert result.status == "CLEAN"
+    assert not list(sidecar.glob("20??-??.beancount"))
+    assert (sidecar / "main.beancount").read_text() == before
+
+
 def test_preflight_missing_sidecar_raises(ledger_workspace: Path) -> None:
     main = ledger_workspace / "data" / "main.beancount"
     main.write_text('option "title" "Missing sidecar"\n')
