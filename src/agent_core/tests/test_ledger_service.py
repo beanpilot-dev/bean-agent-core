@@ -103,8 +103,7 @@ def test_preview_commit_rejects_unknown_account(ledger_workspace: Path) -> None:
 def test_get_accounts_includes_open_only_accounts(ledger_workspace: Path) -> None:
     sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
     sidecar_main.write_text(
-        sidecar_main.read_text()
-        + "\n2020-01-01 open Expenses:Tax:Federal USD\n"
+        sidecar_main.read_text() + "\n2020-01-01 open Expenses:Tax:Federal USD\n"
     )
 
     accounts = LedgerService.get_accounts(str(ledger_workspace))
@@ -607,12 +606,14 @@ def test_apply_change_set_writes_both_changes_and_commits_once(
 
     assert isinstance(result, ApplyReceipt)
     assert result.action_type == "change_set"
-    assert "Assets:Bank:Savings" in (
-        ledger_workspace / "data" / "agent_inc" / "main.beancount"
-    ).read_text()
-    assert "Savings transfer" in (
-        ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
-    ).read_text()
+    assert (
+        "Assets:Bank:Savings"
+        in (ledger_workspace / "data" / "agent_inc" / "main.beancount").read_text()
+    )
+    assert (
+        "Savings transfer"
+        in (ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount").read_text()
+    )
     assert len(formatted) == 2
     git_service.commit_and_push.assert_called_once()
 
@@ -650,8 +651,7 @@ def test_apply_change_set_validation_failure_leaves_no_partial_write(
             {
                 "type": "commit_transaction",
                 "transaction_text": (
-                    '2026-06-16 * "Bad transfer"\n'
-                    "  Assets:Bank:Savings   100 CNY\n"
+                    '2026-06-16 * "Bad transfer"\n  Assets:Bank:Savings   100 CNY\n'
                 ),
             },
         ],
@@ -796,110 +796,77 @@ def test_prepare_change_set_bulk_sized_transaction_set_is_high_risk(
     assert result.policy["requires_elevated_review"] is True
 
 
-def test_prepare_reconciliation_assert_only_materializes_pending_action(
+def test_prepare_balance_reconciliation_materializes_explicit_adjustment(
     ledger_workspace: Path,
 ) -> None:
-    result = LedgerService().prepare_reconciliation(
+    result = LedgerService().prepare_balance_reconciliation(
         str(ledger_workspace),
-        "assert_only",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank:Checking",
-        "5000.00",
+        "5120.00",
         "CNY",
+        "Equity:Opening-Balances",
     )
 
     assert isinstance(result, PendingAction)
     assert result.action_type == "balance_reconciliation"
     assert result.display["kind"] == "balance_reconciliation_preview"
     assert result.display["current_balance"] == "5000 CNY"
-    assert "balance Assets:Bank:Checking  5000 CNY" in result.display["diff"]
+    assert result.display["assertion_date"] == "2026-06-01"
+    assert "Assets:Bank:Checking  120 CNY" in result.display["diff"]
+    assert "Equity:Opening-Balances  -120 CNY" in result.display["diff"]
+    assert "2026-06-01 balance Assets:Bank:Checking  5120 CNY" in result.display["diff"]
+    assert " pad " not in result.display["diff"]
     assert result.validation["dry_run"]["status"] == "validated"
 
 
-def test_prepare_reconciliation_pad_and_assert_calculates_adjustment(
+def test_calculate_balance_adjustment_supports_end_and_start_of_day(
     ledger_workspace: Path,
 ) -> None:
-    result = LedgerService().prepare_reconciliation(
+    service = LedgerService()
+    result = service.calculate_balance_adjustment(
         str(ledger_workspace),
-        "pad_and_assert",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank:Checking",
         "5120",
         "CNY",
-        "Equity:Opening-Balances",
     )
 
-    assert isinstance(result, PendingAction)
-    assert result.display["adjustment"] == "120 CNY"
-    assert result.display["warning"]
-    assert result.display["diff"].splitlines() == [
-        "2026-05-31 pad Assets:Bank:Checking Equity:Opening-Balances",
-        "2026-06-01 balance Assets:Bank:Checking  5120 CNY",
-    ]
+    assert isinstance(result, QueryResult)
+    assert result.rows[0]["assertion_date"] == "2026-06-01"
+    assert result.rows[0]["unexplained_difference"] == "120 CNY"
+    start = service.calculate_balance_adjustment(
+        str(ledger_workspace), "2026-06-01", "Assets:Bank:Checking", "5000", "CNY", "start_of_day"
+    )
+    assert isinstance(start, QueryResult)
+    assert start.as_of == "2026-06-01"
 
 
-def test_prepare_reconciliation_rejects_non_equity_pad_account(
+def test_prepare_balance_reconciliation_requires_existing_adjustment_account(
     ledger_workspace: Path,
 ) -> None:
-    result = LedgerService().prepare_reconciliation(
+    result = LedgerService().prepare_balance_reconciliation(
         str(ledger_workspace),
-        "pad_and_assert",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank:Checking",
         "5120",
         "CNY",
-        "Assets:Cash",
+        "Equity:Missing",
     )
 
     assert isinstance(result, InvariantViolation)
-    assert result.invariant == "RECONCILIATION_PAD_ACCOUNT"
+    assert result.invariant == "RECONCILIATION_ADJUSTMENT_ACCOUNT"
 
 
-def test_prepare_reconciliation_rejects_tolerance_until_supported(
-    ledger_workspace: Path,
-) -> None:
-    result = LedgerService().prepare_reconciliation(
-        str(ledger_workspace),
-        "assert_only",
-        "2026-06-01",
-        "Assets:Bank:Checking",
-        "5000",
-        "CNY",
-        tolerance="0.01",
-    )
-
-    assert isinstance(result, InvariantViolation)
-    assert result.invariant == "RECONCILIATION_TOLERANCE_UNSUPPORTED"
-
-
-def test_prepare_reconciliation_reports_a_failed_assertion_without_pending_action(
-    ledger_workspace: Path,
-) -> None:
-    result = LedgerService().prepare_reconciliation(
-        str(ledger_workspace),
-        "assert_only",
-        "2026-06-01",
-        "Assets:Bank:Checking",
-        "5120",
-        "CNY",
-    )
-
-    assert isinstance(result, ValidationFailed)
-    assert result.error == "balance_assertion_failed"
-    assert result.advisory["assertion_status"] == "fails"
-    assert result.advisory["current_balance"] == "5000 CNY"
-
-
-def test_prepare_reconciliation_uses_descendant_balance_for_parent_account(
+def test_prepare_balance_reconciliation_uses_descendant_balance_for_parent_account(
     ledger_workspace: Path,
 ) -> None:
     sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
     sidecar_main.write_text("2020-01-01 open Assets:Bank CNY\n" + sidecar_main.read_text())
 
-    result = LedgerService().prepare_reconciliation(
+    result = LedgerService().prepare_balance_reconciliation(
         str(ledger_workspace),
-        "pad_and_assert",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank",
         "5120",
         "CNY",
@@ -911,13 +878,12 @@ def test_prepare_reconciliation_uses_descendant_balance_for_parent_account(
     assert result.display["adjustment"] == "120 CNY"
 
 
-def test_prepare_reconciliation_marks_negative_pad_direction(
+def test_prepare_balance_reconciliation_marks_negative_adjustment(
     ledger_workspace: Path,
 ) -> None:
-    result = LedgerService().prepare_reconciliation(
+    result = LedgerService().prepare_balance_reconciliation(
         str(ledger_workspace),
-        "pad_and_assert",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank:Checking",
         "4880",
         "CNY",
@@ -926,17 +892,16 @@ def test_prepare_reconciliation_marks_negative_pad_direction(
 
     assert isinstance(result, PendingAction)
     assert result.display["adjustment"] == "-120 CNY"
-    assert result.display["adjustment_direction"] == "to_pad"
+    assert "Assets:Bank:Checking  -120 CNY" in result.display["diff"]
 
 
-def test_apply_pending_reconciliation_commits_directives(
+def test_apply_pending_balance_reconciliation_commits_explicit_entries(
     ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
-    pending = LedgerService().prepare_reconciliation(
+    pending = LedgerService().prepare_balance_reconciliation(
         str(ledger_workspace),
-        "pad_and_assert",
-        "2026-06-01",
+        "2026-05-31",
         "Assets:Bank:Checking",
         "5120",
         "CNY",
@@ -950,8 +915,63 @@ def test_apply_pending_reconciliation_commits_directives(
 
     assert isinstance(result, ApplyReceipt)
     target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
-    assert "pad Assets:Bank:Checking Equity:Opening-Balances" in target.read_text()
+    assert "Balance reconciliation adjustment" in target.read_text()
+    assert "pad Assets:Bank:Checking" not in target.read_text()
     git_service.commit_and_push.assert_called_once()
+
+
+def test_existing_checkpoint_requires_explicit_balance_update(ledger_workspace: Path) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    target.write_text(target.read_text() + "\n2026-06-01 balance Assets:Bank:Checking  5000 CNY\n")
+    service = LedgerService()
+
+    normal = service.prepare_balance_reconciliation(
+        str(ledger_workspace),
+        "2026-05-31",
+        "Assets:Bank:Checking",
+        "5000",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+    assert isinstance(normal, InvariantViolation)
+    assert normal.invariant == "RECONCILIATION_CHECKPOINT_EXISTS"
+
+    update = service.prepare_balance_update(
+        str(ledger_workspace),
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+    assert isinstance(update, PendingAction)
+    assert "does not rewrite" in update.display["warning"]
+    assert " balance Assets:Bank:Checking " not in update.display["diff"]
+
+
+def test_apply_normal_reconciliation_rejects_checkpoint_added_after_preview(
+    ledger_workspace: Path,
+    git_service: Mock,
+) -> None:
+    service = LedgerService()
+    pending = service.prepare_balance_reconciliation(
+        str(ledger_workspace),
+        "2026-05-31",
+        "Assets:Bank:Checking",
+        "5000",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+    assert isinstance(pending, PendingAction)
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    target.write_text(target.read_text() + "\n2026-06-01 balance Assets:Bank:Checking  5000 CNY\n")
+
+    result = service.apply_pending_action(
+        str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
+    )
+
+    assert isinstance(result, InvariantViolation)
+    assert result.invariant == "RECONCILIATION_CHECKPOINT_EXISTS"
+    git_service.commit_and_push.assert_not_called()
 
 
 def test_bulk_supports_staging_file(
@@ -987,9 +1007,7 @@ def test_staged_bulk_commits_the_content_that_was_validated(
     def mutate_after_validation(*args, **kwargs):
         result = original_preview(*args, **kwargs)
         staging.write_text(
-            '2026-06-15 * "Unvalidated"\n'
-            "  Expenses:Unknown  100 CNY\n"
-            "  Assets:Cash      -100 CNY"
+            '2026-06-15 * "Unvalidated"\n  Expenses:Unknown  100 CNY\n  Assets:Cash      -100 CNY'
         )
         return result
 

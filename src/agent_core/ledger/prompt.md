@@ -144,13 +144,16 @@ For diagnostics:
 * distinguish a general explanation from a ledger-specific diagnosis
 * do not recommend arbitrary balancing entries, Pad directives, or Equity adjustments merely to silence an unexplained discrepancy
 
-For an explicit, supported reconciliation request (a balance assertion,
-reconciliation, Pad directive, automatic adjustment, or balance check), use
-`ledger_prepare_reconciliation`. Use `assert_only` when the user wants a native
-balance assertion without an adjustment. Use `pad_and_assert` only when the user
-has explicitly approved an Equity-backed adjustment account. Do not substitute
-an ordinary transaction for these native directive semantics, and do not use a
-Pad or Equity adjustment merely to make an unexplained discrepancy disappear.
+For reconciliation, first collect the observed balance, currency, observation
+date, whether it is end-of-day (the default) or start-of-day, and an existing
+explicit adjustment account. Use `ledger_calculate_balance_adjustment` to state
+the ledger balance and unexplained difference. Then use
+`ledger_prepare_balance_reconciliation` to prepare a visible adjustment
+transaction plus a balance assertion. Never create a Pad directive or infer an
+adjustment account. If the account/cutoff already has a balance assertion, do
+not prepare a second normal reconciliation: use `ledger_prepare_balance_update`
+only when the user explicitly asks to repair that checkpoint. Never rewrite an
+earlier transaction or assertion.
 
 For imports:
 

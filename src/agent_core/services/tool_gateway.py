@@ -179,30 +179,74 @@ class ToolExecutionGateway:
             ),
         )
 
-    def prepare_reconciliation(
+    def calculate_balance_adjustment(
         self,
         workspace: str,
-        mode: str,
-        assertion_date: str,
+        observed_date: str,
         account: str,
         amount: str,
         currency: str,
-        pad_account: str | None = None,
-        tolerance: str | None = None,
+        cutoff: str = "end_of_day",
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self.normalize(
+            "ledger_calculate_balance_adjustment",
+            self._ledger.calculate_balance_adjustment(
+                workspace,
+                observed_date,
+                account,
+                amount,
+                currency,
+                cutoff,
+                ledger_config,
+            ),
+        )
+
+    def prepare_balance_reconciliation(
+        self,
+        workspace: str,
+        observed_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        adjustment_account: str,
+        cutoff: str = "end_of_day",
         commit_message: str = "",
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult:
         return self._prepare(
-            "ledger_prepare_reconciliation",
-            lambda: self._ledger.prepare_reconciliation(
+            "ledger_prepare_balance_reconciliation",
+            lambda: self._ledger.prepare_balance_reconciliation(
                 workspace,
-                mode,
-                assertion_date,
+                observed_date,
                 account,
                 amount,
                 currency,
-                pad_account,
-                tolerance,
+                adjustment_account,
+                cutoff,
+                commit_message,
+                ledger_config,
+            ),
+        )
+
+    def prepare_balance_update(
+        self,
+        workspace: str,
+        assertion_date: str,
+        account: str,
+        currency: str,
+        adjustment_account: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_balance_update",
+            lambda: self._ledger.prepare_balance_update(
+                workspace,
+                assertion_date,
+                account,
+                currency,
+                adjustment_account,
                 commit_message,
                 ledger_config,
             ),

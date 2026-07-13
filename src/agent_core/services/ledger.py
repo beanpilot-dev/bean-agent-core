@@ -28,6 +28,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
 from typing import Callable
 
+from beancount import loader
+
 from .beancount import Beancount, LedgerServiceError, _cfg, _repo_path
 from .pending_actions import PendingActionService
 from .types import (
@@ -48,11 +50,13 @@ from .workspace import GitService
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class _DryRunResult:
     target_file: str | None
     validation: ValidationSummary
     failure: ValidationFailed | None = None
+
 
 @dataclass(frozen=True)
 class _ChangeSetReplay:
@@ -61,12 +65,14 @@ class _ChangeSetReplay:
     affected_accounts: list[str]
     transaction_count: int
 
+
 def _include_line(entry_path: str, sidecar_main_path: str) -> str:
     relative = os.path.relpath(
         sidecar_main_path,
         start=PurePosixPath(entry_path).parent.as_posix(),
     ).replace(os.sep, "/")
     return f'include "{relative}"'
+
 
 def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
     if not git["ok"]:
@@ -80,6 +86,7 @@ def _git_dependency_error(git: dict) -> DependencyUnavailable | None:
             retryable=True,
         )
     return None
+
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -102,6 +109,7 @@ _CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9\-]*$")
 _INVENTORY_AMOUNT_RE = re.compile(
     r"(?P<amount>[-+]?\d[\d,]*(?:\.\d+)?)\s+(?P<currency>[A-Z][A-Z0-9\-]*)"
 )
+
 
 def _summarize_validation_failure(output: str) -> ValidationSummary:
     lower = output.lower()
@@ -140,6 +148,7 @@ def _summarize_validation_failure(output: str) -> ValidationSummary:
         retryable=True,
     )
 
+
 def _validation_failure(output: str, remediation: str) -> ValidationFailed:
     summary = _summarize_validation_failure(output)
     return ValidationFailed(
@@ -148,8 +157,10 @@ def _validation_failure(output: str, remediation: str) -> ValidationFailed:
         advisory=asdict(summary),
     )
 
+
 def _validation_success(isolated: bool) -> ValidationSummary:
     return ValidationSummary(status="validated", isolated=isolated)
+
 
 def _format_decimal(amount: Decimal) -> str:
     """Render a plain Beancount amount without exponent notation."""
@@ -196,9 +207,12 @@ def _parse_single_currency_balance(
             provided=balance,
             remediation="Inspect the account balance and retry the reconciliation.",
         )
+
+
 # ---------------------------------------------------------------------------
 # Sidecar helpers
 # ---------------------------------------------------------------------------
+
 
 def _agent_sidecar_target_file(ledger_config: LedgerConfig | None = None) -> str:
     config = _cfg(ledger_config)
@@ -206,9 +220,8 @@ def _agent_sidecar_target_file(ledger_config: LedgerConfig | None = None) -> str
     chunk_name = f"{today.year}-{today.month:02d}.beancount"
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
-def _check_sidecar_include(
-    workspace: str, ledger_config: LedgerConfig | None = None
-) -> bool:
+
+def _check_sidecar_include(workspace: str, ledger_config: LedgerConfig | None = None) -> bool:
     config = _cfg(ledger_config)
     main = _repo_path(workspace, config.entry_path)
     include = _include_line(config.entry_path, config.sidecar_main_path)
@@ -218,9 +231,8 @@ def _check_sidecar_include(
     except OSError:
         return False
 
-def _ensure_agent_sidecar(
-    workspace: str, ledger_config: LedgerConfig | None = None
-) -> str:
+
+def _ensure_agent_sidecar(workspace: str, ledger_config: LedgerConfig | None = None) -> str:
     config = _cfg(ledger_config)
     today = date.today()
     chunk_name = f"{today.year}-{today.month:02d}.beancount"
@@ -231,9 +243,7 @@ def _ensure_agent_sidecar(
     changed = False
     if not os.path.exists(chunk_path):
         with open(chunk_path, "w") as f:
-            f.write(
-                f"; Agent-generated transactions — {today.year}-{today.month:02d}\n"
-            )
+            f.write(f"; Agent-generated transactions — {today.year}-{today.month:02d}\n")
         changed = True
 
     agg_path = _repo_path(workspace, config.sidecar_main_path)
@@ -257,6 +267,7 @@ def _ensure_agent_sidecar(
 
     return f"{config.sidecar_write_dir}/{chunk_name}"
 
+
 def _copy_workspace_for_dry_run(workspace: str, target: str) -> None:
     shutil.copytree(
         workspace,
@@ -269,6 +280,7 @@ def _copy_workspace_for_dry_run(workspace: str, target: str) -> None:
             ".ruff_cache",
         ),
     )
+
 
 def _run_isolated_validation(
     workspace: str,
@@ -300,6 +312,7 @@ def _run_isolated_validation(
     except OSError as exc:
         raise LedgerServiceError("Dry-run validation workspace unavailable") from exc
 
+
 def _append_to_sidecar(
     workspace: str,
     text: str,
@@ -311,6 +324,7 @@ def _append_to_sidecar(
         f.write(f"\n{text.strip()}\n")
     Beancount.invalidate_cache(workspace, ledger_config)
     return target
+
 
 def _write_open_directive(
     workspace: str,
@@ -349,6 +363,7 @@ def _write_open_directive(
     Beancount.invalidate_cache(workspace, config)
     return config.sidecar_main_path
 
+
 def _read_repo_file(workspace: str, rel_path: str) -> str | None:
     path = _repo_path(workspace, rel_path)
     try:
@@ -356,6 +371,7 @@ def _read_repo_file(workspace: str, rel_path: str) -> str | None:
             return f.read()
     except FileNotFoundError:
         return None
+
 
 def _write_repo_file(workspace: str, rel_path: str, content: str | None) -> None:
     path = _repo_path(workspace, rel_path)
@@ -369,10 +385,12 @@ def _write_repo_file(workspace: str, rel_path: str, content: str | None) -> None
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
+
 def _restore_repo_files(workspace: str, originals: dict[str, str | None]) -> None:
     for rel_path, content in originals.items():
         _write_repo_file(workspace, rel_path, content)
     Beancount.invalidate_workspace(workspace)
+
 
 def _replace_transaction_block(
     workspace: str,
@@ -390,9 +408,11 @@ def _replace_transaction_block(
     Beancount.invalidate_cache(workspace, ledger_config)
     return rel_path
 
+
 # ---------------------------------------------------------------------------
 # LedgerService
 # ---------------------------------------------------------------------------
+
 
 class LedgerService:
     """Deterministic Beancount read/write operations.
@@ -407,15 +427,10 @@ class LedgerService:
 
     @staticmethod
     def _extract_accounts(transaction_text: str) -> list[str]:
-        return sorted({
-            m.group(0).strip()
-            for m in _POSTING_ACCOUNT_RE.finditer(transaction_text)
-        })
+        return sorted({m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(transaction_text)})
 
     @staticmethod
-    def get_accounts(
-        workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> list[str]:
+    def get_accounts(workspace: str, ledger_config: LedgerConfig | None = None) -> list[str]:
         rows, err = Beancount.run_bql_rows(
             workspace, "SELECT DISTINCT account ORDER BY account", ledger_config
         )
@@ -450,17 +465,12 @@ class LedgerService:
                 invariant="ACCOUNT_WHITELIST",
                 severity="HARD",
                 provided=unknown,
-                remediation=(
-                    "Unknown accounts detected. Use open_account "
-                    "to create them first."
-                ),
+                remediation=("Unknown accounts detected. Use open_account to create them first."),
                 detail={"valid_accounts": sorted(valid)},
             )
 
         if whitelist:
-            out_of_scope = [
-                a for a in used if not any(a.startswith(w) for w in whitelist)
-            ]
+            out_of_scope = [a for a in used if not any(a.startswith(w) for w in whitelist)]
             if out_of_scope:
                 return InvariantViolation(
                     invariant="CONVERSATION_SCOPE",
@@ -488,9 +498,7 @@ class LedgerService:
         ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation | ValidationFailed:
         """Validate a transaction proposal in an isolated dry-run."""
-        violation = self.validate_accounts(
-            workspace, transaction_text, whitelist, ledger_config
-        )
+        violation = self.validate_accounts(workspace, transaction_text, whitelist, ledger_config)
         if violation:
             return violation
 
@@ -602,9 +610,7 @@ class LedgerService:
         os.remove(backup_path)
         Beancount.bean_format(workspace, target_path)
 
-        git = git_service.commit_and_push(
-            workspace, commit_message, repo_url, github_token
-        )
+        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -682,9 +688,7 @@ class LedgerService:
                 "target_file": dry_run.target_file,
                 "validation": asdict(dry_run.validation),
             },
-            message=(
-                "Account directive passed dry-run validation. Request explicit approval."
-            ),
+            message=("Account directive passed dry-run validation. Request explicit approval."),
         )
 
     def confirm_open(
@@ -806,7 +810,7 @@ class LedgerService:
         """
         escaped_narration = narration.replace('"', '\\"')
         bql = (
-            f'SELECT DISTINCT date, narration '
+            f"SELECT DISTINCT date, narration "
             f'WHERE date = {target_date} AND narration ~ "{escaped_narration}"'
         )
         rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
@@ -837,10 +841,7 @@ class LedgerService:
                         block_start = m.start()
                         rest = content[block_start:]
                         end_match = re.search(r"\n[ \t]*\n", rest)
-                        raw = (
-                            rest[:end_match.start()].rstrip()
-                            if end_match else rest.rstrip()
-                        )
+                        raw = rest[: end_match.start()].rstrip() if end_match else rest.rstrip()
                         results.append((rel, content, raw))
         except OSError:
             pass
@@ -851,12 +852,8 @@ class LedgerService:
     def _detect_value_change(old_text: str, new_text: str) -> dict | None:
         old_amounts = set(_AMOUNT_RE.findall(old_text))
         new_amounts = set(_AMOUNT_RE.findall(new_text))
-        old_accounts = {
-            m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(old_text)
-        }
-        new_accounts = {
-            m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(new_text)
-        }
+        old_accounts = {m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(old_text)}
+        new_accounts = {m.group(0).strip() for m in _POSTING_ACCOUNT_RE.finditer(new_text)}
         changes: dict = {}
         if old_amounts != new_amounts:
             changes["amounts"] = {
@@ -891,9 +888,7 @@ class LedgerService:
         ledger_config: LedgerConfig | None = None,
     ) -> Preview | InvariantViolation | ValidationFailed:
         """Find and validate a replacement transaction in an isolated dry-run."""
-        matches = self.find_transaction_block(
-            workspace, target_date, narration, ledger_config
-        )
+        matches = self.find_transaction_block(workspace, target_date, narration, ledger_config)
 
         if not matches:
             return InvariantViolation(
@@ -901,8 +896,7 @@ class LedgerService:
                 severity="HARD",
                 provided={"date": target_date, "narration": narration},
                 remediation=(
-                    "No transaction found. Use find_transactions to locate "
-                    "the exact entry."
+                    "No transaction found. Use find_transactions to locate the exact entry."
                 ),
             )
 
@@ -913,17 +907,17 @@ class LedgerService:
                 provided={"date": target_date, "narration": narration},
                 remediation="Provide a more specific narration substring.",
                 detail={
-                    "matches_found": [
-                        {"file": rel, "block": block}
-                        for rel, _, block in matches
-                    ],
+                    "matches_found": [{"file": rel, "block": block} for rel, _, block in matches],
                 },
             )
 
         rel_path, _, old_block = matches[0]
 
         violation = self.validate_accounts(
-            workspace, new_transaction_text, whitelist, ledger_config,
+            workspace,
+            new_transaction_text,
+            whitelist,
+            ledger_config,
         )
         if violation:
             return violation
@@ -957,9 +951,7 @@ class LedgerService:
                 "advisory": advisory,
                 "validation": asdict(dry_run.validation),
             },
-            message=(
-                "Replacement passed dry-run validation. Request explicit approval."
-            ),
+            message=("Replacement passed dry-run validation. Request explicit approval."),
         )
 
     def confirm_update(
@@ -977,8 +969,13 @@ class LedgerService:
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
         """Validate and execute a transaction update. Re-runs preview internally."""
         preview = self.preview_update(
-            workspace, target_date, narration, new_transaction_text,
-            commit_message, whitelist, ledger_config,
+            workspace,
+            target_date,
+            narration,
+            new_transaction_text,
+            commit_message,
+            whitelist,
+            ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -1012,9 +1009,7 @@ class LedgerService:
         os.remove(backup_path)
         Beancount.bean_format(workspace, file_path)
 
-        git = git_service.commit_and_push(
-            workspace, commit_message, repo_url, github_token
-        )
+        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -1039,8 +1034,13 @@ class LedgerService:
         ledger_config: LedgerConfig | None = None,
     ) -> PendingAction | InvariantViolation | ValidationFailed:
         preview = self.preview_update(
-            workspace, target_date, narration, new_transaction_text,
-            commit_message, whitelist, ledger_config,
+            workspace,
+            target_date,
+            narration,
+            new_transaction_text,
+            commit_message,
+            whitelist,
+            ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -1100,7 +1100,10 @@ class LedgerService:
             )
 
         violation = self.validate_accounts(
-            workspace, transactions_text, whitelist, ledger_config,
+            workspace,
+            transactions_text,
+            whitelist,
+            ledger_config,
         )
         if violation:
             return violation
@@ -1119,7 +1122,8 @@ class LedgerService:
         target = dry_run.target_file or _agent_sidecar_target_file(ledger_config)
 
         txn_lines = [
-            line for line in transactions_text.splitlines()
+            line
+            for line in transactions_text.splitlines()
             if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", line)
         ]
         txn_count = len(txn_lines)
@@ -1168,8 +1172,12 @@ class LedgerService:
                 )
 
         preview = self.preview_bulk(
-            workspace, transactions_text, commit_message,
-            None, whitelist, ledger_config,
+            workspace,
+            transactions_text,
+            commit_message,
+            None,
+            whitelist,
+            ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
@@ -1204,9 +1212,7 @@ class LedgerService:
 
         if git_service is None:
             return DependencyUnavailable(error="Git service is not configured")
-        git = git_service.commit_and_push(
-            workspace, commit_message, repo_url, github_token
-        )
+        git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
         if dependency_error := _git_dependency_error(git):
             return dependency_error
 
@@ -1357,13 +1363,15 @@ class LedgerService:
                 if target not in touched:
                     touched.append(target)
                 affected_accounts.add(account_name)
-                display_items.append({
-                    "operation_index": index,
-                    "type": "open_account",
-                    "summary": f"Open {account_name}",
-                    "diff": directive_text,
-                    "target_file": target,
-                })
+                display_items.append(
+                    {
+                        "operation_index": index,
+                        "type": "open_account",
+                        "summary": f"Open {account_name}",
+                        "diff": directive_text,
+                        "target_file": target,
+                    }
+                )
             elif operation_type == "commit_transaction":
                 transaction_text = str(operation.get("transaction_text") or "")
                 violation = self.validate_accounts(
@@ -1386,14 +1394,16 @@ class LedgerService:
                 accounts = self._extract_accounts(transaction_text)
                 affected_accounts.update(accounts)
                 transaction_count += 1
-                display_items.append({
-                    "operation_index": index,
-                    "type": "commit_transaction",
-                    "summary": "Record a transaction",
-                    "diff": transaction_text,
-                    "target_file": target,
-                    "accounts": accounts,
-                })
+                display_items.append(
+                    {
+                        "operation_index": index,
+                        "type": "commit_transaction",
+                        "summary": "Record a transaction",
+                        "diff": transaction_text,
+                        "target_file": target,
+                        "accounts": accounts,
+                    }
+                )
             else:
                 return self._operation_error(
                     operation_index=index,
@@ -1536,9 +1546,7 @@ class LedgerService:
             raise LedgerServiceError("Change-set apply workspace unavailable") from exc
 
         try:
-            git = git_service.commit_and_push(
-                workspace, commit_message, repo_url, github_token
-            )
+            git = git_service.commit_and_push(workspace, commit_message, repo_url, github_token)
         except Exception:
             _restore_repo_files(workspace, originals)
             raise
@@ -1557,36 +1565,34 @@ class LedgerService:
         )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # balance_reconciliation → preview / prepare / confirm
+    # balance_reconciliation → calculate / preview / prepare / confirm
     # ═══════════════════════════════════════════════════════════════════════
 
-    def preview_reconciliation(
+    def calculate_balance_adjustment(
         self,
         workspace: str,
-        mode: str,
-        assertion_date: str,
+        observed_date: str,
         account: str,
         amount: str,
         currency: str,
-        pad_account: str | None = None,
-        tolerance: str | None = None,
+        cutoff: str = "end_of_day",
         ledger_config: LedgerConfig | None = None,
-    ) -> Preview | InvariantViolation | ValidationFailed:
-        """Prepare native Beancount balance directives from a point-in-time balance."""
-        if mode not in {"assert_only", "pad_and_assert"}:
+    ) -> QueryResult | InvariantViolation | ValidationFailed:
+        """Calculate a signed reconciliation difference without proposing a write."""
+        if cutoff not in {"end_of_day", "start_of_day"}:
             return InvariantViolation(
-                invariant="RECONCILIATION_MODE",
+                invariant="RECONCILIATION_CUTOFF",
                 severity="HARD",
-                provided=mode,
-                remediation="Use either assert_only or pad_and_assert.",
+                provided=cutoff,
+                remediation="Use end_of_day or start_of_day for the observed balance cutoff.",
             )
         try:
-            parsed_assertion_date = date.fromisoformat(assertion_date)
+            parsed_observed_date = date.fromisoformat(observed_date)
         except ValueError:
             return InvariantViolation(
                 invariant="RECONCILIATION_DATE_FORMAT",
                 severity="HARD",
-                provided=assertion_date,
+                provided=observed_date,
                 remediation="Provide an ISO date in YYYY-MM-DD format.",
             )
         if not _ACCOUNT_NAME_RE.match(account):
@@ -1602,13 +1608,6 @@ class LedgerService:
                 severity="HARD",
                 provided=currency,
                 remediation="Provide an uppercase Beancount commodity symbol.",
-            )
-        if tolerance not in {None, ""}:
-            return InvariantViolation(
-                invariant="RECONCILIATION_TOLERANCE_UNSUPPORTED",
-                severity="HARD",
-                provided=tolerance,
-                remediation="Tolerance is not supported yet; pass null for tolerance.",
             )
         try:
             target_amount = Decimal(amount)
@@ -1628,22 +1627,11 @@ class LedgerService:
                 provided=[account],
                 remediation="Open the account before preparing a reconciliation.",
             )
-        if mode == "pad_and_assert":
-            if not pad_account or not _ACCOUNT_NAME_RE.match(pad_account):
-                return InvariantViolation(
-                    invariant="RECONCILIATION_PAD_ACCOUNT",
-                    severity="HARD",
-                    provided=pad_account,
-                    remediation="Provide an existing Equity account as pad_account.",
-                )
-            if not pad_account.startswith("Equity:") or pad_account not in existing_accounts:
-                return InvariantViolation(
-                    invariant="RECONCILIATION_PAD_ACCOUNT",
-                    severity="HARD",
-                    provided=pad_account,
-                    remediation="pad_account must be an existing Equity account.",
-                )
-
+        assertion_date = (
+            parsed_observed_date + timedelta(days=1)
+            if cutoff == "end_of_day"
+            else parsed_observed_date
+        ).isoformat()
         balance_result = self._get_reconciliation_balance(
             workspace, account, assertion_date, ledger_config
         )
@@ -1652,46 +1640,123 @@ class LedgerService:
                 error="reconciliation_balance_query_failed",
                 remediation="Resolve the ledger query error and prepare the reconciliation again.",
             )
-        current_amount = _parse_single_currency_balance(
-            balance_result.balance or "0", currency
-        )
+        current_amount = _parse_single_currency_balance(balance_result.balance or "0", currency)
         if isinstance(current_amount, InvariantViolation):
             return current_amount
 
         adjustment = target_amount - current_amount
-        balance_line = (
-            f"{assertion_date} balance {account}  "
-            f"{_format_decimal(target_amount)} {currency}"
+        return QueryResult(
+            status="SUCCESS",
+            account=account,
+            as_of=assertion_date,
+            balance=f"{_format_decimal(current_amount)} {currency}",
+            rows=[
+                {
+                    "observed_date": observed_date,
+                    "cutoff": cutoff,
+                    "assertion_date": assertion_date,
+                    "ledger_balance": f"{_format_decimal(current_amount)} {currency}",
+                    "observed_balance": f"{_format_decimal(target_amount)} {currency}",
+                    "unexplained_difference": f"{_format_decimal(adjustment)} {currency}",
+                }
+            ],
         )
-        directive_text = balance_line
-        if mode == "pad_and_assert":
-            pad_date = (parsed_assertion_date - timedelta(days=1)).isoformat()
-            directive_text = (
-                f"{pad_date} pad {account} {pad_account}\n"
-                f"{balance_line}"
-            )
 
-        if mode == "assert_only" and adjustment != 0:
-            return ValidationFailed(
-                error="balance_assertion_failed",
-                remediation=(
-                    "The current balance does not match the requested assertion. "
-                    "Use pad_and_assert only when an explicit adjustment is appropriate."
-                ),
-                advisory={
-                    "status": "failed",
-                    "current_balance": f"{_format_decimal(current_amount)} {currency}",
-                    "target_balance": f"{_format_decimal(target_amount)} {currency}",
-                    "assertion_status": "fails",
-                },
+    @staticmethod
+    def _existing_balance_assertion(
+        workspace: str,
+        assertion_date: str,
+        account: str,
+        currency: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> Decimal | None:
+        """Find a checkpoint only in the active entry file's include graph."""
+        config = _cfg(ledger_config)
+        try:
+            entries, _errors, _options = loader.load_file(_repo_path(workspace, config.entry_path))
+        except OSError:
+            return None
+        for entry in entries:
+            if (
+                entry.__class__.__name__ == "Balance"
+                and entry.date.isoformat() == assertion_date
+                and entry.account == account
+                and entry.amount.currency == currency
+            ):
+                return Decimal(entry.amount.number)
+        return None
+
+    def preview_balance_reconciliation(
+        self,
+        workspace: str,
+        observed_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        adjustment_account: str,
+        cutoff: str = "end_of_day",
+        allow_existing_checkpoint: bool = False,
+        include_assertion: bool = True,
+        ledger_config: LedgerConfig | None = None,
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Prepare an explicit adjustment transaction and verifiable assertion."""
+        calculation = self.calculate_balance_adjustment(
+            workspace, observed_date, account, amount, currency, cutoff, ledger_config
+        )
+        if not isinstance(calculation, QueryResult):
+            return calculation
+        if not _ACCOUNT_NAME_RE.match(adjustment_account):
+            return InvariantViolation(
+                invariant="RECONCILIATION_ADJUSTMENT_ACCOUNT",
+                severity="HARD",
+                provided=adjustment_account,
+                remediation="Provide an existing explicit adjustment account.",
             )
+        existing_accounts = set(self.get_accounts(workspace, ledger_config))
+        if adjustment_account not in existing_accounts:
+            return InvariantViolation(
+                invariant="RECONCILIATION_ADJUSTMENT_ACCOUNT",
+                severity="HARD",
+                provided=adjustment_account,
+                remediation="The adjustment account must already be open in the ledger.",
+            )
+        details = calculation.rows[0]
+        assertion_date = str(details["assertion_date"])
+        checkpoint_amount = self._existing_balance_assertion(
+            workspace, assertion_date, account, currency, ledger_config
+        )
+        if checkpoint_amount is not None and not allow_existing_checkpoint:
+            return InvariantViolation(
+                invariant="RECONCILIATION_CHECKPOINT_EXISTS",
+                severity="HARD",
+                provided={"account": account, "assertion_date": assertion_date},
+                remediation=(
+                    "Use ledger_prepare_balance_update to repair this existing checkpoint; "
+                    "it will not be replaced automatically."
+                ),
+            )
+        target_amount = Decimal(amount)
+        current_amount = _parse_single_currency_balance(str(calculation.balance), currency)
+        if isinstance(current_amount, InvariantViolation):
+            return current_amount
+        adjustment = target_amount - current_amount
+        transaction_date = (date.fromisoformat(assertion_date) - timedelta(days=1)).isoformat()
+        transaction_text = (
+            f'{transaction_date} * "Balance reconciliation adjustment"\n'
+            f"  {account}  {_format_decimal(adjustment)} {currency}\n"
+            f"  {adjustment_account}  {_format_decimal(-adjustment)} {currency}"
+        )
+        assertion_text = (
+            f"{assertion_date} balance {account}  {_format_decimal(target_amount)} {currency}"
+        )
+        generated_text = (
+            f"{transaction_text}\n\n{assertion_text}" if include_assertion else transaction_text
+        )
 
         dry_run = _run_isolated_validation(
             workspace,
             ledger_config,
-            lambda dry_workspace: _append_to_sidecar(
-                dry_workspace, directive_text, ledger_config
-            ),
+            lambda dry_workspace: _append_to_sidecar(dry_workspace, generated_text, ledger_config),
             "Fix the reconciliation inputs and prepare it again.",
         )
         if dry_run.failure:
@@ -1701,77 +1766,77 @@ class LedgerService:
             proposal_id=f"prop_{uuid.uuid4().hex[:12]}",
             operation="balance_reconciliation",
             preview={
-                "mode": mode,
-                "date": assertion_date,
+                "observed_date": observed_date,
+                "cutoff": cutoff,
+                "assertion_date": assertion_date,
                 "account": account,
+                "adjustment_account": adjustment_account,
                 "currency": currency,
-                "current_balance": f"{_format_decimal(current_amount)} {currency}",
+                "current_balance": str(calculation.balance),
                 "target_balance": f"{_format_decimal(target_amount)} {currency}",
                 "adjustment": f"{_format_decimal(adjustment)} {currency}",
-                "adjustment_direction": (
-                    "from_pad" if adjustment > 0 else "to_pad" if adjustment < 0 else "none"
-                ),
-                "assertion_status": "matches" if adjustment == 0 else "requires_adjustment",
-                "directives": directive_text,
+                "assertion_status": "will_verify",
+                "generated_text": generated_text,
                 "target_file": dry_run.target_file,
                 "validation": asdict(dry_run.validation),
             },
-            message="Balance directives passed dry-run validation. Request explicit approval.",
+            message="Balance reconciliation passed dry-run validation. Request explicit approval.",
         )
 
-    def prepare_reconciliation(
+    def prepare_balance_reconciliation(
         self,
         workspace: str,
-        mode: str,
-        assertion_date: str,
+        observed_date: str,
         account: str,
         amount: str,
         currency: str,
-        pad_account: str | None = None,
-        tolerance: str | None = None,
+        adjustment_account: str = "",
+        cutoff: str = "end_of_day",
         commit_message: str = "",
         ledger_config: LedgerConfig | None = None,
     ) -> PendingAction | InvariantViolation | ValidationFailed:
-        preview = self.preview_reconciliation(
-            workspace, mode, assertion_date, account, amount, currency,
-            pad_account, tolerance, ledger_config,
+        preview = self.preview_balance_reconciliation(
+            workspace,
+            observed_date,
+            account,
+            amount,
+            currency,
+            adjustment_account,
+            cutoff,
+            False,
+            True,
+            ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
         details = preview.preview
-        is_pad = mode == "pad_and_assert"
         return PendingActionService.create_pending_action(
             action_type="balance_reconciliation",
             execution_spec={
-                "mode": mode,
-                "date": assertion_date,
+                "observed_date": observed_date,
+                "cutoff": cutoff,
                 "account": account,
                 "amount": amount,
                 "currency": currency,
-                "pad_account": pad_account if is_pad else None,
-                "tolerance": tolerance or None,
+                "adjustment_account": adjustment_account,
+                "is_checkpoint_update": False,
                 "commit_message": commit_message or "chore(ledger): reconcile balance",
             },
             display={
                 "kind": "balance_reconciliation_preview",
                 "title": "Balance reconciliation",
-                "summary": (
-                    "Prepare a pad and balance assertion"
-                    if is_pad
-                    else "Prepare a balance assertion"
-                ),
-                "mode": mode,
+                "summary": ("Prepare an explicit adjustment transaction and balance assertion"),
+                "observed_date": observed_date,
+                "cutoff": cutoff,
+                "assertion_date": details["assertion_date"],
                 "current_balance": details["current_balance"],
                 "target_balance": details["target_balance"],
-                "adjustment": details["adjustment"] if is_pad else None,
-                "adjustment_direction": details["adjustment_direction"] if is_pad else None,
+                "adjustment": details["adjustment"],
+                "adjustment_account": adjustment_account,
                 "assertion_status": details["assertion_status"],
-                "warning": (
-                    "这可能掩盖尚未录入的交易，确认该差额确实应作为调整项。"
-                    if is_pad else None
-                ),
-                "generated_statements": details["directives"],
-                "diff": details["directives"],
+                "warning": "Confirm that the unexplained difference is an intentional adjustment.",
+                "generated_statements": details["generated_text"],
+                "diff": details["generated_text"],
             },
             validation={
                 "status": "validated",
@@ -1781,29 +1846,117 @@ class LedgerService:
             },
         )
 
-    def confirm_reconciliation(
+    def prepare_balance_update(
         self,
         workspace: str,
-        mode: str,
         assertion_date: str,
+        account: str,
+        currency: str,
+        adjustment_account: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
+        checkpoint_amount = self._existing_balance_assertion(
+            workspace, assertion_date, account, currency, ledger_config
+        )
+        if checkpoint_amount is None:
+            return InvariantViolation(
+                invariant="RECONCILIATION_CHECKPOINT_NOT_FOUND",
+                severity="HARD",
+                provided={"account": account, "assertion_date": assertion_date},
+                remediation=(
+                    "Provide the account, currency, and assertion date of an "
+                    "existing balance checkpoint."
+                ),
+            )
+        observed_date = (date.fromisoformat(assertion_date) - timedelta(days=1)).isoformat()
+        preview = self.preview_balance_reconciliation(
+            workspace,
+            observed_date,
+            account,
+            _format_decimal(checkpoint_amount),
+            currency,
+            adjustment_account,
+            "end_of_day",
+            True,
+            False,
+            ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        details = preview.preview
+        return PendingActionService.create_pending_action(
+            action_type="balance_reconciliation",
+            execution_spec={
+                "observed_date": observed_date,
+                "cutoff": "end_of_day",
+                "account": account,
+                "amount": _format_decimal(checkpoint_amount),
+                "currency": currency,
+                "adjustment_account": adjustment_account,
+                "is_checkpoint_update": True,
+                "commit_message": commit_message or "chore(ledger): update balance checkpoint",
+            },
+            display={
+                "kind": "balance_reconciliation_preview",
+                "title": "Balance checkpoint update",
+                "summary": (
+                    "Prepare an explicit adjustment that restores an existing balance checkpoint."
+                ),
+                "observed_date": observed_date,
+                "cutoff": "end_of_day",
+                "assertion_date": assertion_date,
+                "current_balance": details["current_balance"],
+                "target_balance": details["target_balance"],
+                "adjustment": details["adjustment"],
+                "adjustment_account": adjustment_account,
+                "assertion_status": details["assertion_status"],
+                "warning": (
+                    "This adds a new adjustment; it does not rewrite the earlier "
+                    "transaction or assertion."
+                ),
+                "generated_statements": details["generated_text"],
+                "diff": details["generated_text"],
+            },
+            validation={
+                "status": "validated",
+                "account": account,
+                "target_file": details["target_file"],
+                "dry_run": details["validation"],
+            },
+        )
+
+    def confirm_balance_reconciliation(
+        self,
+        workspace: str,
+        observed_date: str,
         account: str,
         amount: str,
         currency: str,
         repo_url: str,
         git_service: GitService,
-        pad_account: str | None = None,
-        tolerance: str | None = None,
+        adjustment_account: str = "",
+        cutoff: str = "end_of_day",
+        is_checkpoint_update: bool = False,
         commit_message: str = "",
         github_token: str | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
-        preview = self.preview_reconciliation(
-            workspace, mode, assertion_date, account, amount, currency,
-            pad_account, tolerance, ledger_config,
+        preview = self.preview_balance_reconciliation(
+            workspace,
+            observed_date,
+            account,
+            amount,
+            currency,
+            adjustment_account,
+            cutoff,
+            is_checkpoint_update,
+            not is_checkpoint_update,
+            ledger_config,
         )
         if not isinstance(preview, Preview):
             return preview
-        directives = str(preview.preview["directives"])
+        directives = str(preview.preview["generated_text"])
         target = str(preview.preview["target_file"])
         target_path = _repo_path(workspace, target)
         original = _read_repo_file(workspace, target)
@@ -1837,7 +1990,7 @@ class LedgerService:
         return CommitResult(
             outcome="Balance reconciliation validated and committed",
             result={
-                "mode": mode,
+                "observed_date": observed_date,
                 "target_file": target,
                 "directives": directives,
             },
@@ -1941,17 +2094,17 @@ class LedgerService:
                 ledger_config,
             )
         elif action_type == "balance_reconciliation":
-            result = self.confirm_reconciliation(
+            result = self.confirm_balance_reconciliation(
                 workspace,
-                str(spec.get("mode") or ""),
-                str(spec.get("date") or ""),
+                str(spec.get("observed_date") or ""),
                 str(spec.get("account") or ""),
                 str(spec.get("amount") or ""),
                 str(spec.get("currency") or ""),
                 repo_url,
                 git_service,
-                spec.get("pad_account") if isinstance(spec.get("pad_account"), str) else None,
-                spec.get("tolerance") if isinstance(spec.get("tolerance"), str) else None,
+                str(spec.get("adjustment_account") or ""),
+                str(spec.get("cutoff") or "end_of_day"),
+                spec.get("is_checkpoint_update") is True,
                 str(spec.get("commit_message") or ""),
                 github_token,
                 ledger_config,
@@ -1984,7 +2137,7 @@ class LedgerService:
         """Match Beancount balance directives by including descendant accounts."""
         account_pattern = re.escape(account)
         bql = (
-            f'SELECT sum(position) AS balance '
+            f"SELECT sum(position) AS balance "
             f'WHERE account ~ "^{account_pattern}(?::|$)" '
             f"AND date < {as_of_date}"
         )
@@ -2007,14 +2160,12 @@ class LedgerService:
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
         date_clause = f"AND date < {as_of_date}" if as_of_date else ""
-        bql = (
-            f'SELECT sum(position) AS balance '
-            f'WHERE account ~ "^{account}$" {date_clause}'
-        )
+        bql = f'SELECT sum(position) AS balance WHERE account ~ "^{account}$" {date_clause}'
         rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
         if error:
             return QueryResult(
-                status="ERROR", error=error,
+                status="ERROR",
+                error=error,
             )
         balance_raw = rows[0].get("balance", "").strip() if rows else ""
         return QueryResult(
@@ -2086,12 +2237,13 @@ class LedgerService:
     ) -> QueryResult:
         if templates_dir is None:
             templates_dir = os.path.join(
-                os.path.dirname(__file__), "..", "ledger", "query_templates",
+                os.path.dirname(__file__),
+                "..",
+                "ledger",
+                "query_templates",
             )
 
-        available = sorted(
-            f[:-4] for f in os.listdir(templates_dir) if f.endswith(".bql")
-        )
+        available = sorted(f[:-4] for f in os.listdir(templates_dir) if f.endswith(".bql"))
 
         if template_name not in available:
             return QueryResult(
@@ -2102,13 +2254,12 @@ class LedgerService:
         template_path = os.path.join(templates_dir, f"{template_name}.bql")
         try:
             with open(template_path) as f:
-                lines = [
-                    line for line in f if not line.lstrip().startswith("--")
-                ]
+                lines = [line for line in f if not line.lstrip().startswith("--")]
             bql = "".join(lines).strip()
         except FileNotFoundError:
             return QueryResult(
-                status="ERROR", error=f"Template file not found: {template_name}",
+                status="ERROR",
+                error=f"Template file not found: {template_name}",
             )
 
         for key, value in params.items():
@@ -2132,14 +2283,10 @@ class LedgerService:
     ) -> PreflightResult:
         config = _cfg(ledger_config)
         if not _check_sidecar_include(workspace, config):
-            sidecar_include = _include_line(
-                config.entry_path, config.sidecar_main_path
-            )[9:-1]
+            sidecar_include = _include_line(config.entry_path, config.sidecar_main_path)[9:-1]
             return PreflightResult(
                 status="SETUP_REQUIRED",
-                action=(
-                    f'Add include "{sidecar_include}" to {config.entry_path}'
-                ),
+                action=(f'Add include "{sidecar_include}" to {config.entry_path}'),
             )
 
         target = _ensure_agent_sidecar(workspace, config)
@@ -2153,13 +2300,10 @@ class LedgerService:
             with open(path) as f:
                 lines = f.readlines()
             txn_indices = [
-                i for i, line in enumerate(lines)
-                if re.match(r"^\d{4}-\d{2}-\d{2} ", line)
+                i for i, line in enumerate(lines) if re.match(r"^\d{4}-\d{2}-\d{2} ", line)
             ]
             start = (
-                txn_indices[-5]
-                if len(txn_indices) >= 5
-                else (txn_indices[0] if txn_indices else 0)
+                txn_indices[-5] if len(txn_indices) >= 5 else (txn_indices[0] if txn_indices else 0)
             )
             recent = "".join(lines[start:]).strip()
         except OSError:

@@ -23,6 +23,7 @@ _ingestion = IngestionService()
 # Read tools
 # ---------------------------------------------------------------------------
 
+
 @tool("ledger_preflight")
 def tool_preflight(config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:  # pyright: ignore[reportArgumentType]
     """Refresh the deterministic preflight check on the Beancount ledger.
@@ -334,6 +335,7 @@ def tool_run_python(
 # Write tools — model-visible mutation intents plus execution-only confirm functions
 # ---------------------------------------------------------------------------
 
+
 @tool("ledger_commit_transaction")
 def tool_ledger_commit_transaction(
     transaction_text: str,
@@ -358,9 +360,7 @@ def tool_ledger_commit_transaction(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_commit(
-        ws, transaction_text, commit_message, whitelist, ledger_config
-    )
+    result = _gateway.prepare_commit(ws, transaction_text, commit_message, whitelist, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -526,50 +526,90 @@ def tool_ledger_prepare_change_set(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("ledger_prepare_reconciliation")
-def tool_ledger_prepare_reconciliation(
-    mode: str,
-    date: str,
+@tool("ledger_calculate_balance_adjustment")
+def tool_ledger_calculate_balance_adjustment(
+    observed_date: str,
     account: str,
     amount: str,
     currency: str,
-    pad_account: str = "",
-    tolerance: str = "",
-    commit_message: str = "",
+    cutoff: str = "end_of_day",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Prepare native Beancount balance directives for explicit approval.
+    """Calculate the ledger balance and signed unexplained difference without writing.
 
-    Use this for a requested balance assertion, reconciliation, pad directive,
-    or automatic adjustment. `assert_only` produces a balance directive.
-    `pad_and_assert` produces an ordered pad plus balance pair and requires an
-    existing Equity pad_account. This tool never writes or applies changes.
-
-    Args:
-        mode: Either assert_only or pad_and_assert.
-        date: Assertion date in YYYY-MM-DD format.
-        account: Existing account whose balance is being reconciled.
-        amount: Target decimal amount, without a currency symbol.
-        currency: Target commodity symbol (for example CNY).
-        pad_account: Existing Equity account for pad_and_assert; empty otherwise.
-        tolerance: Must be empty; tolerance directives are not supported yet.
-        commit_message: Optional Git commit message used after human approval.
+    observed_date and cutoff define the observation precisely. End-of-day is the
+    default: postings through observed_date are included and the assertion would
+    be dated the following day. Start-of-day includes only earlier postings.
     """
     c = config.get("configurable", {})
-    result = _gateway.prepare_reconciliation(
+    result = _gateway.calculate_balance_adjustment(
         c.get("workspace", ""),
-        mode,
-        date,
+        observed_date,
         account,
         amount,
         currency,
-        pad_account or None,
-        tolerance or None,
+        cutoff,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
+@tool("ledger_prepare_balance_reconciliation")
+def tool_ledger_prepare_balance_reconciliation(
+    observed_date: str,
+    account: str,
+    amount: str,
+    currency: str,
+    adjustment_account: str,
+    cutoff: str = "end_of_day",
+    commit_message: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Prepare an approval-gated explicit balance adjustment and assertion.
+
+    adjustment_account must already exist and is never inferred. This tool never
+    writes until the user approves the exact generated transaction and assertion.
+    """
+    c = config.get("configurable", {})
+    result = _gateway.prepare_balance_reconciliation(
+        c.get("workspace", ""),
+        observed_date,
+        account,
+        amount,
+        currency,
+        adjustment_account,
+        cutoff,
         commit_message,
         c.get("ledger_config"),
     )
     return _json_mod.dumps(dataclasses.asdict(result))
 
+
+@tool("ledger_prepare_balance_update")
+def tool_ledger_prepare_balance_update(
+    assertion_date: str,
+    account: str,
+    currency: str,
+    adjustment_account: str,
+    commit_message: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Prepare an explicit adjustment for an existing failed balance checkpoint.
+
+    The original transaction and assertion remain unchanged. The user must review
+    and approve the new adjustment transaction.
+    """
+    c = config.get("configurable", {})
+    result = _gateway.prepare_balance_update(
+        c.get("workspace", ""),
+        assertion_date,
+        account,
+        currency,
+        adjustment_account,
+        commit_message,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
 
 
 # ---------------------------------------------------------------------------
@@ -582,11 +622,13 @@ TRANSACTION_TOOLS = [
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,
-    tool_ledger_prepare_reconciliation,
+    tool_ledger_prepare_balance_reconciliation,
+    tool_ledger_prepare_balance_update,
 ]
 
 ANALYTICS_TOOLS = [
     tool_account_balance,
+    tool_ledger_calculate_balance_adjustment,
     tool_find_transactions,
     tool_query_template,
     tool_query,
