@@ -178,6 +178,35 @@ class ToolExecutionGateway:
             ),
         )
 
+    def prepare_reconciliation(
+        self,
+        workspace: str,
+        mode: str,
+        assertion_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        pad_account: str | None = None,
+        tolerance: str | None = None,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_reconciliation",
+            lambda: self._ledger.prepare_reconciliation(
+                workspace,
+                mode,
+                assertion_date,
+                account,
+                amount,
+                currency,
+                pad_account,
+                tolerance,
+                commit_message,
+                ledger_config,
+            ),
+        )
+
     def apply_approved_action(
         self,
         *,

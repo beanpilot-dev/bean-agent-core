@@ -791,6 +791,164 @@ def test_prepare_change_set_bulk_sized_transaction_set_is_high_risk(
     assert result.policy["requires_elevated_review"] is True
 
 
+def test_prepare_reconciliation_assert_only_materializes_pending_action(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "assert_only",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5000.00",
+        "CNY",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.action_type == "balance_reconciliation"
+    assert result.display["kind"] == "balance_reconciliation_preview"
+    assert result.display["current_balance"] == "5000 CNY"
+    assert "balance Assets:Bank:Checking  5000 CNY" in result.display["diff"]
+    assert result.validation["dry_run"]["status"] == "validated"
+
+
+def test_prepare_reconciliation_pad_and_assert_calculates_adjustment(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5120",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.display["adjustment"] == "120 CNY"
+    assert result.display["warning"]
+    assert result.display["diff"].splitlines() == [
+        "2026-05-31 pad Assets:Bank:Checking Equity:Opening-Balances",
+        "2026-06-01 balance Assets:Bank:Checking  5120 CNY",
+    ]
+
+
+def test_prepare_reconciliation_rejects_non_equity_pad_account(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5120",
+        "CNY",
+        "Assets:Cash",
+    )
+
+    assert isinstance(result, InvariantViolation)
+    assert result.invariant == "RECONCILIATION_PAD_ACCOUNT"
+
+
+def test_prepare_reconciliation_rejects_tolerance_until_supported(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "assert_only",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5000",
+        "CNY",
+        tolerance="0.01",
+    )
+
+    assert isinstance(result, InvariantViolation)
+    assert result.invariant == "RECONCILIATION_TOLERANCE_UNSUPPORTED"
+
+
+def test_prepare_reconciliation_reports_a_failed_assertion_without_pending_action(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "assert_only",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5120",
+        "CNY",
+    )
+
+    assert isinstance(result, ValidationFailed)
+    assert result.error == "balance_assertion_failed"
+    assert result.advisory["assertion_status"] == "fails"
+    assert result.advisory["current_balance"] == "5000 CNY"
+
+
+def test_prepare_reconciliation_uses_descendant_balance_for_parent_account(
+    ledger_workspace: Path,
+) -> None:
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    sidecar_main.write_text("2020-01-01 open Assets:Bank CNY\n" + sidecar_main.read_text())
+
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank",
+        "5120",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.display["current_balance"] == "5000 CNY"
+    assert result.display["adjustment"] == "120 CNY"
+
+
+def test_prepare_reconciliation_marks_negative_pad_direction(
+    ledger_workspace: Path,
+) -> None:
+    result = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "4880",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+
+    assert isinstance(result, PendingAction)
+    assert result.display["adjustment"] == "-120 CNY"
+    assert result.display["adjustment_direction"] == "to_pad"
+
+
+def test_apply_pending_reconciliation_commits_directives(
+    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    pending = LedgerService().prepare_reconciliation(
+        str(ledger_workspace),
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5120",
+        "CNY",
+        "Equity:Opening-Balances",
+    )
+    assert isinstance(pending, PendingAction)
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
+    )
+
+    assert isinstance(result, ApplyReceipt)
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    assert "pad Assets:Bank:Checking Equity:Opening-Balances" in target.read_text()
+    git_service.commit_and_push.assert_called_once()
+
+
 def test_bulk_supports_staging_file(
     ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

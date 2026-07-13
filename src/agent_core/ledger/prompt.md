@@ -144,6 +144,14 @@ For diagnostics:
 * distinguish a general explanation from a ledger-specific diagnosis
 * do not recommend arbitrary balancing entries, Pad directives, or Equity adjustments merely to silence an unexplained discrepancy
 
+For an explicit, supported reconciliation request (a balance assertion,
+reconciliation, Pad directive, automatic adjustment, or balance check), use
+`ledger_prepare_reconciliation`. Use `assert_only` when the user wants a native
+balance assertion without an adjustment. Use `pad_and_assert` only when the user
+has explicitly approved an Equity-backed adjustment account. Do not substitute
+an ordinary transaction for these native directive semantics, and do not use a
+Pad or Equity adjustment merely to make an unexplained discrepancy disappear.
+
 For imports:
 
 * do not confidently categorize an unknown merchant without supported evidence or an established user convention

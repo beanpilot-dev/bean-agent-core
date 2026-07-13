@@ -8,6 +8,7 @@ from agent_core.workflow.tools import (
     tool_ledger_commit_transaction,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,
+    tool_ledger_prepare_reconciliation,
 )
 
 TXN = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
@@ -31,6 +32,7 @@ def test_model_tool_manifest_excludes_execution_tools() -> None:
     assert "ledger_import_transactions" in model_names
     assert "ledger_open_account" in model_names
     assert "ledger_prepare_change_set" in model_names
+    assert "ledger_prepare_reconciliation" in model_names
     assert "ledger_preflight" not in model_names
     assert "prepare_commit" not in model_names
     assert "prepare_open" not in model_names
@@ -142,6 +144,30 @@ def test_ledger_prepare_change_set_returns_approval_required_without_write(
     assert len(payload["display"]["items"]) == 2
     assert sidecar_main.read_text() == original_main
     assert month_file.read_text() == original_month
+
+
+def test_ledger_prepare_reconciliation_returns_approval_required_without_write(
+    ledger_workspace: Path,
+) -> None:
+    target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original = target.read_text()
+
+    raw = tool_ledger_prepare_reconciliation.func(
+        "pad_and_assert",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5120",
+        "CNY",
+        "Equity:Opening-Balances",
+        config={"configurable": {"workspace": str(ledger_workspace)}},
+    )
+    payload = json.loads(raw)
+
+    assert payload["status"] == "approval_required"
+    assert payload["tool_name"] == "ledger_prepare_reconciliation"
+    assert payload["action_type"] == "balance_reconciliation"
+    assert payload["display"]["kind"] == "balance_reconciliation_preview"
+    assert target.read_text() == original
 
 
 def test_ledger_commit_transaction_returns_repairable_validation_failure(

@@ -486,6 +486,7 @@ def test_default_model_manifest_excludes_confirm_tools():
     assert "ledger_update_transaction" in tool_names
     assert "ledger_import_transactions" in tool_names
     assert "ledger_open_account" in tool_names
+    assert "ledger_prepare_reconciliation" in tool_names
     assert "prepare_commit" not in tool_names
 
 

@@ -526,6 +526,51 @@ def tool_ledger_prepare_change_set(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_prepare_reconciliation")
+def tool_ledger_prepare_reconciliation(
+    mode: str,
+    date: str,
+    account: str,
+    amount: str,
+    currency: str,
+    pad_account: str = "",
+    tolerance: str = "",
+    commit_message: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Prepare native Beancount balance directives for explicit approval.
+
+    Use this for a requested balance assertion, reconciliation, pad directive,
+    or automatic adjustment. `assert_only` produces a balance directive.
+    `pad_and_assert` produces an ordered pad plus balance pair and requires an
+    existing Equity pad_account. This tool never writes or applies changes.
+
+    Args:
+        mode: Either assert_only or pad_and_assert.
+        date: Assertion date in YYYY-MM-DD format.
+        account: Existing account whose balance is being reconciled.
+        amount: Target decimal amount, without a currency symbol.
+        currency: Target commodity symbol (for example CNY).
+        pad_account: Existing Equity account for pad_and_assert; empty otherwise.
+        tolerance: Must be empty; tolerance directives are not supported yet.
+        commit_message: Optional Git commit message used after human approval.
+    """
+    c = config.get("configurable", {})
+    result = _gateway.prepare_reconciliation(
+        c.get("workspace", ""),
+        mode,
+        date,
+        account,
+        amount,
+        currency,
+        pad_account or None,
+        tolerance or None,
+        commit_message,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
 
 # ---------------------------------------------------------------------------
 # Tool groups — default model tools.
@@ -537,6 +582,7 @@ TRANSACTION_TOOLS = [
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,
+    tool_ledger_prepare_reconciliation,
 ]
 
 ANALYTICS_TOOLS = [

@@ -128,7 +128,7 @@ def preflight_report(workspace: str) -> str:
 
 def get_balance(workspace: str, account: str, as_of_date: str | None = None) -> str:
     """Query the current balance of a specific account. Returns a JSON string."""
-    date_clause = f'AND date < "{as_of_date}"' if as_of_date else ""
+    date_clause = f"AND date < {as_of_date}" if as_of_date else ""
     bql = f'SELECT sum(position) AS balance WHERE account ~ "^{account}$" {date_clause}'
 
     rows, error = bc.run_bql_rows(workspace, bql)

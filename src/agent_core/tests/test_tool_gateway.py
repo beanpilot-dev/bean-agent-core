@@ -187,6 +187,23 @@ def test_gateway_prepare_change_set_uses_model_visible_tool_name(
     assert outcome.pending_action["execution_spec"]["commit_message"] == "record savings transfer"
 
 
+def test_gateway_prepare_reconciliation_uses_model_visible_tool_name(
+    ledger_workspace: Path,
+) -> None:
+    outcome = ToolExecutionGateway().prepare_reconciliation(
+        str(ledger_workspace),
+        "assert_only",
+        "2026-06-01",
+        "Assets:Bank:Checking",
+        "5000",
+        "CNY",
+    )
+
+    assert isinstance(outcome, ToolApprovalRequired)
+    assert outcome.tool_name == "ledger_prepare_reconciliation"
+    assert outcome.action_type == "balance_reconciliation"
+
+
 def test_gateway_maps_successful_read_result_to_completed() -> None:
     result = ToolExecutionGateway().normalize(
         "ledger_account_balance",

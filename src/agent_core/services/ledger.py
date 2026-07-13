@@ -26,6 +26,7 @@ import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
 from typing import Callable
 
@@ -99,6 +100,10 @@ _OPEN_ACCOUNT_RE = re.compile(
     re.MULTILINE,
 )
 _AMOUNT_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*\s+[A-Z][A-Z0-9\-]+")
+_CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9\-]*$")
+_INVENTORY_AMOUNT_RE = re.compile(
+    r"(?P<amount>[-+]?\d[\d,]*(?:\.\d+)?)\s+(?P<currency>[A-Z][A-Z0-9\-]*)"
+)
 
 _PENDING_ACTION_SCHEMA_VERSION = 1
 _PENDING_ACTION_TTL_MINUTES = 30
@@ -178,12 +183,62 @@ def _classify_action_risk(action_type: str, validation: dict[str, object]) -> di
     if action_type == "update_transaction":
         risk = "elevated"
         reasons.append("historical_update")
+    if action_type == "balance_reconciliation":
+        risk = "elevated"
+        reasons.append("balance_reconciliation")
     return {
         "version": "risk-policy-v1",
         "risk": risk,
         "reasons": reasons,
         "requires_elevated_review": risk == "high",
     }
+
+
+def _format_decimal(amount: Decimal) -> str:
+    """Render a plain Beancount amount without exponent notation."""
+    rendered = format(amount, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def _parse_single_currency_balance(
+    balance: str,
+    currency: str,
+) -> Decimal | InvariantViolation:
+    if balance.strip() in {"", "0"}:
+        return Decimal("0")
+    positions = [
+        (match.group("amount").replace(",", ""), match.group("currency"))
+        for match in _INVENTORY_AMOUNT_RE.finditer(balance)
+    ]
+    if len(positions) != 1:
+        return InvariantViolation(
+            invariant="RECONCILIATION_MULTI_COMMODITY_BALANCE",
+            severity="HARD",
+            provided=balance,
+            remediation=(
+                "Balance reconciliation requires exactly one commodity in the "
+                "account balance. Reconcile each commodity separately."
+            ),
+        )
+    raw_amount, actual_currency = positions[0]
+    if actual_currency != currency:
+        return InvariantViolation(
+            invariant="RECONCILIATION_CURRENCY_MISMATCH",
+            severity="HARD",
+            provided={"requested": currency, "actual": actual_currency},
+            remediation="Use the account's balance commodity as the reconciliation currency.",
+        )
+    try:
+        return Decimal(raw_amount)
+    except InvalidOperation:
+        return InvariantViolation(
+            invariant="RECONCILIATION_BALANCE_PARSE",
+            severity="HARD",
+            provided=balance,
+            remediation="Inspect the account balance and retry the reconciliation.",
+        )
 # ---------------------------------------------------------------------------
 # Sidecar helpers
 # ---------------------------------------------------------------------------
@@ -1641,6 +1696,290 @@ class LedgerService:
             push_status=git["push"],
         )
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # balance_reconciliation → preview / prepare / confirm
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def preview_reconciliation(
+        self,
+        workspace: str,
+        mode: str,
+        assertion_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        pad_account: str | None = None,
+        tolerance: str | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> Preview | InvariantViolation | ValidationFailed:
+        """Prepare native Beancount balance directives from a point-in-time balance."""
+        if mode not in {"assert_only", "pad_and_assert"}:
+            return InvariantViolation(
+                invariant="RECONCILIATION_MODE",
+                severity="HARD",
+                provided=mode,
+                remediation="Use either assert_only or pad_and_assert.",
+            )
+        try:
+            parsed_assertion_date = date.fromisoformat(assertion_date)
+        except ValueError:
+            return InvariantViolation(
+                invariant="RECONCILIATION_DATE_FORMAT",
+                severity="HARD",
+                provided=assertion_date,
+                remediation="Provide an ISO date in YYYY-MM-DD format.",
+            )
+        if not _ACCOUNT_NAME_RE.match(account):
+            return InvariantViolation(
+                invariant="ACCOUNT_NAME_FORMAT",
+                severity="HARD",
+                provided=account,
+                remediation="Provide a full Beancount account name.",
+            )
+        if not _CURRENCY_RE.match(currency):
+            return InvariantViolation(
+                invariant="RECONCILIATION_CURRENCY_FORMAT",
+                severity="HARD",
+                provided=currency,
+                remediation="Provide an uppercase Beancount commodity symbol.",
+            )
+        if tolerance not in {None, ""}:
+            return InvariantViolation(
+                invariant="RECONCILIATION_TOLERANCE_UNSUPPORTED",
+                severity="HARD",
+                provided=tolerance,
+                remediation="Tolerance is not supported yet; pass null for tolerance.",
+            )
+        try:
+            target_amount = Decimal(amount)
+        except (InvalidOperation, ValueError):
+            return InvariantViolation(
+                invariant="RECONCILIATION_AMOUNT_FORMAT",
+                severity="HARD",
+                provided=amount,
+                remediation="Provide a decimal target amount without currency symbols.",
+            )
+
+        existing_accounts = set(self.get_accounts(workspace, ledger_config))
+        if account not in existing_accounts:
+            return InvariantViolation(
+                invariant="ACCOUNT_WHITELIST",
+                severity="HARD",
+                provided=[account],
+                remediation="Open the account before preparing a reconciliation.",
+            )
+        if mode == "pad_and_assert":
+            if not pad_account or not _ACCOUNT_NAME_RE.match(pad_account):
+                return InvariantViolation(
+                    invariant="RECONCILIATION_PAD_ACCOUNT",
+                    severity="HARD",
+                    provided=pad_account,
+                    remediation="Provide an existing Equity account as pad_account.",
+                )
+            if not pad_account.startswith("Equity:") or pad_account not in existing_accounts:
+                return InvariantViolation(
+                    invariant="RECONCILIATION_PAD_ACCOUNT",
+                    severity="HARD",
+                    provided=pad_account,
+                    remediation="pad_account must be an existing Equity account.",
+                )
+
+        balance_result = self._get_reconciliation_balance(
+            workspace, account, assertion_date, ledger_config
+        )
+        if balance_result.status != "SUCCESS":
+            return ValidationFailed(
+                error="reconciliation_balance_query_failed",
+                remediation="Resolve the ledger query error and prepare the reconciliation again.",
+            )
+        current_amount = _parse_single_currency_balance(
+            balance_result.balance or "0", currency
+        )
+        if isinstance(current_amount, InvariantViolation):
+            return current_amount
+
+        adjustment = target_amount - current_amount
+        balance_line = (
+            f"{assertion_date} balance {account}  "
+            f"{_format_decimal(target_amount)} {currency}"
+        )
+        directive_text = balance_line
+        if mode == "pad_and_assert":
+            pad_date = (parsed_assertion_date - timedelta(days=1)).isoformat()
+            directive_text = (
+                f"{pad_date} pad {account} {pad_account}\n"
+                f"{balance_line}"
+            )
+
+        if mode == "assert_only" and adjustment != 0:
+            return ValidationFailed(
+                error="balance_assertion_failed",
+                remediation=(
+                    "The current balance does not match the requested assertion. "
+                    "Use pad_and_assert only when an explicit adjustment is appropriate."
+                ),
+                advisory={
+                    "status": "failed",
+                    "current_balance": f"{_format_decimal(current_amount)} {currency}",
+                    "target_balance": f"{_format_decimal(target_amount)} {currency}",
+                    "assertion_status": "fails",
+                },
+            )
+
+        dry_run = _run_isolated_validation(
+            workspace,
+            ledger_config,
+            lambda dry_workspace: _append_to_sidecar(
+                dry_workspace, directive_text, ledger_config
+            ),
+            "Fix the reconciliation inputs and prepare it again.",
+        )
+        if dry_run.failure:
+            return dry_run.failure
+
+        return Preview(
+            proposal_id=f"prop_{uuid.uuid4().hex[:12]}",
+            operation="balance_reconciliation",
+            preview={
+                "mode": mode,
+                "date": assertion_date,
+                "account": account,
+                "currency": currency,
+                "current_balance": f"{_format_decimal(current_amount)} {currency}",
+                "target_balance": f"{_format_decimal(target_amount)} {currency}",
+                "adjustment": f"{_format_decimal(adjustment)} {currency}",
+                "adjustment_direction": (
+                    "from_pad" if adjustment > 0 else "to_pad" if adjustment < 0 else "none"
+                ),
+                "assertion_status": "matches" if adjustment == 0 else "requires_adjustment",
+                "directives": directive_text,
+                "target_file": dry_run.target_file,
+                "validation": asdict(dry_run.validation),
+            },
+            message="Balance directives passed dry-run validation. Request explicit approval.",
+        )
+
+    def prepare_reconciliation(
+        self,
+        workspace: str,
+        mode: str,
+        assertion_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        pad_account: str | None = None,
+        tolerance: str | None = None,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | InvariantViolation | ValidationFailed:
+        preview = self.preview_reconciliation(
+            workspace, mode, assertion_date, account, amount, currency,
+            pad_account, tolerance, ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        details = preview.preview
+        is_pad = mode == "pad_and_assert"
+        return self._make_pending_action(
+            action_type="balance_reconciliation",
+            execution_spec={
+                "mode": mode,
+                "date": assertion_date,
+                "account": account,
+                "amount": amount,
+                "currency": currency,
+                "pad_account": pad_account if is_pad else None,
+                "tolerance": tolerance or None,
+                "commit_message": commit_message or "chore(ledger): reconcile balance",
+            },
+            display={
+                "kind": "balance_reconciliation_preview",
+                "title": "Balance reconciliation",
+                "summary": "Prepare a pad and balance assertion" if is_pad else "Prepare a balance assertion",
+                "mode": mode,
+                "current_balance": details["current_balance"],
+                "target_balance": details["target_balance"],
+                "adjustment": details["adjustment"] if is_pad else None,
+                "adjustment_direction": details["adjustment_direction"] if is_pad else None,
+                "assertion_status": details["assertion_status"],
+                "warning": (
+                    "这可能掩盖尚未录入的交易，确认该差额确实应作为调整项。"
+                    if is_pad else None
+                ),
+                "generated_statements": details["directives"],
+                "diff": details["directives"],
+            },
+            validation={
+                "status": "validated",
+                "account": account,
+                "target_file": details["target_file"],
+                "dry_run": details["validation"],
+            },
+        )
+
+    def confirm_reconciliation(
+        self,
+        workspace: str,
+        mode: str,
+        assertion_date: str,
+        account: str,
+        amount: str,
+        currency: str,
+        repo_url: str,
+        git_service: GitService,
+        pad_account: str | None = None,
+        tolerance: str | None = None,
+        commit_message: str = "",
+        github_token: str | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> CommitResult | ValidationFailed | DependencyUnavailable | InvariantViolation:
+        preview = self.preview_reconciliation(
+            workspace, mode, assertion_date, account, amount, currency,
+            pad_account, tolerance, ledger_config,
+        )
+        if not isinstance(preview, Preview):
+            return preview
+        directives = str(preview.preview["directives"])
+        target = str(preview.preview["target_file"])
+        target_path = _repo_path(workspace, target)
+        original = _read_repo_file(workspace, target)
+        try:
+            _append_to_sidecar(workspace, directives, ledger_config)
+            is_clean, check_output = Beancount.bean_check(workspace, ledger_config)
+            if not is_clean:
+                _write_repo_file(workspace, target, original)
+                Beancount.invalidate_cache(workspace, ledger_config)
+                return _validation_failure(
+                    check_output, "Fix the reconciliation inputs and prepare it again."
+                )
+            Beancount.bean_format(workspace, target_path)
+        except OSError as exc:
+            _write_repo_file(workspace, target, original)
+            raise LedgerServiceError("Balance reconciliation apply failed") from exc
+
+        try:
+            git = git_service.commit_and_push(
+                workspace,
+                commit_message or "chore(ledger): reconcile balance",
+                repo_url,
+                github_token,
+            )
+        except Exception:
+            _write_repo_file(workspace, target, original)
+            raise
+        if dependency_error := _git_dependency_error(git):
+            _write_repo_file(workspace, target, original)
+            return dependency_error
+        return CommitResult(
+            outcome="Balance reconciliation validated and committed",
+            result={
+                "mode": mode,
+                "target_file": target,
+                "directives": directives,
+            },
+            push_status=git["push"],
+        )
+
     def apply_pending_action(
         self,
         workspace: str,
@@ -1737,6 +2076,22 @@ class LedgerService:
                 whitelist,
                 ledger_config,
             )
+        elif action_type == "balance_reconciliation":
+            result = self.confirm_reconciliation(
+                workspace,
+                str(spec.get("mode") or ""),
+                str(spec.get("date") or ""),
+                str(spec.get("account") or ""),
+                str(spec.get("amount") or ""),
+                str(spec.get("currency") or ""),
+                repo_url,
+                git_service,
+                spec.get("pad_account") if isinstance(spec.get("pad_account"), str) else None,
+                spec.get("tolerance") if isinstance(spec.get("tolerance"), str) else None,
+                str(spec.get("commit_message") or ""),
+                github_token,
+                ledger_config,
+            )
         else:
             return IntegrityFailed(
                 pending_action_id=str(action.get("pending_action_id") or ""),
@@ -1756,13 +2111,38 @@ class LedgerService:
     # ═══════════════════════════════════════════════════════════════════════
 
     @staticmethod
+    def _get_reconciliation_balance(
+        workspace: str,
+        account: str,
+        as_of_date: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> QueryResult:
+        """Match Beancount balance directives by including descendant accounts."""
+        account_pattern = re.escape(account)
+        bql = (
+            f'SELECT sum(position) AS balance '
+            f'WHERE account ~ "^{account_pattern}(?::|$)" '
+            f"AND date < {as_of_date}"
+        )
+        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
+        if error:
+            return QueryResult(status="ERROR", error=error)
+        balance_raw = rows[0].get("balance", "").strip() if rows else ""
+        return QueryResult(
+            status="SUCCESS",
+            account=account,
+            as_of=as_of_date,
+            balance=balance_raw if balance_raw else "0",
+        )
+
+    @staticmethod
     def get_balance(
         workspace: str,
         account: str,
         as_of_date: str | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
-        date_clause = f'AND date < "{as_of_date}"' if as_of_date else ""
+        date_clause = f"AND date < {as_of_date}" if as_of_date else ""
         bql = (
             f'SELECT sum(position) AS balance '
             f'WHERE account ~ "^{account}$" {date_clause}'
