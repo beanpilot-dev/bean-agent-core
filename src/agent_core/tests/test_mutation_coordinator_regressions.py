@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -10,7 +11,13 @@ import pytest
 
 from agent_core.services.beancount import Beancount
 from agent_core.services.ledger import LedgerService
-from agent_core.services.mutations import MutationCoordinator, MutationPlanner
+from agent_core.services.mutations import (
+    MutationApplier,
+    MutationCoordinator,
+    MutationExecutor,
+    MutationPlanner,
+    MutationValidator,
+)
 from agent_core.services.mutations.plans import MutationPlan
 from agent_core.services.pending_actions import PendingActionService
 from agent_core.services.types import ApplyReceipt
@@ -20,6 +27,61 @@ TXN = (
     "  Expenses:Food:Dining  100 CNY\n"
     "  Assets:Cash          -100 CNY"
 )
+
+
+class _CleanValidator:
+    def check(self, _workspace: str, _config: object = None) -> tuple[bool, str]:
+        return True, ""
+
+
+class _NoopFormatter:
+    def format(self, _workspace: str, _path: str) -> None:
+        return None
+
+
+class _SpyApplier(MutationApplier):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, MutationPlan]] = []
+
+    def apply(self, workspace: str, plan: MutationPlan, config: object = None) -> tuple[str, ...]:
+        self.calls.append((workspace, plan))
+        return super().apply(workspace, plan, config)  # type: ignore[arg-type]
+
+
+def test_validator_has_no_publish_capability_and_does_not_call_publisher(
+    ledger_workspace: Path,
+) -> None:
+    """Validation receives only an applier and validator, never a Git publisher."""
+    validator = MutationValidator(ledger_validator=_CleanValidator())
+
+    result = validator.validate(str(ledger_workspace), MutationPlanner.commit(TXN, "record dinner"))
+
+    assert result.validation.status == "validated"
+    assert not hasattr(validator, "apply_and_publish")
+    assert "publisher" not in inspect.signature(MutationValidator).parameters
+
+
+def test_validator_and_executor_share_the_same_operation_applier(ledger_workspace: Path) -> None:
+    """Dry-run and approval replay the plan through one injected applier."""
+    applier = _SpyApplier()
+    plan = MutationPlanner.commit(TXN, "record dinner")
+    validator = MutationValidator(applier, _CleanValidator())
+    executor = MutationExecutor(applier, _CleanValidator(), _NoopFormatter())
+    publisher = type(
+        "Publisher",
+        (), {"commit_and_push": lambda *_args: {"ok": True, "push": "PUSHED"}},
+    )()
+
+    validated = validator.validate(str(ledger_workspace), plan)
+    touched, git, failure = executor.apply_and_publish(
+        str(ledger_workspace), plan, "repo", publisher
+    )
+
+    assert validated.touched_files == touched
+    assert git["ok"] is True
+    assert failure == ""
+    assert len(applier.calls) == 2
+    assert all(call_plan is plan for _, call_plan in applier.calls)
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:

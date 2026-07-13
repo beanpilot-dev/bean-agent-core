@@ -131,9 +131,11 @@ class MutationPlan:
             if digest is not None and not isinstance(digest, str):
                 raise ValueError("Mutation plan precondition is invalid")
             conditions.append(FilePrecondition(condition["path"], digest))
-        raw_facts = value.get("semantic_facts", [])
+        raw_facts = value.get("semantic_facts")
         if version == _PLAN_SCHEMA_VERSION and not isinstance(raw_facts, list):
             raise ValueError("Mutation plan semantic facts are invalid")
+        if version == _LEGACY_PLAN_SCHEMA_VERSION and raw_facts is None:
+            raw_facts = []
         if not isinstance(raw_facts, list) or not all(isinstance(fact, dict) for fact in raw_facts):
             raise ValueError("Mutation plan semantic facts are invalid")
         return cls(
