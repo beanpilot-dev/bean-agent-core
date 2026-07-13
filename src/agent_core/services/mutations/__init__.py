@@ -9,7 +9,14 @@ from .coordinator import MutationCoordinator
 from .planners import MutationPlanner
 from .plans import MutationOperation, MutationPlan
 from .preparation import MutationPreparationService
-from .publisher import RepositoryPublisher
+from .publisher import (
+    MutationCommitMarker,
+    PublicationReconciliation,
+    PublishReceipt,
+    PublishRequest,
+    ReconciledRepositoryPublisher,
+    RepositoryPublisher,
+)
 
 __all__ = [
     "MutationCoordinator",
@@ -17,5 +24,10 @@ __all__ = [
     "MutationPlan",
     "MutationPlanner",
     "MutationPreparationService",
+    "MutationCommitMarker",
+    "PublicationReconciliation",
+    "PublishReceipt",
+    "PublishRequest",
+    "ReconciledRepositoryPublisher",
     "RepositoryPublisher",
 ]
