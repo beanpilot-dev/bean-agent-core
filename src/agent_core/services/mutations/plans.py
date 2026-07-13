@@ -4,8 +4,11 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .facts import SemanticFact
+
 OperationKind = Literal["append", "open", "replace"]
-_PLAN_SCHEMA_VERSION = 1
+_PLAN_SCHEMA_VERSION = 2
+_LEGACY_PLAN_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class MutationPlan:
     commit_message: str
     remediation: str
     preconditions: tuple[FilePrecondition, ...] = field(default_factory=tuple)
+    semantic_facts: tuple[SemanticFact, ...] = field(default_factory=tuple)
     schema_version: int = _PLAN_SCHEMA_VERSION
 
     @classmethod
@@ -82,7 +86,20 @@ class MutationPlan:
 
     def with_preconditions(self, conditions: list[FilePrecondition]) -> "MutationPlan":
         return MutationPlan(
-            self.operations, self.commit_message, self.remediation, tuple(conditions)
+            self.operations,
+            self.commit_message,
+            self.remediation,
+            tuple(conditions),
+            self.semantic_facts,
+        )
+
+    def with_semantic_facts(self, facts: tuple[SemanticFact, ...]) -> "MutationPlan":
+        return MutationPlan(
+            self.operations,
+            self.commit_message,
+            self.remediation,
+            self.preconditions,
+            facts,
         )
 
     def to_spec(self) -> dict[str, object]:
@@ -92,11 +109,13 @@ class MutationPlan:
             "commit_message": self.commit_message,
             "remediation": self.remediation,
             "preconditions": [condition.to_spec() for condition in self.preconditions],
+            "semantic_facts": [fact.to_spec() for fact in self.semantic_facts],
         }
 
     @classmethod
     def from_spec(cls, value: dict[str, object]) -> "MutationPlan":
-        if value.get("version") != _PLAN_SCHEMA_VERSION:
+        version = value.get("version")
+        if version not in {_LEGACY_PLAN_SCHEMA_VERSION, _PLAN_SCHEMA_VERSION}:
             raise ValueError("Unsupported mutation plan version")
         raw_operations = value.get("operations")
         raw_conditions = value.get("preconditions")
@@ -112,9 +131,16 @@ class MutationPlan:
             if digest is not None and not isinstance(digest, str):
                 raise ValueError("Mutation plan precondition is invalid")
             conditions.append(FilePrecondition(condition["path"], digest))
+        raw_facts = value.get("semantic_facts", [])
+        if version == _PLAN_SCHEMA_VERSION and not isinstance(raw_facts, list):
+            raise ValueError("Mutation plan semantic facts are invalid")
+        if not isinstance(raw_facts, list) or not all(isinstance(fact, dict) for fact in raw_facts):
+            raise ValueError("Mutation plan semantic facts are invalid")
         return cls(
             tuple(MutationOperation.from_spec(item) for item in raw_operations),
             str(value.get("commit_message") or ""),
             str(value.get("remediation") or ""),
             tuple(conditions),
+            tuple(SemanticFact.from_spec(fact) for fact in raw_facts),
+            schema_version=int(version),
         )

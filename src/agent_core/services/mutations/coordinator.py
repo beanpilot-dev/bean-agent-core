@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from ..beancount import Beancount, _cfg, _repo_path
 from ..types import LedgerConfig, ValidationSummary
 from . import sidecar
+from .facts import capture_ledger_read_facts, semantic_facts_hold
 from .plans import FilePrecondition, MutationPlan
 from .publisher import RepositoryPublisher
 
@@ -125,17 +126,21 @@ class MutationCoordinator:
             operation.target_file for operation in plan.operations if operation.target_file
         )
         originals = sidecar.snapshot(workspace, list(dict.fromkeys(paths)))
-        return plan.with_preconditions(
+        sealed = plan.with_preconditions(
             [FilePrecondition.from_content(path, content) for path, content in originals.items()]
         )
+        return sealed.with_semantic_facts(capture_ledger_read_facts(workspace, config))
 
     @staticmethod
     def _preconditions_hold(workspace: str, plan: MutationPlan) -> bool:
         originals = sidecar.snapshot(
             workspace, [condition.path for condition in plan.preconditions]
         )
-        return all(
+        files_hold = all(
             FilePrecondition.from_content(condition.path, originals[condition.path]).digest
             == condition.digest
             for condition in plan.preconditions
+        )
+        return files_hold and (
+            not plan.semantic_facts or semantic_facts_hold(workspace, plan.semantic_facts)
         )
