@@ -12,7 +12,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-from ..pending_actions import PendingActionService
+from ..approvals.contracts import PendingActionService
 from ..queries import LedgerQueryService
 from ..types import InvariantViolation, LedgerConfig, PendingAction, Preview, ValidationSummary
 from .facts import capture_account_state_fact

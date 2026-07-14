@@ -6,6 +6,9 @@ from unittest.mock import Mock
 
 import pytest
 
+from agent_core.services.approvals.gateway import (
+    ToolExecutionGateway as PackagedToolExecutionGateway,
+)
 from agent_core.services.ledger import Beancount
 from agent_core.services.pending_actions import digest_payload
 from agent_core.services.tool_gateway import ToolExecutionGateway
@@ -222,3 +225,7 @@ def test_model_visible_tools_do_not_expose_apply_or_confirm() -> None:
     assert "apply_approved_action" not in names
     assert not any(name.startswith("confirm_") for name in names)
     assert not any(name.startswith("prepare_") for name in names)
+
+
+def test_legacy_tool_gateway_import_is_the_packaged_gateway() -> None:
+    assert ToolExecutionGateway is PackagedToolExecutionGateway

@@ -16,14 +16,14 @@ where confirm_* re-runs preview validation internally.
 The tool layer (agent.py) wraps services for LLM consumption.
 """
 
+from .approvals.contracts import PendingActionService, digest_payload
+from .approvals.gateway import ToolExecutionGateway
 from .ingestion import IngestionService
 from .ledger import LedgerService
 from .orchestrator import AgentOrchestrator
-from .pending_actions import PendingActionService, digest_payload
 from .preflight import PreflightService
 from .prices import PriceService
 from .queries import LedgerQueryService
-from .tool_gateway import ToolExecutionGateway
 from .types import (
     DEFAULT_LEDGER_CONFIG,
     ApplyReceipt,

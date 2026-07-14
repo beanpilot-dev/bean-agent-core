@@ -3,6 +3,9 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from agent_core.services.onboarding import OnboardingService
+from agent_core.services.onboarding.discovery import OnboardingDiscoveryService
+from agent_core.services.onboarding.paths import SafePathService
+from agent_core.services.onboarding.setup import OnboardingSetupService
 
 
 def test_discover_clean_repo(tmp_path: Path) -> None:
@@ -57,8 +60,7 @@ def test_discovery_validates_only_top_candidates(tmp_path: Path, monkeypatch) ->
 
     assert len(checked) == OnboardingService.MAX_DISCOVERY_VALIDATIONS
     assert any(
-        candidate["validation"]["status"] == "not_checked"
-        for candidate in result["candidates"]
+        candidate["validation"]["status"] == "not_checked" for candidate in result["candidates"]
     )
 
 
@@ -191,6 +193,22 @@ def test_confirm_initialize_ledger_clean_repo(tmp_path: Path) -> None:
     assert (tmp_path / "data" / "agent_inc" / "main.beancount").exists()
 
 
+def test_setup_service_confirms_initialize_ledger_directly(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    result = OnboardingSetupService.confirm(
+        str(tmp_path),
+        operation="initialize_ledger",
+        expected_head_sha="",
+        repo_url="ignored",
+        git_service=FakeGit(),
+        token=None,
+    )
+
+    assert result["status"] == "success"
+    assert (tmp_path / "data" / "main.beancount").exists()
+
+
 def test_initialize_ledger_uses_selected_title_and_currency(tmp_path: Path) -> None:
     init_repo(tmp_path)
 
@@ -284,9 +302,7 @@ def test_confirm_install_sidecar_existing_repo(tmp_path: Path) -> None:
     assert 'include "agent_inc/main.beancount"' in entry.read_text()
 
 
-def test_confirm_rolls_back_on_bean_check_failure(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_confirm_rolls_back_on_bean_check_failure(tmp_path: Path, monkeypatch) -> None:
     init_repo(tmp_path)
     data = tmp_path / "data"
     data.mkdir()
@@ -330,3 +346,20 @@ def test_confirm_reports_push_failure(tmp_path: Path) -> None:
 
     assert result["status"] == "dependency_unavailable"
     assert result["code"] == "GIT_PUSH_FAILED"
+
+
+def test_onboarding_package_entry_points_preserve_facade_behavior(tmp_path: Path) -> None:
+    assert OnboardingDiscoveryService.discover(str(tmp_path)) == OnboardingService.discover(
+        str(tmp_path)
+    )
+    assert SafePathService.validate_repo_path(
+        str(tmp_path), "data/main.beancount", must_exist=False
+    ) == OnboardingService._validate_repo_path(
+        str(tmp_path), "data/main.beancount", must_exist=False
+    )
+    preview = OnboardingSetupService.preview(str(tmp_path), operation="initialize_ledger")
+    assert preview == OnboardingService.preview_setup(str(tmp_path), operation="initialize_ledger")
+    assert preview["changes"] == [
+        {"action": "create", "path": "data/main.beancount"},
+        {"action": "create", "path": "data/agent_inc/main.beancount"},
+    ]

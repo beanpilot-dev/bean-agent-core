@@ -3,7 +3,7 @@
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
-from ..pending_actions import PendingActionService
+from ..approvals.contracts import PendingActionService
 from ..types import ApplyReceipt, CommitResult, IntegrityFailed
 from ..workspace import GitService
 from .plans import MutationPlan

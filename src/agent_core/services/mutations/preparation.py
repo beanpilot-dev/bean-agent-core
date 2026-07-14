@@ -30,9 +30,9 @@ from typing import Callable
 
 from beancount import loader
 
+from ..approvals.contracts import PendingActionService
 from ..beancount import Beancount, LedgerServiceError, _cfg, _repo_path
 from ..inspection import preflight_report as _read_only_preflight_report
-from ..pending_actions import PendingActionService
 from ..queries import LedgerQueryService
 from ..types import (
     CommitResult,

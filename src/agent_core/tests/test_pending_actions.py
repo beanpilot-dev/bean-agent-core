@@ -1,5 +1,8 @@
 """Contract tests for runtime-neutral pending-action semantics."""
 
+from agent_core.services.approvals.contracts import (
+    PendingActionService as PackagedPendingActionService,
+)
 from agent_core.services.pending_actions import PendingActionService, digest_payload
 from agent_core.services.types import IntegrityFailed, PendingAction
 
@@ -76,3 +79,7 @@ def test_contract_verification_rejects_expired_payload_with_valid_integrity() ->
 
     assert isinstance(integrity, IntegrityFailed)
     assert integrity.error == "Pending action has expired."
+
+
+def test_legacy_pending_action_import_is_the_packaged_contract() -> None:
+    assert PendingActionService is PackagedPendingActionService
