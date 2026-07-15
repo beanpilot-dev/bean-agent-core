@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_core.services.ledger import LedgerService
-from agent_core.services.mutations.action_handlers import (
+from agent_core.services.mutations.handlers import (
     MutationPreparationHandlerRegistry,
     PreparedMutation,
 )
@@ -50,6 +50,8 @@ def test_registered_handler_preserves_preview_and_pending_contract(
     handler = MutationPreparationHandlerRegistry().get(action_type)
     expected = handler.build(str(ledger_workspace), **kwargs)
     assert isinstance(expected, PreparedMutation)
+    assert not hasattr(expected, "preview")
+    assert not hasattr(expected, "pending_action")
 
     service = LedgerService()
     if action_type == "commit_transaction":

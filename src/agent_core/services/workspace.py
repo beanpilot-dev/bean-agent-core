@@ -13,7 +13,8 @@ import subprocess
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 
 from filelock import FileLock
 
@@ -289,22 +290,39 @@ class GitService(ABC):
             self._cleanup_askpass(askpass)
 
     def commit_and_push(
-        self, workspace: str, message: str, repo_url: str, token: str | None = None
+        self,
+        workspace: str,
+        message: str,
+        repo_url: str,
+        token: str | None = None,
+        paths: Sequence[str] | None = None,
     ) -> dict:
-        """Stage data/, commit, and push. Returns result dict.
+        """Stage validated repository-relative paths, commit, and push.
+
+        Callers that omit ``paths`` retain the legacy ``data/`` staging scope.
+        Explicit paths are treated as literal Git pathspecs so configured
+        sidecar names cannot expand to unrelated repository files.
 
         Result keys:
             ok (bool)           — True if commit succeeded
             error (str|None)    — error message if ok=False
             push (str|None)     — push status (PUSHED:... or PUSH_FAILED:...)
         """
-        subprocess.run(
-            ["git", "add", "data/"],
-            cwd=workspace, capture_output=True, text=True,
+        stage_paths = self._validated_stage_paths(paths)
+        stage = subprocess.run(
+            ["git", "add", "--all", "--", *[f":(literal){path}" for path in stage_paths]],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
         )
+        if stage.returncode != 0:
+            logger.error("git add failed")
+            return {"ok": False, "error": stage.stderr.strip(), "push": None}
         result = subprocess.run(
             ["git", "commit", "-m", message],
-            cwd=workspace, capture_output=True, text=True,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             logger.error("git commit failed")
@@ -318,6 +336,31 @@ class GitService(ABC):
             return {"ok": True, "error": None, "push": f"PUSH_FAILED: {e}"}
 
         return {"ok": True, "error": None, "push": push_status}
+
+    @staticmethod
+    def _validated_stage_paths(paths: Sequence[str] | None) -> tuple[str, ...]:
+        """Return non-empty, normalized repository-relative Git paths."""
+        if isinstance(paths, str):
+            raise ValueError("Git staging paths must be provided as a path sequence")
+        requested = ("data",) if paths is None else tuple(paths)
+        if not requested:
+            raise ValueError("At least one repository-relative path is required")
+
+        validated: list[str] = []
+        for path in requested:
+            if not isinstance(path, str) or not path or path != path.strip():
+                raise ValueError("Git staging paths must be non-empty strings")
+            if "\x00" in path or "\n" in path or "\r" in path or "\\" in path:
+                raise ValueError("Git staging paths must be repository-relative POSIX paths")
+            candidate = PurePosixPath(path)
+            if candidate.is_absolute() or any(part in {".", ".."} for part in path.split("/")):
+                raise ValueError("Git staging paths must stay within the repository")
+            normalized = candidate.as_posix().rstrip("/")
+            if not normalized or normalized == ".":
+                raise ValueError("Git staging paths must name repository content")
+            if normalized not in validated:
+                validated.append(normalized)
+        return tuple(validated)
 
     @staticmethod
     def destroy(workspace: str) -> None:

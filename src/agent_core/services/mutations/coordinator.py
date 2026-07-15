@@ -2,12 +2,13 @@
 
 from ..beancount import _cfg
 from ..types import LedgerConfig
-from . import sidecar
 from .applier import MutationApplier
 from .executor import MutationExecutor
-from .facts import capture_ledger_read_facts
+from .persistence import SidecarMutationStore
 from .plans import FilePrecondition, MutationPlan
 from .publisher import RepositoryPublisher
+from .sidecar import FilesystemSidecarMutationStore
+from .targets import potential_write_targets
 from .validator import MutationValidator, PlanValidation
 
 
@@ -19,10 +20,16 @@ class MutationCoordinator:
         applier: MutationApplier | None = None,
         validator: MutationValidator | None = None,
         executor: MutationExecutor | None = None,
+        store: SidecarMutationStore | None = None,
     ) -> None:
-        shared_applier = applier or MutationApplier()
-        self._validator = validator or MutationValidator(shared_applier)
-        self._executor = executor or MutationExecutor(shared_applier)
+        self._store = store or FilesystemSidecarMutationStore()
+        shared_applier = applier or MutationApplier(self._store)
+        self._validator = validator or MutationValidator(
+            shared_applier, store=self._store
+        )
+        self._executor = executor or MutationExecutor(
+            shared_applier, store=self._store
+        )
 
     def validate(
         self, workspace: str, plan: MutationPlan, config: LedgerConfig | None = None
@@ -44,24 +51,33 @@ class MutationCoordinator:
 
     @staticmethod
     def seal(
-        workspace: str, plan: MutationPlan, config: LedgerConfig | None = None
+        workspace: str,
+        plan: MutationPlan,
+        config: LedgerConfig | None = None,
+        store: SidecarMutationStore | None = None,
     ) -> MutationPlan:
         resolved = _cfg(config)
-        paths = [resolved.sidecar_main_path, sidecar.sidecar_target_file(resolved)]
-        paths.extend(
-            operation.target_file for operation in plan.operations if operation.target_file
+        active_store = store or FilesystemSidecarMutationStore()
+        originals = active_store.snapshot(
+            workspace, potential_write_targets(plan, resolved), resolved
         )
-        originals = sidecar.snapshot(workspace, list(dict.fromkeys(paths)))
         sealed = plan.with_preconditions(
-            [FilePrecondition.from_content(path, content) for path, content in originals.items()]
+            [
+                FilePrecondition.from_content(path, content)
+                for path, content in originals.files.items()
+            ]
         )
-        # Handler-declared facts record action-specific policy inputs; the
-        # common include graph protects the broader ledger read surface.
-        facts = (*capture_ledger_read_facts(workspace, config), *plan.semantic_facts)
-        unique_facts = tuple(dict.fromkeys(facts))
-        return sealed.with_semantic_facts(unique_facts)
+        # New plans seal only the policy inputs declared by their handler.
+        # The verifier still understands included_file_digest facts carried by
+        # already-persisted plans, but adding that broad read set here would
+        # make unrelated included-ledger edits stale every new approval.
+        return sealed.with_semantic_facts(tuple(dict.fromkeys(plan.semantic_facts)))
 
     @staticmethod
-    def _preconditions_hold(workspace: str, plan: MutationPlan) -> bool:
+    def _preconditions_hold(
+        workspace: str,
+        plan: MutationPlan,
+        config: LedgerConfig | None = None,
+    ) -> bool:
         """Compatibility hook for existing callers and tests."""
-        return MutationExecutor.preconditions_hold(workspace, plan)
+        return MutationExecutor.preconditions_hold(workspace, plan, config)

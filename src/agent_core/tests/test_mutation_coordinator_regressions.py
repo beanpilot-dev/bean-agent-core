@@ -20,7 +20,7 @@ from agent_core.services.mutations import (
 )
 from agent_core.services.mutations.plans import MutationPlan
 from agent_core.services.pending_actions import PendingActionService
-from agent_core.services.types import ApplyReceipt
+from agent_core.services.types import IntegrityFailed
 
 TXN = (
     '2026-06-15 * "Dinner"\n'
@@ -41,6 +41,7 @@ class _NoopFormatter:
 
 class _SpyApplier(MutationApplier):
     def __init__(self) -> None:
+        super().__init__()
         self.calls: list[tuple[str, MutationPlan]] = []
 
     def apply(self, workspace: str, plan: MutationPlan, config: object = None) -> tuple[str, ...]:
@@ -169,41 +170,38 @@ def test_publish_failure_restores_files_and_git_index(
     assert _git(["status", "--porcelain"], ledger_workspace).stdout == ""
 
 
-def test_legacy_pending_action_without_a_mutation_plan_still_applies(
+def test_legacy_pending_action_without_a_mutation_plan_fails_closed(
     ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Persisted pre-plan contracts remain readable during the schema transition."""
+    """Unsigned behavior cannot be reconstructed from mutable legacy fields."""
     monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    target = ledger_workspace / "data/agent_inc" / f"{date.today():%Y-%m}.beancount"
+    original = target.read_text()
     pending = PendingActionService.create_pending_action(
         action_type="commit_transaction",
         execution_spec={"transaction_text": TXN, "commit_message": "record dinner"},
         display={"diff": TXN},
         validation={"dry_run": {"status": "validated"}},
     )
-    git_service = type(
-        "Git",
-        (),
-        {"commit_and_push": lambda *_args: {"ok": True, "error": None, "push": "PUSHED"}},
-    )()
+    git_service = type("Git", (), {"commit_and_push": lambda *_args: pytest.fail("publish")})()
 
     result = LedgerService().apply_pending_action(
         str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
     )
 
-    assert isinstance(result, ApplyReceipt)
-    target = ledger_workspace / "data/agent_inc" / f"{date.today():%Y-%m}.beancount"
-    assert "Dinner" in target.read_text()
+    assert isinstance(result, IntegrityFailed)
+    assert result.error == "Pending action mutation plan is required."
+    assert target.read_text() == original
 
 
 @pytest.mark.parametrize(
-    ("action_type", "prepare", "expected_text"),
+    ("action_type", "prepare"),
     [
         (
             "open_account",
             lambda service, workspace: service.prepare_open(
                 workspace, "Assets:Bank:Savings", "CNY", "2026-06-15", "Savings"
             ),
-            "Assets:Bank:Savings",
         ),
         (
             "update_transaction",
@@ -216,12 +214,10 @@ def test_legacy_pending_action_without_a_mutation_plan_still_applies(
                 "  Assets:Cash          -95 CNY",
                 "update lunch",
             ),
-            "95 CNY",
         ),
         (
             "bulk_commit",
             lambda service, workspace: service.prepare_bulk(workspace, TXN, "import dinner"),
-            "Dinner",
         ),
         (
             "change_set",
@@ -238,7 +234,6 @@ def test_legacy_pending_action_without_a_mutation_plan_still_applies(
                 ],
                 "open savings and record dinner",
             ),
-            "Assets:Bank:Savings",
         ),
         (
             "balance_reconciliation",
@@ -250,19 +245,21 @@ def test_legacy_pending_action_without_a_mutation_plan_still_applies(
                 "CNY",
                 "Equity:Opening-Balances",
             ),
-            "Balance reconciliation adjustment",
         ),
     ],
 )
-def test_signed_legacy_pending_actions_for_each_remaining_type_still_apply(
+def test_signed_no_plan_pending_actions_for_each_type_fail_closed(
     ledger_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     action_type: str,
     prepare,
-    expected_text: str,
 ) -> None:
-    """All pre-plan persisted action types retain their explicit fallback path."""
+    """Every legacy action type requires an authoritative sealed plan."""
     monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    before = {
+        path: path.read_text()
+        for path in (ledger_workspace / "data").rglob("*.beancount")
+    }
     prepared = prepare(LedgerService(), str(ledger_workspace))
     assert hasattr(prepared, "execution_spec")
     legacy_spec = {
@@ -276,23 +273,19 @@ def test_signed_legacy_pending_actions_for_each_remaining_type_still_apply(
         display=prepared.display,
         validation=prepared.validation,
     )
-    git_service = type(
-        "Git",
-        (),
-        {"commit_and_push": lambda *_args: {"ok": True, "error": None, "push": "PUSHED"}},
-    )()
+    git_service = type("Git", (), {"commit_and_push": lambda *_args: pytest.fail("publish")})()
 
     result = LedgerService().apply_pending_action(
         str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
     )
 
-    assert isinstance(result, ApplyReceipt)
-    assert result.action_type == action_type
+    assert isinstance(result, IntegrityFailed)
+    assert result.error == "Pending action mutation plan is required."
     assert "mutation_plan" not in pending.execution_spec
-    all_ledger_text = "\n".join(
-        path.read_text() for path in (ledger_workspace / "data").rglob("*.beancount")
-    )
-    assert expected_text in all_ledger_text
+    assert {
+        path: path.read_text()
+        for path in (ledger_workspace / "data").rglob("*.beancount")
+    } == before
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from .executor import (
     LedgerFormatter,
     MutationExecutor,
 )
+from .persistence import SidecarMutationStore, SidecarSnapshot
 from .planners import MutationPlanner
 from .plans import MutationOperation, MutationPlan
 from .preparation import MutationPreparationService
@@ -23,11 +24,15 @@ from .publisher import (
     ReconciledRepositoryPublisher,
     RepositoryPublisher,
 )
+from .sidecar import FilesystemSidecarMutationStore
+from .targets import potential_write_targets, sealed_write_set_matches
 from .validator import (
     BeancountLedgerValidator,
     LedgerValidator,
     MutationValidator,
     PlanValidation,
+    summarize_validation_failure,
+    validation_failure,
 )
 
 __all__ = [
@@ -38,11 +43,18 @@ __all__ = [
     "PlanValidation",
     "LedgerValidator",
     "BeancountLedgerValidator",
+    "summarize_validation_failure",
+    "validation_failure",
     "LedgerFormatter",
     "BeancountLedgerFormatter",
     "MutationOperation",
     "MutationPlan",
     "MutationPlanner",
+    "SidecarMutationStore",
+    "SidecarSnapshot",
+    "FilesystemSidecarMutationStore",
+    "potential_write_targets",
+    "sealed_write_set_matches",
     "MutationPreparationService",
     "MutationCommitMarker",
     "PublicationReconciliation",

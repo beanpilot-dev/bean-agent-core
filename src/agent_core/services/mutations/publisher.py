@@ -8,6 +8,7 @@ one atomic operation, so callers must reconcile an uncertain publication before
 attempting another publish.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -144,7 +145,12 @@ class RepositoryPublisher(Protocol):
     """Commit the already-validated sidecar changes to the repository."""
 
     def commit_and_push(
-        self, workspace: str, message: str, repo_url: str, github_token: str | None = None
+        self,
+        workspace: str,
+        message: str,
+        repo_url: str,
+        github_token: str | None = None,
+        paths: Sequence[str] | None = None,
     ) -> dict: ...
 
 

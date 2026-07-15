@@ -1,176 +1,129 @@
-"""Apply sealed pending-action plans and characterize legacy fallback dispatch."""
+"""Apply an approved pending action from its authoritative sealed plan."""
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING
 
 from ..approvals.contracts import PendingActionService
-from ..types import ApplyReceipt, CommitResult, IntegrityFailed
+from ..beancount import LedgerServiceError
+from ..types import (
+    ApplyReceipt,
+    CommitResult,
+    DependencyUnavailable,
+    IntegrityFailed,
+    InvariantViolation,
+    LedgerConfig,
+)
 from ..workspace import GitService
+from .executor import MutationExecutor
 from .plans import MutationPlan
+from .targets import sealed_write_set_matches
+from .validator import validation_failure
 
-if TYPE_CHECKING:
-    from .preparation import MutationPreparationService
+
+def git_dependency_error(git: dict[str, object]) -> DependencyUnavailable | None:
+    """Map repository publication output to the stable dependency error contract."""
+    if not git["ok"]:
+        return DependencyUnavailable(
+            error=f"Written but git commit failed: {git['error']}",
+        )
+    push = git.get("push")
+    if isinstance(push, str) and push.startswith("PUSH_FAILED"):
+        return DependencyUnavailable(
+            error=f"Git commit succeeded locally but push failed: {push}",
+            retryable=True,
+        )
+    return None
 
 
 class PendingActionApplicationService:
-    """Own the deterministic approved-application boundary.
+    """Verify and execute only the immutable plan approved by the host."""
 
-    The signed plan is always preferred.  The explicit fallback is retained
-    solely for actions persisted before sealed plans were introduced.
-    """
+    def __init__(self, executor: MutationExecutor | None = None) -> None:
+        self._executor = executor or MutationExecutor()
 
     def apply_pending_action(
         self,
-        preparation: "MutationPreparationService",
         workspace: str,
         action: dict[str, object],
         repo_url: str,
         git_service: GitService,
         github_token: str | None = None,
         whitelist: list[str] | None = None,
-        ledger_config=None,
+        ledger_config: LedgerConfig | None = None,
     ):
-        from .preparation import _apply_plan, _git_dependency_error
-
         integrity = PendingActionService.verify_pending_action(action)
         if integrity:
             return integrity
+        pending_action_id = str(action.get("pending_action_id") or "")
         action_type = str(action.get("action_type") or "")
         spec = action.get("execution_spec")
         if not isinstance(spec, dict):
             return IntegrityFailed(
-                pending_action_id=str(action.get("pending_action_id") or ""),
+                pending_action_id=pending_action_id,
                 error="Pending action execution spec is invalid.",
             )
-
         raw_plan = spec.get("mutation_plan")
-        if isinstance(raw_plan, dict):
-            try:
-                plan = MutationPlan.from_spec(raw_plan)
-            except ValueError:
-                return IntegrityFailed(
-                    pending_action_id=str(action.get("pending_action_id") or ""),
-                    error="Pending action mutation plan is invalid.",
-                )
-            _, git, failure = _apply_plan(
-                workspace, ledger_config, plan, repo_url, git_service, github_token
+        if not isinstance(raw_plan, dict):
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Pending action mutation plan is required.",
             )
-            if failure:
-                return failure
-            if dependency_error := _git_dependency_error(git):
-                return dependency_error
-            return ApplyReceipt(
-                pending_action_id=str(action.get("pending_action_id") or ""),
-                action_type=action_type,
-                receipt=asdict(
-                    CommitResult(
-                        outcome="Approved mutation plan validated and committed",
-                        result={"plan_version": plan.schema_version},
-                        push_status=git["push"],
-                    )
+        try:
+            plan = MutationPlan.from_spec(raw_plan)
+        except ValueError:
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Pending action mutation plan is invalid.",
+            )
+        if not sealed_write_set_matches(plan, ledger_config):
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error=(
+                    "Pending action write set no longer matches the active ledger layout. "
+                    "Prepare and review a new action."
                 ),
             )
-
-        result = self._apply_legacy(
-            preparation, action_type, spec, workspace, repo_url, git_service,
-            github_token, whitelist, ledger_config,
-        )
-        if isinstance(result, CommitResult):
-            return ApplyReceipt(
-                pending_action_id=str(action.get("pending_action_id") or ""),
-                action_type=action_type,
-                receipt=asdict(result),
-            )
-        return result
-
-    @staticmethod
-    def _apply_legacy(
-        preparation: "MutationPreparationService", action_type: str, spec: dict[str, object],
-        workspace: str, repo_url: str, git_service: GitService, github_token: str | None,
-        whitelist: list[str] | None, ledger_config,
-    ):
-        if action_type == "commit_transaction":
-            return preparation.confirm_commit(
+        try:
+            _touched, git, output = self._executor.apply_and_publish(
                 workspace,
-                str(spec.get("transaction_text") or ""),
-                str(spec.get("commit_message") or ""),
+                plan,
                 repo_url,
                 git_service,
                 github_token,
-                whitelist,
                 ledger_config,
             )
-        if action_type == "open_account":
-            return preparation.confirm_open(
-                workspace,
-                str(spec.get("account_name") or ""),
-                spec.get("currency") if isinstance(spec.get("currency"), str) else None,
-                str(spec.get("open_date") or ""),
-                repo_url,
-                git_service,
-                spec.get("display_name") if isinstance(spec.get("display_name"), str) else None,
-                github_token,
-                ledger_config,
+        except ValueError:
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Pending action mutation plan violates sidecar write isolation.",
             )
-        if action_type == "update_transaction":
-            return preparation.confirm_update(
-                workspace,
-                str(spec.get("target_date") or ""),
-                str(spec.get("narration") or ""),
-                str(spec.get("new_transaction_text") or ""),
-                str(spec.get("commit_message") or ""),
-                repo_url,
-                git_service,
-                github_token,
-                whitelist,
-                ledger_config,
+        except OSError as exc:
+            raise LedgerServiceError("Ledger mutation apply workspace unavailable") from exc
+        if output == "MUTATION_PRECONDITION_FAILED":
+            return InvariantViolation(
+                invariant="MUTATION_PRECONDITION_FAILED",
+                severity="HARD",
+                remediation="The ledger changed after preview. Prepare and review a new action.",
             )
-        if action_type == "bulk_commit":
-            return preparation.confirm_bulk(
-                workspace,
-                str(spec.get("transactions_text") or ""),
-                str(spec.get("commit_message") or ""),
-                repo_url,
-                git_service,
-                None,
-                github_token,
-                whitelist,
-                ledger_config,
+        if output == "MUTATION_PLAN_WRITE_SET_MISMATCH":
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error=(
+                    "Pending action write set no longer matches the active ledger layout. "
+                    "Prepare and review a new action."
+                ),
             )
-        if action_type == "change_set":
-            operations = spec.get("operations")
-            if not isinstance(operations, list) or not all(
-                isinstance(item, dict) for item in operations
-            ):
-                return IntegrityFailed(
-                    pending_action_id="", error="Change-set operations are invalid."
+        if output:
+            return validation_failure(output, plan.remediation)
+        if dependency_error := git_dependency_error(git):
+            return dependency_error
+        return ApplyReceipt(
+            pending_action_id=pending_action_id,
+            action_type=action_type,
+            receipt=asdict(
+                CommitResult(
+                    outcome="Approved mutation plan validated and committed",
+                    result={"plan_version": plan.schema_version},
+                    push_status=git["push"],
                 )
-            return preparation.confirm_change_set(
-                workspace,
-                operations,
-                str(spec.get("commit_message") or ""),
-                repo_url,
-                git_service,
-                github_token,
-                whitelist,
-                ledger_config,
-            )
-        if action_type == "balance_reconciliation":
-            return preparation.confirm_balance_reconciliation(
-                workspace,
-                str(spec.get("observed_date") or ""),
-                str(spec.get("account") or ""),
-                str(spec.get("amount") or ""),
-                str(spec.get("currency") or ""),
-                repo_url,
-                git_service,
-                str(spec.get("adjustment_account") or ""),
-                str(spec.get("cutoff") or "end_of_day"),
-                spec.get("is_checkpoint_update") is True,
-                str(spec.get("commit_message") or ""),
-                github_token,
-                ledger_config,
-            )
-        return IntegrityFailed(
-            pending_action_id="", error=f"Unsupported pending action type: {action_type}"
+            ),
         )

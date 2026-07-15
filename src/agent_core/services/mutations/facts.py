@@ -1,15 +1,30 @@
 """Read-only semantic facts sealed into new mutation plans."""
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
+
+from beancount import loader
 
 from ..beancount import _cfg, _repo_path
 from ..queries import LedgerQueryService
+from ..reconciliation import ReconciliationCalculator, format_decimal
 from ..types import LedgerConfig
 
 _INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"\s*$')
+_ACCOUNT_RE = re.compile(
+    r"^(Assets|Liabilities|Equity|Income|Expenses)(:[A-Za-z][A-Za-z0-9\-]+)+$"
+)
+_CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9\-]*$")
+_LEGACY_ACCOUNT_PRESENT_DIGEST = hashlib.sha256(b"present").hexdigest()
+_LEGACY_ACCOUNT_ABSENT_DIGEST = hashlib.sha256(b"absent").hexdigest()
+_LEGACY_ACCOUNT_DIGESTS = {
+    _LEGACY_ACCOUNT_PRESENT_DIGEST,
+    _LEGACY_ACCOUNT_ABSENT_DIGEST,
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +102,88 @@ def capture_ledger_read_facts(
 def capture_account_state_fact(
     workspace: str, account_name: str, ledger_config: LedgerConfig | None = None
 ) -> SemanticFact:
-    """Capture the account-lifecycle observation used by an action handler."""
+    """Hash the active open/close lifecycle directives for one account."""
+    config = _cfg(ledger_config)
+    entries, _errors, _options = loader.load_file(_repo_path(workspace, config.entry_path))
+    lifecycle: list[dict[str, object]] = []
+    for entry in entries:
+        if getattr(entry, "account", None) != account_name:
+            continue
+        entry_type = entry.__class__.__name__
+        if entry_type == "Open":
+            lifecycle.append(
+                {
+                    "type": "open",
+                    "date": entry.date.isoformat(),
+                    "currencies": list(entry.currencies or ()),
+                    "booking": str(entry.booking) if entry.booking is not None else None,
+                }
+            )
+        elif entry_type == "Close":
+            lifecycle.append({"type": "close", "date": entry.date.isoformat()})
+    serialized = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
+    return SemanticFact("account_state", account_name, _file_digest(serialized))
+
+
+def _encode_subject(**fields: str) -> str:
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_subject(subject: str, expected_keys: frozenset[str]) -> dict[str, str] | None:
+    try:
+        decoded = json.loads(subject)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict) or set(decoded) != expected_keys:
+        return None
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in decoded.items()):
+        return None
+    return decoded
+
+
+def capture_balance_fact(
+    workspace: str,
+    account_name: str,
+    as_of_date: str,
+    ledger_config: LedgerConfig | None = None,
+) -> SemanticFact:
+    """Capture the exact descendant-inclusive balance used by reconciliation."""
+    result = ReconciliationCalculator.get_balance(
+        workspace, account_name, as_of_date, ledger_config
+    )
+    state = {
+        "status": result.status,
+        "balance": result.balance if result.status == "SUCCESS" else None,
+    }
+    return SemanticFact(
+        "balance_state",
+        _encode_subject(account=account_name, as_of=as_of_date),
+        _file_digest(json.dumps(state, sort_keys=True, separators=(",", ":"))),
+    )
+
+
+def capture_checkpoint_fact(
+    workspace: str,
+    account_name: str,
+    assertion_date: str,
+    currency: str,
+    ledger_config: LedgerConfig | None = None,
+) -> SemanticFact:
+    """Capture the amount or absence of one balance assertion identity."""
+    amount = ReconciliationCalculator.existing_balance_assertion(
+        workspace, assertion_date, account_name, currency, ledger_config
+    )
+    state = "absent" if amount is None else f"present:{format_decimal(amount)}"
+    return SemanticFact(
+        "checkpoint_state",
+        _encode_subject(account=account_name, currency=currency, date=assertion_date),
+        _file_digest(state),
+    )
+
+
+def _legacy_account_state_fact(
+    workspace: str, account_name: str, ledger_config: LedgerConfig | None
+) -> SemanticFact:
     present = account_name in set(LedgerQueryService.get_accounts(workspace, ledger_config))
     return SemanticFact(
         "account_state", account_name, _file_digest("present" if present else "absent")
@@ -96,7 +192,7 @@ def capture_account_state_fact(
 
 def _current_fact(
     workspace: str, fact: SemanticFact, ledger_config: LedgerConfig | None
-) -> SemanticFact:
+) -> SemanticFact | None:
     if fact.kind == "included_file_digest":
         try:
             with open(_repo_path(workspace, fact.subject), encoding="utf-8") as handle:
@@ -105,9 +201,45 @@ def _current_fact(
             content = None
         return SemanticFact(fact.kind, fact.subject, _file_digest(content))
     if fact.kind == "account_state":
+        if not _ACCOUNT_RE.fullmatch(fact.subject):
+            return None
+        if fact.digest in _LEGACY_ACCOUNT_DIGESTS:
+            return _legacy_account_state_fact(workspace, fact.subject, ledger_config)
         return capture_account_state_fact(workspace, fact.subject, ledger_config)
+    if fact.kind == "balance_state":
+        fields = _decode_subject(fact.subject, frozenset({"account", "as_of"}))
+        if fields is None or not _ACCOUNT_RE.fullmatch(fields["account"]):
+            return None
+        try:
+            date.fromisoformat(fields["as_of"])
+        except ValueError:
+            return None
+        return capture_balance_fact(
+            workspace, fields["account"], fields["as_of"], ledger_config
+        )
+    if fact.kind == "checkpoint_state":
+        fields = _decode_subject(
+            fact.subject, frozenset({"account", "currency", "date"})
+        )
+        if (
+            fields is None
+            or not _ACCOUNT_RE.fullmatch(fields["account"])
+            or not _CURRENCY_RE.fullmatch(fields["currency"])
+        ):
+            return None
+        try:
+            date.fromisoformat(fields["date"])
+        except ValueError:
+            return None
+        return capture_checkpoint_fact(
+            workspace,
+            fields["account"],
+            fields["date"],
+            fields["currency"],
+            ledger_config,
+        )
     # Unknown fact kinds are integrity failures rather than a permissive replay.
-    return SemanticFact("unsupported", fact.subject, None)
+    return None
 
 
 def semantic_facts_hold(
@@ -115,5 +247,12 @@ def semantic_facts_hold(
     facts: tuple[SemanticFact, ...],
     ledger_config: LedgerConfig | None = None,
 ) -> bool:
-    """Recompute canonical include-graph facts before applying a v2 plan."""
-    return all(_current_fact(workspace, fact, ledger_config) == fact for fact in facts)
+    """Recompute persisted facts, failing closed on malformed or unreadable input."""
+    try:
+        return all(
+            (current := _current_fact(workspace, fact, ledger_config)) is not None
+            and current == fact
+            for fact in facts
+        )
+    except Exception:
+        return False

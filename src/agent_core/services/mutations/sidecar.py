@@ -4,10 +4,40 @@ import os
 import re
 import shutil
 from datetime import date
+from pathlib import Path, PurePosixPath
+from typing import Sequence
 
 from ..beancount import Beancount, _cfg, _repo_path
-from ..ledger_paths import sidecar_target_file
+from ..ledger_paths import is_sidecar_path, sidecar_target_file
 from ..types import LedgerConfig
+from .persistence import SidecarSnapshot
+
+
+def _require_sidecar_path(
+    workspace: str, rel_path: str, ledger_config: LedgerConfig | None
+) -> str:
+    """Return a sidecar path only when no symlink can redirect the write."""
+    config = _cfg(ledger_config)
+    normalized = PurePosixPath(rel_path).as_posix().strip("/")
+    if not is_sidecar_path(normalized, config):
+        raise ValueError("Sidecar mutation path must stay inside sidecar_write_dir")
+    workspace_root = Path(workspace).resolve()
+    write_root = workspace_root.joinpath(*PurePosixPath(config.sidecar_write_dir).parts)
+    candidate = workspace_root.joinpath(*PurePosixPath(normalized).parts)
+    for path in (write_root, candidate):
+        current = workspace_root
+        for part in path.relative_to(workspace_root).parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError("Sidecar mutation paths must not contain symlinks")
+    resolved_write_root = write_root.resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    if (
+        not resolved_write_root.is_relative_to(workspace_root)
+        or not resolved_candidate.is_relative_to(resolved_write_root)
+    ):
+        raise ValueError("Sidecar mutation path must stay inside the workspace")
+    return normalized
 
 
 def ensure_sidecar(workspace: str, ledger_config: LedgerConfig | None = None) -> str:
@@ -88,6 +118,7 @@ def replace(
     new_text: str,
     ledger_config: LedgerConfig | None = None,
 ) -> str:
+    rel_path = _require_sidecar_path(workspace, rel_path, ledger_config)
     path = _repo_path(workspace, rel_path)
     with open(path) as handle:
         original = handle.read()
@@ -103,6 +134,7 @@ def copy_workspace(workspace: str, target: str) -> None:
     shutil.copytree(
         workspace,
         target,
+        symlinks=True,
         ignore=shutil.ignore_patterns(
             ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"
         ),
@@ -144,3 +176,68 @@ def restore(workspace: str, originals: dict[str, str | None]) -> None:
                 break
             parent = os.path.dirname(parent)
     Beancount.invalidate_workspace(workspace)
+
+
+class FilesystemSidecarMutationStore:
+    """Filesystem adapter for the sidecar mutation persistence port.
+
+    The module-level helpers remain as compatibility hooks for existing callers
+    and tests.  Canonical callers depend on this adapter through the protocol.
+    """
+
+    def append(
+        self,
+        workspace: str,
+        text: str,
+        config: LedgerConfig | None = None,
+    ) -> str:
+        config = _cfg(config)
+        _require_sidecar_path(workspace, config.sidecar_main_path, config)
+        _require_sidecar_path(workspace, sidecar_target_file(config), config)
+        return append(workspace, text, config)
+
+    def open_directive(
+        self,
+        workspace: str,
+        account_name: str,
+        directive_text: str,
+        config: LedgerConfig | None = None,
+    ) -> str:
+        config = _cfg(config)
+        _require_sidecar_path(workspace, config.sidecar_main_path, config)
+        _require_sidecar_path(workspace, sidecar_target_file(config), config)
+        return open_directive(workspace, account_name, directive_text, config)
+
+    def replace(
+        self,
+        workspace: str,
+        rel_path: str,
+        old_text: str,
+        new_text: str,
+        config: LedgerConfig | None = None,
+    ) -> str:
+        return replace(workspace, rel_path, old_text, new_text, config)
+
+    def copy_workspace(self, workspace: str, target: str) -> None:
+        copy_workspace(workspace, target)
+
+    def snapshot(
+        self,
+        workspace: str,
+        rel_paths: Sequence[str],
+        config: LedgerConfig | None = None,
+    ) -> SidecarSnapshot:
+        paths = [_require_sidecar_path(workspace, path, config) for path in rel_paths]
+        return SidecarSnapshot(snapshot(workspace, paths))
+
+    def restore(
+        self,
+        workspace: str,
+        captured: SidecarSnapshot,
+        config: LedgerConfig | None = None,
+    ) -> None:
+        paths = {
+            _require_sidecar_path(workspace, path, config): content
+            for path, content in captured.files.items()
+        }
+        restore(workspace, paths)
