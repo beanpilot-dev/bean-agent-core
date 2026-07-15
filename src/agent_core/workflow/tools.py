@@ -5,20 +5,14 @@ from typing import Annotated
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg, tool
 
-from agent_core.ledger import analytics, report
-from agent_core.services import (
-    IngestionService,
-    LedgerQueryService,
-    LedgerService,
-    PriceService,
-    ToolExecutionGateway,
-)
+from agent_core.services import WorkflowToolDependencies
 
-_ledger = LedgerService()
-_queries = LedgerQueryService()
-_gateway = ToolExecutionGateway(_ledger)
-_prices = PriceService()
-_ingestion = IngestionService()
+
+def _dependencies(config: RunnableConfig) -> WorkflowToolDependencies:
+    dependencies = config.get("configurable", {}).get("tool_dependencies")
+    if not isinstance(dependencies, WorkflowToolDependencies):
+        raise RuntimeError("Workflow tool dependencies were not configured for this request")
+    return dependencies
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +28,7 @@ def tool_preflight(config: Annotated[RunnableConfig, InjectedToolArg] = None) ->
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     ledger_config = c.get("ledger_config")
-    result = _ledger.preflight_report(ws, ledger_config)
+    result = _dependencies(config).queries.preflight(ws, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -56,7 +50,9 @@ def tool_account_balance(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _queries.get_balance(ws, account, as_of_date or None, ledger_config)
+    result = _dependencies(config).queries.get_balance(
+        ws, account, as_of_date or None, ledger_config
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -85,7 +81,7 @@ def tool_find_transactions(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _queries.find_transactions(
+    result = _dependencies(config).queries.find_transactions(
         ws,
         account or None,
         date_from or None,
@@ -144,7 +140,9 @@ def tool_query_template(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _queries.query_template(ws, template_name, params, ledger_config=ledger_config)
+    result = _dependencies(config).queries.query_template(
+        ws, template_name, params, ledger_config=ledger_config
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -196,7 +194,7 @@ def tool_query(
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _queries.query_bql(ws, bql, ledger_config)
+    result = _dependencies(config).queries.query_bql(ws, bql, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -218,12 +216,14 @@ def tool_query_report(
     cfg = config.get("configurable", {})
     ws = cfg.get("workspace", "")
     ledger_config = cfg.get("ledger_config")
-    entry_path = getattr(ledger_config, "entry_path", "data/main.beancount")
-    return report.run(ws, analytics.run(ws, year, month, entry_path))
+    return _dependencies(config).reports.generate(ws, year, month, ledger_config)
 
 
 @tool("ledger_fetch_price")
-def tool_fetch_price(symbol: str) -> str:
+def tool_fetch_price(
+    symbol: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
     """Fetch a current market price for a currency pair or stock ticker.
 
     Supports two formats:
@@ -242,12 +242,15 @@ def tool_fetch_price(symbol: str) -> str:
     Returns a JSON string with status SUCCESS (result.symbol, result.price,
     result.currency, result.source) or ERROR.
     """
-    result = _prices.fetch_price(symbol)
+    result = _dependencies(config).prices.fetch_price(symbol)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
 @tool("ledger_ingest_file")
-def tool_ingest_file(file_path: str) -> str:
+def tool_ingest_file(
+    file_path: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
     """Read a file and return its text content for processing.
 
     Use this to inspect an uploaded bank export (CSV, TSV, plain text) before
@@ -264,7 +267,7 @@ def tool_ingest_file(file_path: str) -> str:
     Returns a JSON string with status SUCCESS (result.content, result.lines,
     result.size_bytes) or ERROR.
     """
-    result = _ingestion.read_file(file_path)
+    result = _dependencies(config).ingestion.read_file(file_path)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -274,6 +277,7 @@ def tool_run_python(
     input_files: list[str] | None = None,
     stage: bool = False,
     stage_label: str = "import",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
     """Run a Python script in a sandboxed subprocess and return its stdout.
 
@@ -329,7 +333,7 @@ def tool_run_python(
                    result.stderr, result.exit_code
     or ERROR.
     """
-    result = _ingestion.run_python(code, input_files, stage, stage_label)
+    result = _dependencies(config).ingestion.run_python(code, input_files, stage, stage_label)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -362,7 +366,9 @@ def tool_ledger_commit_transaction(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_commit(ws, transaction_text, commit_message, whitelist, ledger_config)
+    result = _dependencies(config).mutations.prepare_commit(
+        ws, transaction_text, commit_message, whitelist, ledger_config
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -395,7 +401,7 @@ def tool_ledger_update_transaction(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_update(
+    result = _dependencies(config).mutations.prepare_update(
         ws,
         date,
         narration,
@@ -436,7 +442,7 @@ def tool_ledger_import_transactions(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_bulk(
+    result = _dependencies(config).mutations.prepare_bulk(
         ws,
         transactions_text,
         commit_message,
@@ -477,7 +483,7 @@ def tool_ledger_open_account(
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_open(
+    result = _dependencies(config).mutations.prepare_open(
         ws,
         account_name,
         currency or None,
@@ -518,7 +524,7 @@ def tool_ledger_prepare_change_set(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _gateway.prepare_change_set(
+    result = _dependencies(config).mutations.prepare_change_set(
         ws,
         operations,
         commit_message,
@@ -544,7 +550,7 @@ def tool_ledger_calculate_balance_adjustment(
     be dated the following day. Start-of-day includes only earlier postings.
     """
     c = config.get("configurable", {})
-    result = _gateway.calculate_balance_adjustment(
+    result = _dependencies(config).mutations.calculate_balance_adjustment(
         c.get("workspace", ""),
         observed_date,
         account,
@@ -573,7 +579,7 @@ def tool_ledger_prepare_balance_reconciliation(
     writes until the user approves the exact generated transaction and assertion.
     """
     c = config.get("configurable", {})
-    result = _gateway.prepare_balance_reconciliation(
+    result = _dependencies(config).mutations.prepare_balance_reconciliation(
         c.get("workspace", ""),
         observed_date,
         account,
@@ -602,7 +608,7 @@ def tool_ledger_prepare_balance_update(
     and approve the new adjustment transaction.
     """
     c = config.get("configurable", {})
-    result = _gateway.prepare_balance_update(
+    result = _dependencies(config).mutations.prepare_balance_update(
         c.get("workspace", ""),
         assertion_date,
         account,

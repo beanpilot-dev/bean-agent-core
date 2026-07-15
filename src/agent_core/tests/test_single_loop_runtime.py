@@ -3,6 +3,7 @@ from datetime import date
 from pathlib import Path
 
 from agent_core.agent import PersonalFinanceAgent
+from agent_core.services import create_workflow_tool_dependencies
 from agent_core.workflow.tools import (
     MODEL_TOOLS,
     tool_ledger_commit_transaction,
@@ -22,6 +23,15 @@ PROMPT = Path(__file__).parents[1] / "ledger" / "prompt.md"
 
 def _tool_name(tool) -> str:
     return getattr(tool, "name", "")
+
+
+def _tool_config(workspace: Path) -> dict:
+    return {
+        "configurable": {
+            "workspace": str(workspace),
+            "tool_dependencies": create_workflow_tool_dependencies(),
+        }
+    }
 
 
 def test_model_tool_manifest_excludes_execution_tools() -> None:
@@ -72,7 +82,7 @@ def test_ledger_commit_transaction_returns_approval_required_without_write(
     raw = tool_ledger_commit_transaction.func(
         TXN,
         "record dinner",
-        config={"configurable": {"workspace": str(ledger_workspace)}},
+        config=_tool_config(ledger_workspace),
     )
     payload = json.loads(raw)
 
@@ -95,7 +105,7 @@ def test_ledger_open_account_returns_approval_required_without_write(
         "CNY",
         "2026-06-15",
         "Savings",
-        config={"configurable": {"workspace": str(ledger_workspace)}},
+        config=_tool_config(ledger_workspace),
     )
     payload = json.loads(raw)
 
@@ -130,7 +140,7 @@ def test_ledger_prepare_change_set_returns_approval_required_without_write(
             },
         ],
         "record savings transfer",
-        config={"configurable": {"workspace": str(ledger_workspace)}},
+        config=_tool_config(ledger_workspace),
     )
     payload = json.loads(raw)
 
@@ -158,7 +168,7 @@ def test_ledger_prepare_balance_reconciliation_returns_approval_required_without
         "5120",
         "CNY",
         "Equity:Opening-Balances",
-        config={"configurable": {"workspace": str(ledger_workspace)}},
+        config=_tool_config(ledger_workspace),
     )
     payload = json.loads(raw)
 
@@ -178,7 +188,7 @@ def test_ledger_commit_transaction_returns_repairable_validation_failure(
     raw = tool_ledger_commit_transaction.func(
         '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
         "bad",
-        config={"configurable": {"workspace": str(ledger_workspace)}},
+        config=_tool_config(ledger_workspace),
     )
     payload = json.loads(raw)
 

@@ -24,6 +24,16 @@ from .orchestrator import AgentOrchestrator
 from .preflight import PreflightService
 from .prices import PriceService
 from .queries import LedgerQueryService
+from .tool_ports import (
+    IngestionToolPort,
+    MutationToolPort,
+    PriceToolPort,
+    QueryToolPort,
+    ReportToolPort,
+    WorkflowToolDependencies,
+    WorkflowToolDependenciesFactory,
+    create_workflow_tool_dependencies,
+)
 from .types import (
     DEFAULT_LEDGER_CONFIG,
     ApplyReceipt,
@@ -60,6 +70,14 @@ __all__ = [
     "PreflightService",
     "PriceService",
     "ToolExecutionGateway",
+    "IngestionToolPort",
+    "MutationToolPort",
+    "PriceToolPort",
+    "QueryToolPort",
+    "ReportToolPort",
+    "WorkflowToolDependencies",
+    "WorkflowToolDependenciesFactory",
+    "create_workflow_tool_dependencies",
     # Types
     "ApprovalProof",
     "ApprovalRequired",

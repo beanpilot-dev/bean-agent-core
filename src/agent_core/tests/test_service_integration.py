@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from agent_core.services.orchestrator import AgentOrchestrator
+from agent_core.services.tool_ports import create_workflow_tool_dependencies
 from agent_core.services.types import PreflightResult
 from agent_core.services.workspace import (
     CachedWorkspaceManager,
@@ -34,7 +35,12 @@ def test_query_template_tool_works_directly(ledger_workspace: Path) -> None:
                 "template_name": "account_snapshot",
                 "params": {"account_pattern": "^Assets"},
             },
-            config={"configurable": {"workspace": str(ledger_workspace)}},
+            config={
+                "configurable": {
+                    "workspace": str(ledger_workspace),
+                    "tool_dependencies": create_workflow_tool_dependencies(),
+                }
+            },
         )
     )
 
@@ -46,7 +52,12 @@ def test_account_balance_tool_works_directly(ledger_workspace: Path) -> None:
     result = json.loads(
         tool_account_balance.invoke(
             {"account": "Assets:Cash"},
-            config={"configurable": {"workspace": str(ledger_workspace)}},
+            config={
+                "configurable": {
+                    "workspace": str(ledger_workspace),
+                    "tool_dependencies": create_workflow_tool_dependencies(),
+                }
+            },
         )
     )
 
@@ -111,7 +122,12 @@ class WorkflowAgent:
     async def stream(self, *, query: str, workspace: str, **_kwargs):
         result = await self.graph.ainvoke(
             {"messages": [HumanMessage(content=query)]},
-            config={"configurable": {"workspace": workspace}},
+            config={
+                "configurable": {
+                    "workspace": workspace,
+                    "tool_dependencies": create_workflow_tool_dependencies(),
+                }
+            },
         )
         yield {
             "is_task_complete": True,

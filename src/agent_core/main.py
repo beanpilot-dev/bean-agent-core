@@ -42,6 +42,7 @@ from agent_core.context import (
     agent_user_id,
 )
 from agent_core.services.orchestrator import AgentOrchestrator
+from agent_core.services.tool_ports import create_workflow_tool_dependencies
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import CachedWorkspaceManager, GitService
 
@@ -68,7 +69,9 @@ _git_service = GitService.from_environment(
     os.environ.get("AGENT_MODE", ""),
     os.environ.get("LOCAL_REPO_URL", ""),
 )
-_agent = PersonalFinanceAgent()
+_agent = PersonalFinanceAgent(
+    tool_dependencies_factory=create_workflow_tool_dependencies,
+)
 _cache_manager = CachedWorkspaceManager(_git_service, ttl_seconds=WORKSPACE_TTL_SECONDS)
 _orchestrator = AgentOrchestrator(_agent, _cache_manager, _git_service)
 
@@ -82,13 +85,14 @@ except Exception:
 # Payload sanitization
 # ---------------------------------------------------------------------------
 
+
 def _mask_secret(value: str, prefix: str) -> str:
     """Mask a secret, keeping only the prefix and last 4 characters."""
     if not value:
         return value
     if len(value) <= len(prefix) + 4:
-        return value[:len(prefix)] + "***"
-    return f"{value[:len(prefix)]}***...***{value[-4:]}"
+        return value[: len(prefix)] + "***"
+    return f"{value[: len(prefix)]}***...***{value[-4:]}"
 
 
 def sanitize_payload(body: dict | None) -> dict | None:
@@ -112,6 +116,7 @@ def sanitize_payload(body: dict | None) -> dict | None:
 # ---------------------------------------------------------------------------
 # Error helpers
 # ---------------------------------------------------------------------------
+
 
 def _error_envelope(
     code: str, message: str, status_code: int, details: dict | None = None
@@ -187,6 +192,7 @@ def _verify_apply_request(
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
+
 
 class RepoInfo(BaseModel):
     url: str
@@ -296,11 +302,10 @@ def _ledger_config(payload: LedgerPayload | None) -> LedgerConfig | None:
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Exception handler — sanitize sensitive fields in error responses
 # ---------------------------------------------------------------------------
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -319,6 +324,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Health endpoint
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health")
 async def health():
     return {
@@ -331,6 +337,7 @@ async def health():
 # ---------------------------------------------------------------------------
 # POST /agent/chat — full agent loop, SSE streaming
 # ---------------------------------------------------------------------------
+
 
 @app.post("/agent/chat")
 async def agent_chat(req: ChatRequest):
@@ -489,6 +496,7 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
         )
     return result
 
+
 @app.post("/agent/conversation-title")
 async def agent_conversation_title(req: ConversationTitleRequest):
     start_time = time.monotonic()
@@ -516,8 +524,7 @@ async def agent_conversation_title(req: ConversationTitleRequest):
         )
         return _error_envelope("TITLE_UNAVAILABLE", "Title generation failed", 502)
     logger.info(
-        "agent-conversation-title completed user_id=%s request_id=%s "
-        "status=ok duration_ms=%s",
+        "agent-conversation-title completed user_id=%s request_id=%s status=ok duration_ms=%s",
         req.user_id,
         req.request_id,
         int((time.monotonic() - start_time) * 1000),
@@ -532,6 +539,7 @@ async def agent_conversation_title(req: ConversationTitleRequest):
 # ---------------------------------------------------------------------------
 # POST /agent/stats — spending stats scoped by conversation tag, JSON
 # ---------------------------------------------------------------------------
+
 
 @app.post("/agent/stats")
 async def agent_stats(req: StatsRequest):
@@ -582,8 +590,7 @@ async def agent_stats(req: StatsRequest):
         )
 
     logger.info(
-        "agent-stats completed user_id=%s request_id=%s status=ok row_count=%s "
-        "duration_ms=%s",
+        "agent-stats completed user_id=%s request_id=%s status=ok row_count=%s duration_ms=%s",
         req.user_id,
         req.request_id,
         len(result.get("rows", [])),
@@ -600,6 +607,7 @@ async def agent_stats(req: StatsRequest):
 # ---------------------------------------------------------------------------
 # POST /agent/accounts — valid account prefixes, JSON
 # ---------------------------------------------------------------------------
+
 
 @app.post("/agent/accounts")
 async def agent_accounts(req: AccountsRequest):
@@ -659,6 +667,7 @@ async def agent_accounts(req: AccountsRequest):
 # POST /agent/cache/warm — best-effort cache warmup, JSON
 # ---------------------------------------------------------------------------
 
+
 @app.post("/agent/cache/warm")
 async def agent_cache_warm(req: CacheWarmRequest):
     start_time = time.monotonic()
@@ -704,12 +713,12 @@ async def agent_cache_warm(req: CacheWarmRequest):
 # POST /agent/onboarding/discover — deterministic repo discovery, JSON
 # ---------------------------------------------------------------------------
 
+
 @app.post("/agent/onboarding/discover")
 async def agent_onboarding_discover(req: OnboardingDiscoveryRequest):
     start_time = time.monotonic()
     logger.info(
-        "agent-onboarding-discover user_id=%s request_id=%s has_entry_path=%s "
-        "has_expected_head=%s",
+        "agent-onboarding-discover user_id=%s request_id=%s has_entry_path=%s has_expected_head=%s",
         req.user_id,
         req.request_id,
         bool(req.entry_path),
@@ -795,8 +804,7 @@ async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
     if req.expected_head_sha is None:
         return _error_envelope("INVALID_REQUEST", "expected_head_sha is required", 400)
     logger.info(
-        "agent-onboarding-setup-confirm user_id=%s request_id=%s operation=%s "
-        "has_expected_head=%s",
+        "agent-onboarding-setup-confirm user_id=%s request_id=%s operation=%s has_expected_head=%s",
         req.user_id,
         req.request_id,
         req.operation,
@@ -840,6 +848,7 @@ async def agent_onboarding_setup_confirm(req: OnboardingSetupRequest):
 # POST /agent/run — DEPRECATED, forwards to /agent/chat
 # ---------------------------------------------------------------------------
 
+
 class ConversationMeta(BaseModel):
     tag: str | None = None
     account_whitelist: list[str] | None = None
@@ -858,8 +867,7 @@ class AgentRunRequest(BaseModel):
 async def agent_run(req: AgentRunRequest):
     """DEPRECATED — use POST /agent/chat instead. Forwards internally."""
     logger.warning(
-        "Deprecated /agent/run called; forward to /agent/chat. "
-        "model=%s",
+        "Deprecated /agent/run called; forward to /agent/chat. model=%s",
         req.model,
     )
     chat_req = ChatRequest(
@@ -880,6 +888,7 @@ async def agent_run(req: AgentRunRequest):
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+
 
 @click.command()
 @click.option("--host", default=os.environ.get("AGENT_HOST", "0.0.0.0"))

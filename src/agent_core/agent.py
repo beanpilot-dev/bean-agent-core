@@ -20,6 +20,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
+from agent_core.services.tool_ports import (
+    WorkflowToolDependenciesFactory,
+    create_workflow_tool_dependencies,
+)
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import GitService
 from agent_core.tracing import get_tracing_manager
@@ -66,8 +70,10 @@ RUNTIME POLICY:
 def _serialize_history(messages) -> list[dict]:
     role_map = {"human": "user", "ai": "assistant", "system": "system"}
     return [
-        {"role": role_map.get(getattr(m, "type", "user"), "user"),
-         "content": getattr(m, "content", "")}
+        {
+            "role": role_map.get(getattr(m, "type", "user"), "user"),
+            "content": getattr(m, "content", ""),
+        }
         for m in messages
     ]
 
@@ -78,10 +84,10 @@ def _has_pending_action_status(payload: Any) -> bool:
             payload = json.loads(payload)
         except json.JSONDecodeError:
             return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("status") in {"PENDING_ACTION", "approval_required"}
-    )
+    return isinstance(payload, dict) and payload.get("status") in {
+        "PENDING_ACTION",
+        "approval_required",
+    }
 
 
 def is_deepseek_thinking_model(model: str) -> bool:
@@ -123,11 +129,7 @@ def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
     }
     if not compact_context:
         return ""
-    return (
-        "\nLEDGER CONTEXT:\n"
-        + json.dumps(compact_context, ensure_ascii=False)
-        + "\n"
-    )
+    return "\nLEDGER CONTEXT:\n" + json.dumps(compact_context, ensure_ascii=False) + "\n"
 
 
 def _build_single_loop_prompt(
@@ -141,10 +143,7 @@ def _build_single_loop_prompt(
         + SINGLE_LOOP_POLICY
         + f"\nTODAY: {today}\n"
         + _format_ledger_context(ledger_context)
-        + (
-            f"\nCONVERSATION CONTEXT:\n{conversation_context}\n"
-            if conversation_context else ""
-        )
+        + (f"\nCONVERSATION CONTEXT:\n{conversation_context}\n" if conversation_context else "")
         + "\nRESPONSE LANGUAGE:\n"
         + response_language_instruction(preferred_language)
     )
@@ -226,14 +225,19 @@ async def generate_conversation_title(
     if os.environ.get("OPENAI_BASE_URL"):
         llm_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
     llm = ChatOpenAI(**llm_kwargs)
-    response = await llm.ainvoke([
-        SystemMessage(content=(
-            "Generate a concise conversation title from the user's first message. "
-            "Return only the title as plain text. No markdown, quotes, labels, or punctuation. "
-            "Use at most 8 words and avoid exposing unnecessary sensitive detail."
-        )),
-        HumanMessage(content=query),
-    ])
+    response = await llm.ainvoke(
+        [
+            SystemMessage(
+                content=(
+                    "Generate a concise conversation title from the user's first message. "
+                    "Return only the title as plain text. No markdown, quotes, labels, "
+                    "or punctuation. "
+                    "Use at most 8 words and avoid exposing unnecessary sensitive detail."
+                )
+            ),
+            HumanMessage(content=query),
+        ]
+    )
     return normalize_conversation_title(str(response.content))
 
 
@@ -241,8 +245,13 @@ async def generate_conversation_title(
 
 
 class PersonalFinanceAgent:
-
-    def __init__(self):
+    def __init__(
+        self,
+        tool_dependencies_factory: WorkflowToolDependenciesFactory = (
+            create_workflow_tool_dependencies
+        ),
+    ):
+        self._tool_dependencies_factory = tool_dependencies_factory
         self.graph = self._build_graph()
         self.model_tools = MODEL_TOOLS
 
@@ -251,10 +260,14 @@ class PersonalFinanceAgent:
         builder.add_node("agent", _single_agent_node)
         builder.add_node("tools", ToolNode(MODEL_TOOLS))
         builder.add_edge(START, "agent")
-        builder.add_conditional_edges("agent", _single_loop_condition, {
-            "tools": "tools",
-            END: END,
-        })
+        builder.add_conditional_edges(
+            "agent",
+            _single_loop_condition,
+            {
+                "tools": "tools",
+                END: END,
+            },
+        )
         builder.add_edge("tools", "agent")
         return builder.compile()
 
@@ -319,6 +332,7 @@ class PersonalFinanceAgent:
             base_llm_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
 
         base_llm = ChatOpenAI(**base_llm_kwargs)
+        tool_dependencies = self._tool_dependencies_factory()
 
         try:
             today = datetime.now().strftime("%Y-%m-%d")
@@ -385,6 +399,7 @@ class PersonalFinanceAgent:
                         "whitelist": whitelist,
                         "ledger_config": ledger_config,
                         "ledger_context": ledger_context,
+                        "tool_dependencies": tool_dependencies,
                         "content_stream_queue": content_stream_queue,
                     },
                 }
@@ -455,12 +470,10 @@ class PersonalFinanceAgent:
                     visibility="timeline",
                     display_key=(
                         "workflow.awaiting_approval"
-                        if require_input else "workflow.execution.completed"
+                        if require_input
+                        else "workflow.execution.completed"
                     ),
-                    fallback_text=(
-                        "Preview ready"
-                        if require_input else "Agent loop completed"
-                    ),
+                    fallback_text=("Preview ready" if require_input else "Agent loop completed"),
                     display_args={
                         "tool_count": len(tool_names),
                     },
@@ -548,13 +561,15 @@ class PersonalFinanceAgent:
             yield {
                 "type": "history_snapshot",
                 "messages": (
-                    prior if prior and all(isinstance(m, dict) for m in prior)
+                    prior
+                    if prior and all(isinstance(m, dict) for m in prior)
                     else _serialize_history(prior)
                 ),
                 "trace_id": tracing.get_trace_id() if tracing else None,
                 "trace_url": tracing.get_trace_url() if tracing else None,
                 "usage": {"tokens": 0, "duration_ms": duration_ms},
             }
+
 
 def _tool_names(result: dict) -> list[str]:
     names: list[str] = []
