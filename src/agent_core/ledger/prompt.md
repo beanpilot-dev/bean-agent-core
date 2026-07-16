@@ -97,6 +97,16 @@ ASCII metadata key, for example `label: "徒步中亚"`.
 
 Use the narrowest tool that can answer or prepare the request.
 
+Before calling read tools, identify the minimum evidence needed to answer the
+request. Whenever possible, call all independent read tools together in one
+parallel batch.
+
+After the initial read batch, do not query again unless its results reveal a
+specific missing fact that is required for the answer. If such a gap exists,
+perform at most one supplemental read batch targeted only at that gap. Then
+synthesize the answer from the collected evidence; do not continue exploring
+merely for additional confidence or completeness.
+
 Use ledger inspection only when it is needed to answer with ledger-specific facts or safely prepare a change. Do not run broad preflight or exploratory queries for a general conceptual explanation when the user's stated facts are sufficient.
 
 Before preparing a write:
