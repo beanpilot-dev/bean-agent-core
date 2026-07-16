@@ -18,9 +18,12 @@ from agent_core.agent import (
     SINGLE_LOOP_POLICY,
     SYSTEM_PROMPT,
     PersonalFinanceAgent,
+    _format_ledger_context,
     _pending_actions,
     _single_agent_node,
+    message_token_count,
     normalize_conversation_title,
+    supports_stream_usage,
 )
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
 from agent_core.workflow.language import (
@@ -47,6 +50,36 @@ def test_requires_user_input_ignores_confirmation_phrases(content):
 
 def test_requires_user_input_returns_false_without_messages():
     assert PersonalFinanceAgent._requires_user_input({}) is False
+
+
+def test_message_token_count_reads_standard_usage_metadata():
+    message = AIMessage(
+        content="response",
+        usage_metadata={"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
+    )
+
+    assert message_token_count(message) == 150
+
+
+def test_message_token_count_reads_legacy_response_metadata():
+    message = AIMessage(
+        content="response",
+        response_metadata={"token_usage": {"prompt_tokens": 80, "completion_tokens": 20}},
+    )
+
+    assert message_token_count(message) == 100
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (None, True),
+        ("https://api.deepseek.com", True),
+        ("https://proxy.example.com/v1", False),
+    ],
+)
+def test_supports_stream_usage_only_for_known_custom_provider(base_url, expected):
+    assert supports_stream_usage(base_url) is expected
 
 
 class FailingGraph:
@@ -109,6 +142,38 @@ class CapturingGraph:
         self.captured_config = config
         return {
             "messages": graph_input["messages"] + [AIMessage(content="captured response")],
+        }
+
+
+class StreamingUsageLLM:
+    def bind_tools(self, _tools):
+        return self
+
+    async def astream(self, _messages, config=None):
+        yield AIMessageChunk(content="usage ")
+        yield AIMessageChunk(
+            content="response",
+            usage_metadata={
+                "input_tokens": 90,
+                "output_tokens": 10,
+                "total_tokens": 100,
+            },
+        )
+
+
+class UsageGraph:
+    async def ainvoke(self, graph_input, config=None):
+        return {
+            "messages": graph_input["messages"] + [
+                AIMessage(
+                    content="usage response",
+                    usage_metadata={
+                        "input_tokens": 90,
+                        "output_tokens": 10,
+                        "total_tokens": 100,
+                    },
+                )
+            ],
         }
 
 
@@ -436,6 +501,90 @@ async def test_stream_records_meaningful_root_trace_input_and_output(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_single_agent_node_preserves_streamed_token_usage():
+    result = await _single_agent_node(
+        {
+            "messages": [HumanMessage(content="Summarize this ledger")],
+            "preferred_language": "en",
+        },
+        {"configurable": {"single_loop_llm": StreamingUsageLLM()}},
+    )
+
+    assert result["messages"][0].content == "usage response"
+    assert message_token_count(result["messages"][0]) == 100
+
+
+@pytest.mark.asyncio
+async def test_stream_publishes_token_usage_in_history_snapshot(monkeypatch):
+    agent = PersonalFinanceAgent()
+    agent.graph = UsageGraph()
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
+
+    chunks = [
+        chunk
+        async for chunk in agent.stream(
+            query="Summarize this ledger",
+            prior=[],
+            api_key="key",
+            model="scripted",
+        )
+    ]
+
+    snapshot = next(chunk for chunk in chunks if chunk.get("type") == "history_snapshot")
+    assert snapshot["usage"]["tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_stream_requests_usage_for_deepseek_custom_endpoint(monkeypatch):
+    agent = PersonalFinanceAgent()
+    agent.graph = CapturingGraph()
+    captured_kwargs = {}
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr(
+        "agent_core.agent.ChatOpenAI",
+        lambda **kwargs: (captured_kwargs.update(kwargs) or CapturingLLM()),
+    )
+
+    async for _chunk in agent.stream(
+        query="Summarize this ledger",
+        prior=[],
+        api_key="key",
+        model="scripted",
+    ):
+        pass
+
+    assert captured_kwargs["stream_usage"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_omits_usage_request_for_unsupported_custom_endpoint(monkeypatch):
+    agent = PersonalFinanceAgent()
+    agent.graph = CapturingGraph()
+    captured_kwargs = {}
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.com/v1")
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr(
+        "agent_core.agent.ChatOpenAI",
+        lambda **kwargs: (captured_kwargs.update(kwargs) or CapturingLLM()),
+    )
+
+    async for _chunk in agent.stream(
+        query="Summarize this ledger",
+        prior=[],
+        api_key="key",
+        model="scripted",
+    ):
+        pass
+
+    assert "stream_usage" not in captured_kwargs
+
+
+@pytest.mark.asyncio
 async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeypatch):
     graph = CapturingGraph()
     agent = PersonalFinanceAgent()
@@ -496,6 +645,31 @@ async def test_single_agent_node_adds_ledger_context_to_system_prompt():
     system_prompt = llm.messages[0].content
     assert "LEDGER CONTEXT" in system_prompt
     assert "Assets:Liquid:Bank:Checking" in system_prompt
+
+
+def test_ledger_context_prompt_preserves_false_zero_and_empty_values():
+    prompt = _format_ledger_context(
+        {
+            "status": "CLEAN",
+            "ledger_meta": {
+                "current_month_is_partial": False,
+                "account_counts": {"Assets": 0},
+            },
+            "accounts_by_type": {"Assets": [], "Expenses": []},
+            "accounts_truncated": False,
+            "accounts_omitted": 0,
+            "balance_snapshot": {"accounts": [], "truncated": False},
+            "flow_summary": {"current_partial_month": {"income": [], "expenses": []}},
+            "recent_activity": {"transactions": [], "truncated": False},
+            "recent_ledger_text": {"text": "", "truncated": False},
+            "context_truncated": False,
+        }
+    )
+
+    assert '"current_month_is_partial":false' in prompt
+    assert '"accounts_omitted":0' in prompt
+    assert '"transactions":[]' in prompt
+    assert '"truncated":false' in prompt
 
 
 def test_single_loop_prompt_analysis_contract_has_no_global_cny_default():

@@ -52,6 +52,7 @@ def _repo_path(workspace: str, rel_path: str) -> str:
 @dataclass
 class _ParsedLedger:
     fingerprint: tuple[tuple[str, int, int], ...]
+    entries: list[object]
     errors: list[object]
     error_output: str
 
@@ -118,23 +119,32 @@ class Beancount:
 
         main = _repo_path(workspace, _cfg(ledger_config).entry_path)
         try:
-            _entries, errors, _options = loader.load_file(main)
+            entries, errors, _options = loader.load_file(main)
             output = io.StringIO()
             printer.print_errors(errors, file=output)
             parsed = _ParsedLedger(
                 fingerprint=fingerprint,
+                entries=list(entries),
                 errors=list(errors),
                 error_output=output.getvalue(),
             )
         except Exception as exc:
             parsed = _ParsedLedger(
                 fingerprint=fingerprint,
+                entries=[],
                 errors=[exc],
                 error_output=str(exc),
             )
 
         Beancount._parsed_cache[key] = parsed
         return parsed
+
+    @staticmethod
+    def parsed_ledger(
+        workspace: str, ledger_config: LedgerConfig | None = None
+    ) -> _ParsedLedger:
+        """Return the cached parsed ledger used by in-process validation."""
+        return Beancount._load_ledger(workspace, ledger_config)
 
     @staticmethod
     def _workspace_fingerprint(workspace: str) -> tuple[tuple[str, int, int], ...]:

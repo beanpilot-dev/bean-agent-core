@@ -15,6 +15,27 @@ def test_preflight_validate_and_account_helpers(ledger_workspace: Path) -> None:
     result = PreflightService.validate(str(ledger_workspace))
 
     assert result.status == "CLEAN"
+    assert result.ledger_meta is not None
+    assert result.ledger_meta["bean_check_passed"] is True
+    assert set(result.accounts_by_type) == {
+        "Assets",
+        "Liabilities",
+        "Equity",
+        "Income",
+        "Expenses",
+    }
+    assert result.balance_snapshot is not None
+    assert result.flow_summary is not None
+    assert result.recent_activity is not None
+    assert result.recent_ledger_text is not None
+    assert {
+        "validation",
+        "account_extraction",
+        "ledger_metadata",
+        "balance_snapshot",
+        "flow_summary",
+        "recent_context",
+    } <= set(result.timings_ms)
     assert "Assets:Cash" in PreflightService.list_accounts(str(ledger_workspace))
     assert any(
         "open Assets:Cash" in line

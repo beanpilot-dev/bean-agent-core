@@ -233,9 +233,18 @@ class PreflightResult(ServiceResult):
     status: Literal["CLEAN", "ERROR", "SETUP_REQUIRED"] = "CLEAN"
     target: str | None = None
     accounts: list[str] = field(default_factory=list)
+    accounts_by_type: dict[str, list[str]] = field(default_factory=dict)
+    accounts_truncated: bool = False
+    accounts_omitted: int = 0
     errors: str | None = None
     recent: str | None = None
     action: str | None = None
+    ledger_meta: dict[str, Any] | None = None
+    balance_snapshot: dict[str, Any] | None = None
+    flow_summary: dict[str, Any] | None = None
+    recent_activity: dict[str, Any] | None = None
+    recent_ledger_text: dict[str, Any] | None = None
+    timings_ms: dict[str, float] = field(default_factory=dict)
 
 
 # ── Ledger config ─────────────────────────────────────────────────────────────
