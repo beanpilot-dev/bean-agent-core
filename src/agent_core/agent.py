@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
 
 from langchain_core.messages import (
     HumanMessage,
@@ -92,6 +93,47 @@ def _has_pending_action_status(payload: Any) -> bool:
 
 def is_deepseek_thinking_model(model: str) -> bool:
     return model in {"deepseek-v4-pro", "deepseek-v4-flash"}
+
+
+def supports_stream_usage(base_url: str | None) -> bool:
+    """Return whether the configured provider supports usage in streamed chunks."""
+    if not base_url:
+        return True
+    hostname = urlparse(base_url).hostname
+    return hostname == "api.deepseek.com" or bool(
+        hostname and hostname.endswith(".deepseek.com")
+    )
+
+
+def message_token_count(message: Any) -> int:
+    """Read a message's token total across LangChain metadata formats."""
+    usage_metadata = getattr(message, "usage_metadata", None)
+    if isinstance(usage_metadata, dict):
+        total_tokens = usage_metadata.get("total_tokens")
+        if isinstance(total_tokens, (int, float)) and total_tokens >= 0:
+            return int(total_tokens)
+
+    response_metadata = getattr(message, "response_metadata", None)
+    if not isinstance(response_metadata, dict):
+        return 0
+
+    for usage_key in ("token_usage", "usage"):
+        usage = response_metadata.get(usage_key)
+        if not isinstance(usage, dict):
+            continue
+        total_tokens = usage.get("total_tokens")
+        if isinstance(total_tokens, (int, float)) and total_tokens >= 0:
+            return int(total_tokens)
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        if (
+            isinstance(input_tokens, (int, float))
+            and input_tokens >= 0
+            and isinstance(output_tokens, (int, float))
+            and output_tokens >= 0
+        ):
+            return int(input_tokens + output_tokens)
+    return 0
 
 
 def validate_model_name(model: str) -> str:
@@ -328,8 +370,11 @@ class PersonalFinanceAgent:
             "model": model,
             "api_key": api_key or "none",
         }
-        if os.environ.get("OPENAI_BASE_URL"):
-            base_llm_kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            base_llm_kwargs["base_url"] = base_url
+        if supports_stream_usage(base_url):
+            base_llm_kwargs["stream_usage"] = True
 
         base_llm = ChatOpenAI(**base_llm_kwargs)
         tool_dependencies = self._tool_dependencies_factory()
@@ -511,10 +556,7 @@ class PersonalFinanceAgent:
 
             total_tokens = 0
             for msg in result["messages"]:
-                rmeta = getattr(msg, "response_metadata", None)
-                if isinstance(rmeta, dict):
-                    tu = rmeta.get("token_usage", {})
-                    total_tokens += tu.get("total_tokens", 0)
+                total_tokens += message_token_count(msg)
 
             duration_ms = int((time.monotonic() - start_time) * 1000)
 
