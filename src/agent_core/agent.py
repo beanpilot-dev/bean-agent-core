@@ -164,14 +164,46 @@ def normalize_conversation_title(raw_title: str) -> str:
 def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
     if not isinstance(ledger_context, dict):
         return ""
-    compact_context = {
-        key: ledger_context.get(key)
-        for key in ("status", "target", "accounts", "recent", "errors")
-        if ledger_context.get(key)
-    }
+    compact_context: dict[str, Any] = {}
+    for key in (
+        "status",
+        "target",
+        "ledger_meta",
+        "balance_snapshot",
+        "flow_summary",
+        "recent_activity",
+        "recent_ledger_text",
+        "context_truncated",
+        "accounts_truncated",
+        "accounts_omitted",
+        "errors",
+        "errors_truncated",
+    ):
+        if key in ledger_context and ledger_context[key] is not None:
+            value = ledger_context[key]
+            if key == "errors" and isinstance(value, str) and len(value) > 2_000:
+                compact_context[key] = value[-2_000:]
+                compact_context["errors_truncated"] = True
+            else:
+                compact_context[key] = value
+
+    # The grouped representation is canonical in the prompt. Keep support for
+    # older callers that still provide only the flat account list.
+    grouped_accounts = ledger_context.get("accounts_by_type")
+    if grouped_accounts is None:
+        grouped_accounts = ledger_context.get("accounts")
+    if grouped_accounts is not None:
+        compact_context["accounts"] = grouped_accounts
+
+    if "recent_activity" not in compact_context and "recent_ledger_text" not in compact_context:
+        if "recent" in ledger_context and ledger_context["recent"] is not None:
+            compact_context["recent"] = ledger_context["recent"]
+
     if not compact_context:
         return ""
-    return "\nLEDGER CONTEXT:\n" + json.dumps(compact_context, ensure_ascii=False) + "\n"
+    return "\nLEDGER CONTEXT:\n" + json.dumps(
+        compact_context, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
 
 
 def _build_single_loop_prompt(
