@@ -375,7 +375,9 @@ class PersonalFinanceAgent:
                     fallback_text="Preparing a response",
                 )
 
-            with tracing.trace(task="agent-turn", **trace_metadata) as handler:
+            with tracing.trace(
+                task="agent-turn", input=query, **trace_metadata
+            ) as handler:
                 activity_queue: asyncio.Queue[dict[str, Any]] | None = (
                     asyncio.Queue() if activity_emitter else None
                 )
@@ -457,7 +459,9 @@ class PersonalFinanceAgent:
                     while not activity_queue.empty():
                         yield activity_queue.get_nowait()
 
-            response = result["messages"][-1].content
+                response = result["messages"][-1].content
+                tracing.update_root_observation(output=response)
+
             require_input = self._requires_user_input(result)
             tool_names = _tool_names(result)
             pending_actions = _pending_actions(result)

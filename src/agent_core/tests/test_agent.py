@@ -1,6 +1,7 @@
 """Tests for PersonalFinanceAgent response classification."""
 
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -109,6 +110,28 @@ class CapturingGraph:
         return {
             "messages": graph_input["messages"] + [AIMessage(content="captured response")],
         }
+
+
+class CapturingTracingManager:
+    enabled = False
+
+    def __init__(self):
+        self.trace_kwargs: dict | None = None
+        self.root_output = None
+
+    @contextmanager
+    def trace(self, **kwargs):
+        self.trace_kwargs = kwargs
+        yield object()
+
+    def update_root_observation(self, *, output):
+        self.root_output = output
+
+    def get_trace_id(self):
+        return None
+
+    def get_trace_url(self):
+        return None
 
 
 @pytest.mark.asyncio
@@ -386,6 +409,30 @@ async def test_stream_sets_preferred_language_before_graph_invocation(monkeypatc
     assert graph.captured_input is not None
     assert graph.captured_input["preferred_language"] == "zh-CN"
     assert chunks[-2]["content"] == "captured response"
+
+
+@pytest.mark.asyncio
+async def test_stream_records_meaningful_root_trace_input_and_output(monkeypatch):
+    graph = CapturingGraph()
+    tracing = CapturingTracingManager()
+    agent = PersonalFinanceAgent()
+    agent.graph = graph
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
+    monkeypatch.setattr("agent_core.agent.get_tracing_manager", lambda: tracing)
+
+    async for _chunk in agent.stream(
+        query="Summarize this ledger",
+        prior=[],
+        api_key="key",
+        model="scripted",
+    ):
+        pass
+
+    assert tracing.trace_kwargs is not None
+    assert tracing.trace_kwargs["input"] == "Summarize this ledger"
+    assert tracing.root_output == "captured response"
 
 
 @pytest.mark.asyncio

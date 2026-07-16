@@ -143,7 +143,7 @@ class TestTracingManagerEnabledFullMode:
     @patch("langfuse.langchain.CallbackHandler")
     @patch("langfuse.propagate_attributes")
     @patch("langfuse.Langfuse")
-    def test_root_span_input_is_redacted(
+    def test_root_span_input_is_recorded_in_full_mode(
         self, mock_langfuse_cls, mock_propagate, mock_cb_handler
     ):
         mock_client = MagicMock()
@@ -168,7 +168,85 @@ class TestTracingManagerEnabledFullMode:
             pass
 
         call_kwargs = mock_client.start_as_current_observation.call_args.kwargs
-        assert call_kwargs["input"] is None
+        assert call_kwargs["input"] == {"query": "hello"}
+
+    @patch("langfuse.langchain.CallbackHandler")
+    @patch("langfuse.propagate_attributes")
+    @patch("langfuse.Langfuse")
+    def test_root_span_output_is_recorded_in_full_mode(
+        self, mock_langfuse_cls, mock_propagate, mock_cb_handler
+    ):
+        mock_client = MagicMock()
+        mock_root_span = MagicMock()
+        mock_root_span.trace_id = "trace-output"
+        mock_client.start_as_current_observation.return_value.__enter__ = (
+            MagicMock(return_value=mock_root_span)
+        )
+        mock_client.start_as_current_observation.return_value.__exit__ = (
+            MagicMock(return_value=False)
+        )
+        mock_langfuse_cls.return_value = mock_client
+
+        mock_propagate.return_value.__enter__ = MagicMock()
+        mock_propagate.return_value.__exit__ = MagicMock(return_value=False)
+        mock_cb_handler.return_value = MagicMock()
+
+        mgr = TracingManager()
+        with mgr.trace(task="test"):
+            mgr.update_root_observation(output={"answer": "hello"})
+
+        mock_client.update_current_span.assert_called_once_with(
+            output={"answer": "hello"}
+        )
+
+    @patch("langfuse.langchain.CallbackHandler")
+    @patch("langfuse.propagate_attributes")
+    @patch("langfuse.Langfuse")
+    def test_application_exception_propagates_unchanged_and_flushes(
+        self, mock_langfuse_cls, mock_propagate, mock_cb_handler
+    ):
+        mock_client = MagicMock()
+        mock_root_span = MagicMock()
+        mock_root_span.trace_id = "trace-error"
+        mock_client.start_as_current_observation.return_value.__enter__ = (
+            MagicMock(return_value=mock_root_span)
+        )
+        mock_client.start_as_current_observation.return_value.__exit__ = (
+            MagicMock(return_value=False)
+        )
+        mock_langfuse_cls.return_value = mock_client
+
+        mock_propagate.return_value.__enter__ = MagicMock()
+        mock_propagate.return_value.__exit__ = MagicMock(return_value=False)
+        mock_cb_handler.return_value = MagicMock()
+
+        mgr = TracingManager()
+        with pytest.raises(ValueError, match="application failure"):
+            with mgr.trace(task="test"):
+                raise ValueError("application failure")
+
+        mock_client.flush.assert_called_once()
+
+    @patch("langfuse.langchain.CallbackHandler")
+    @patch("langfuse.propagate_attributes")
+    @patch("langfuse.Langfuse")
+    def test_setup_fallback_flushes_when_application_raises(
+        self, mock_langfuse_cls, mock_propagate, mock_cb_handler
+    ):
+        mock_client = MagicMock()
+        mock_client.start_as_current_observation.return_value.__enter__.side_effect = (
+            RuntimeError("setup failure")
+        )
+        mock_langfuse_cls.return_value = mock_client
+        mock_cb_handler.return_value = MagicMock()
+
+        mgr = TracingManager()
+        with pytest.raises(ValueError, match="application failure"):
+            with mgr.trace(task="test"):
+                raise ValueError("application failure")
+
+        mock_propagate.assert_not_called()
+        mock_client.flush.assert_called_once()
 
     @patch("langfuse.langchain.CallbackHandler")
     @patch("langfuse.propagate_attributes")
@@ -321,6 +399,33 @@ class TestTracingManagerEnabledMetadataMode:
             assert isinstance(handler, _NoopCallback)
 
         assert mgr.get_trace_id() == "trace-metadata"
+
+    @patch("langfuse.propagate_attributes")
+    @patch("langfuse.Langfuse")
+    def test_root_input_and_output_remain_redacted(
+        self, mock_langfuse_cls, mock_propagate
+    ):
+        mock_client = MagicMock()
+        mock_root_span = MagicMock()
+        mock_root_span.trace_id = "trace-metadata-io"
+        mock_client.start_as_current_observation.return_value.__enter__ = (
+            MagicMock(return_value=mock_root_span)
+        )
+        mock_client.start_as_current_observation.return_value.__exit__ = (
+            MagicMock(return_value=False)
+        )
+        mock_langfuse_cls.return_value = mock_client
+
+        mock_propagate.return_value.__enter__ = MagicMock()
+        mock_propagate.return_value.__exit__ = MagicMock(return_value=False)
+
+        mgr = TracingManager()
+        with mgr.trace(task="test", input={"query": "private"}):
+            mgr.update_root_observation(output={"answer": "private"})
+
+        call_kwargs = mock_client.start_as_current_observation.call_args.kwargs
+        assert call_kwargs["input"] is None
+        mock_client.update_current_span.assert_not_called()
 
     @patch("langfuse.propagate_attributes")
     @patch("langfuse.Langfuse")

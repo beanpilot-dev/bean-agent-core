@@ -73,17 +73,7 @@ class RunConfig:
 
 async def run_benchmark(config: BenchmarkConfig, run_config: RunConfig) -> BenchmarkResult:
     """Execute the full benchmark suite against agent-core."""
-    agent_env = {}
-    if run_config.base_url:
-        agent_env["OPENAI_BASE_URL"] = run_config.base_url
-    if run_config.langfuse_enabled:
-        agent_env["LANGFUSE_ENABLED"] = "true"
-        if run_config.langfuse_public_key:
-            agent_env["LANGFUSE_PUBLIC_KEY"] = run_config.langfuse_public_key
-        if run_config.langfuse_secret_key:
-            agent_env["LANGFUSE_SECRET_KEY"] = run_config.langfuse_secret_key
-        if run_config.langfuse_base_url:
-            agent_env["LANGFUSE_BASE_URL"] = run_config.langfuse_base_url
+    agent_env = _build_agent_env(run_config)
 
     agent_core_commit = get_git_commit(BENCHMARK_DIR.parent.parent)
     fixture_commit = get_git_commit(BENCHMARK_DIR / "fixtures")
@@ -189,6 +179,23 @@ async def run_benchmark(config: BenchmarkConfig, run_config: RunConfig) -> Bench
     return result
 
 
+def _build_agent_env(run_config: RunConfig) -> dict[str, str]:
+    """Build the explicit environment passed to the benchmark agent process."""
+    agent_env = {}
+    if run_config.base_url:
+        agent_env["OPENAI_BASE_URL"] = run_config.base_url
+    if run_config.langfuse_enabled:
+        agent_env["LANGFUSE_ENABLED"] = "true"
+        agent_env["LANGFUSE_TRACE_LEVEL"] = "full"
+        if run_config.langfuse_public_key:
+            agent_env["LANGFUSE_PUBLIC_KEY"] = run_config.langfuse_public_key
+        if run_config.langfuse_secret_key:
+            agent_env["LANGFUSE_SECRET_KEY"] = run_config.langfuse_secret_key
+        if run_config.langfuse_base_url:
+            agent_env["LANGFUSE_BASE_URL"] = run_config.langfuse_base_url
+    return agent_env
+
+
 def _filter_cases(cases: list[BenchmarkCase], case_id: str | None) -> list[BenchmarkCase]:
     """Return only the explicitly requested case when a case ID filter is set."""
     if not case_id:
@@ -214,7 +221,11 @@ async def _run_tier1(
 ) -> CaseResult:
     max_points = 1
     t_start = time.monotonic()
-    with fixture_context(fixture_path, agent_env, langfuse_enabled=run_config.langfuse_enabled) as (port, _temp):
+    with fixture_context(
+        fixture_path,
+        agent_env,
+        langfuse_enabled=run_config.langfuse_enabled,
+    ) as (port, _temp):
         resp = await run_single_turn(
             query=case.user_prompt,
             prior_messages=[],
@@ -231,7 +242,13 @@ async def _run_tier1(
 
     if resp.get("error"):
         details["error"] = resp["error"]
-        return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
+        return CaseResult(
+            case_id=case.id,
+            score=0,
+            max_score=max_points,
+            passed=False,
+            details=details,
+        )
 
     beancount_block = extract_beancount_block(resp_text)
     preview_source = "response_markdown"
@@ -270,7 +287,13 @@ async def _run_tier1(
         )
         details["judge"] = judge_result
         score = min(judge_result.get("score", 0), max_points)
-        return CaseResult(case_id=case.id, score=score, max_score=max_points, passed=score > 0, details=details)
+        return CaseResult(
+            case_id=case.id,
+            score=score,
+            max_score=max_points,
+            passed=score > 0,
+            details=details,
+        )
 
     return CaseResult(
         case_id=case.id,
@@ -290,7 +313,11 @@ async def _run_tier2(
 ) -> CaseResult:
     max_points = 2
     t_start = time.monotonic()
-    with fixture_context(fixture_path, agent_env, langfuse_enabled=run_config.langfuse_enabled) as (port, _temp):
+    with fixture_context(
+        fixture_path,
+        agent_env,
+        langfuse_enabled=run_config.langfuse_enabled,
+    ) as (port, _temp):
         resp = await run_single_turn(
             query=case.user_prompt,
             prior_messages=[],
@@ -306,7 +333,13 @@ async def _run_tier2(
     _add_trace_details(details, resp)
     if resp.get("error"):
         details["error"] = resp["error"]
-        return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
+        return CaseResult(
+            case_id=case.id,
+            score=0,
+            max_score=max_points,
+            passed=False,
+            details=details,
+        )
 
     ref = case.reference_answer
     judge_result = judge_tier2(
@@ -346,7 +379,11 @@ async def _run_tier3(
     max_points = 4
     turns = [{"role": t.role, "content": t.content} for t in case.turns]
     t_start = time.monotonic()
-    with fixture_context(fixture_path, agent_env, langfuse_enabled=run_config.langfuse_enabled) as (port, _temp):
+    with fixture_context(
+        fixture_path,
+        agent_env,
+        langfuse_enabled=run_config.langfuse_enabled,
+    ) as (port, _temp):
         resp = await run_multi_turn(
             turns=turns,
             model=run_config.model,
@@ -361,7 +398,13 @@ async def _run_tier3(
     _add_trace_details(details, resp)
     if resp.get("error"):
         details["error"] = resp["error"]
-        return CaseResult(case_id=case.id, score=0, max_score=max_points, passed=False, details=details)
+        return CaseResult(
+            case_id=case.id,
+            score=0,
+            max_score=max_points,
+            passed=False,
+            details=details,
+        )
 
     ref = case.final_reference_answer
     judge_result = judge_tier3(

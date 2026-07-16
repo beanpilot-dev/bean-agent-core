@@ -14,7 +14,7 @@ all tracing operations are no-ops.
 import logging
 import os
 import re
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any
 
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -143,6 +143,19 @@ class TracingManager:
             except Exception as e:
                 logger.warning("LangFuse shutdown failed: %s", e)
 
+    def update_root_observation(self, *, output: Any) -> None:
+        """Set output on the active root observation in full tracing mode."""
+        if self._config["trace_level"] != "full" or self._client is None:
+            return
+
+        try:
+            self._client.update_current_span(output=output)
+        except Exception as e:
+            logger.warning(
+                "LangFuse root observation update failed error_type=%s",
+                type(e).__name__,
+            )
+
     @contextmanager
     def trace(self, **metadata):
         """Context manager: creates a LangFuse root span, returns a callback handler.
@@ -167,6 +180,7 @@ class TracingManager:
             yield _NoopCallback()
             return
 
+        stack = ExitStack()
         try:
             from langfuse import propagate_attributes
 
@@ -178,8 +192,10 @@ class TracingManager:
                 handler = _NoopCallback()
 
             task_name = metadata.pop("task", "agent-run")
-            metadata.pop("input", None)
-            root_input = None
+            supplied_input = metadata.pop("input", None)
+            root_input = (
+                supplied_input if self._config["trace_level"] == "full" else None
+            )
             user_id = metadata.pop("user_id", None)
             session_id = metadata.pop("conversation_id", None)
             conversation_tag = metadata.pop("conversation_tag", None)
@@ -190,29 +206,41 @@ class TracingManager:
 
             trace_metadata = _safe_trace_metadata(metadata)
 
-            with self._client.start_as_current_observation(
-                as_type="span",
-                name=task_name,
-                input=root_input,
-            ) as root_span:
-                self._root_span = root_span
-                self._trace_id = root_span.trace_id
+            root_span = stack.enter_context(
+                self._client.start_as_current_observation(
+                    as_type="span",
+                    name=task_name,
+                    input=root_input,
+                )
+            )
+            self._root_span = root_span
+            self._trace_id = root_span.trace_id
 
-                with propagate_attributes(
+            stack.enter_context(
+                propagate_attributes(
                     user_id=user_id,
                     session_id=session_id,
                     tags=tags,
                     metadata=trace_metadata,
                     trace_name=task_name,
-                ):
-                    yield handler
+                )
+            )
 
         except Exception as e:
+            stack.close()
             logger.warning(
                 "LangFuse trace error error_type=%s — falling back to noop",
                 type(e).__name__,
             )
-            yield _NoopCallback()
+            try:
+                yield _NoopCallback()
+            finally:
+                self.flush()
+            return
+
+        try:
+            with stack:
+                yield handler
         finally:
             self.flush()
 
