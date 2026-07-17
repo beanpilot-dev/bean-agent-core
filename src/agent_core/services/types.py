@@ -163,6 +163,7 @@ class CommitResult(ServiceResult):
     outcome: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     push_status: str | None = None
+    commit_sha: str | None = None
 
 
 # ── Domain errors (LLM can self-correct) ──────────────────────────────────────

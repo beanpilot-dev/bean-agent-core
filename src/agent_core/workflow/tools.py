@@ -262,6 +262,37 @@ def tool_ledger_prepare_transaction_update(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_prepare_transaction_delete")
+def tool_ledger_prepare_transaction_delete(
+    transaction_ref: str,
+    revision_fingerprint: str,
+    commit_message: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Validate and prepare deletion of one authoritative sidecar transaction.
+
+    This is a high-risk deletion. It requires an unchanged opaque reference
+    and exact revision fingerprint from the authoritative read tools. It does
+    not accept date, narration, search, replacement, or change-set fallback.
+
+    Args:
+        transaction_ref: Unchanged opaque reference returned by
+            ledger_find_transactions and ledger_get_transaction.
+        revision_fingerprint: Exact fingerprint returned by
+            ledger_get_transaction for this directive revision.
+        commit_message: Git commit message used if later approved.
+    """
+    c = config.get("configurable", {})
+    result = _dependencies(config).mutations.prepare_transaction_delete(
+        c.get("workspace", ""),
+        transaction_ref,
+        revision_fingerprint,
+        commit_message,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
 @tool("ledger_import_transactions")
 def tool_ledger_import_transactions(
     transactions_text: str = "",
@@ -443,6 +474,7 @@ def tool_ledger_prepare_balance_update(
 TRANSACTION_TOOLS = [
     tool_ledger_commit_transaction,
     tool_ledger_prepare_transaction_update,
+    tool_ledger_prepare_transaction_delete,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,

@@ -130,6 +130,37 @@ def replace(
     return rel_path
 
 
+def delete(
+    workspace: str,
+    rel_path: str,
+    old_text: str,
+    target_start_line: int | None = None,
+    ledger_config: LedgerConfig | None = None,
+) -> str:
+    """Remove one exact sidecar directive without modeling it as replacement."""
+    rel_path = _require_sidecar_path(workspace, rel_path, ledger_config)
+    path = _repo_path(workspace, rel_path)
+    with open(path, "r", encoding="utf-8") as handle:
+        original = handle.read()
+    if target_start_line is None:
+        if old_text not in original:
+            raise ValueError("Mutation precondition failed: target transaction changed")
+        updated = original.replace(old_text, "", 1)
+    else:
+        lines = original.splitlines(keepends=True)
+        index = target_start_line - 1
+        if index < 0 or index >= len(lines):
+            raise ValueError("Mutation precondition failed: target transaction moved")
+        candidate = "".join(lines[index : index + len(old_text.splitlines(keepends=True))])
+        if candidate != old_text:
+            raise ValueError("Mutation precondition failed: target transaction changed")
+        updated = "".join(lines[:index] + lines[index + len(old_text.splitlines(keepends=True)) :])
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(updated)
+    Beancount.invalidate_cache(workspace, ledger_config)
+    return rel_path
+
+
 def copy_workspace(workspace: str, target: str) -> None:
     shutil.copytree(
         workspace,
@@ -217,6 +248,16 @@ class FilesystemSidecarMutationStore:
         config: LedgerConfig | None = None,
     ) -> str:
         return replace(workspace, rel_path, old_text, new_text, config)
+
+    def delete(
+        self,
+        workspace: str,
+        rel_path: str,
+        old_text: str,
+        target_start_line: int | None = None,
+        config: LedgerConfig | None = None,
+    ) -> str:
+        return delete(workspace, rel_path, old_text, target_start_line, config)
 
     def copy_workspace(self, workspace: str, target: str) -> None:
         copy_workspace(workspace, target)

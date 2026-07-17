@@ -49,6 +49,29 @@ class MutationPlanner:
         )
 
     @staticmethod
+    def transaction_delete(
+        target_file: str,
+        old_text: str,
+        target_start_line: int,
+        commit_message: str,
+    ) -> MutationPlan:
+        return MutationPlan.from_operations(
+            [
+                MutationOperation(
+                    kind="delete",
+                    target_file=target_file,
+                    old_text=old_text,
+                    target_start_line=target_start_line,
+                )
+            ],
+            commit_message=commit_message,
+            remediation=(
+                "The transaction changed before deletion could be applied. "
+                "Look it up again and prepare a new deletion."
+            ),
+        )
+
+    @staticmethod
     def bulk(transactions_text: str, commit_message: str) -> MutationPlan:
         return MutationPlan.from_operations(
             [MutationOperation(kind="append", text=transactions_text)],

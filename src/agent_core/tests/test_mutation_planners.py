@@ -14,7 +14,9 @@ from agent_core.services.types import PendingAction
 def test_core_planners_preserve_operation_and_remediation_contracts() -> None:
     commit = MutationPlanner.commit("transaction", "record transaction")
     opened = MutationPlanner.open_account("Assets:Cash:Wallet", "open directive")
-    updated = MutationPlanner.update("data/agent_inc/current.beancount", "old", "new", "update")
+    updated = MutationPlanner.transaction_update(
+        "data/agent_inc/current.beancount", "old", "new", "update"
+    )
     bulk = MutationPlanner.bulk("transactions", "import")
 
     assert commit.operations == (MutationOperation(kind="append", text="transaction"),)

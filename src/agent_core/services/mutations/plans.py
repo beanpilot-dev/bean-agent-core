@@ -6,9 +6,9 @@ from typing import Literal
 
 from .facts import SemanticFact
 
-OperationKind = Literal["append", "open", "replace"]
-_PLAN_SCHEMA_VERSION = 2
-_LEGACY_PLAN_SCHEMA_VERSION = 1
+OperationKind = Literal["append", "open", "replace", "delete"]
+_PLAN_SCHEMA_VERSION = 3
+_LEGACY_PLAN_SCHEMA_VERSIONS = {1, 2}
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class MutationOperation:
     target_file: str | None = None
     account_name: str | None = None
     old_text: str | None = None
+    target_start_line: int | None = None
 
     def to_spec(self) -> dict[str, str | None]:
         return {
@@ -28,13 +29,21 @@ class MutationOperation:
             "target_file": self.target_file,
             "account_name": self.account_name,
             "old_text": self.old_text,
+            "target_start_line": self.target_start_line,
         }
 
     @classmethod
-    def from_spec(cls, value: dict[str, object]) -> "MutationOperation":
+    def from_spec(cls, value: dict[str, object], *, plan_version: int) -> "MutationOperation":
         kind = value.get("kind")
-        if kind not in {"append", "open", "replace"}:
+        if kind not in {"append", "open", "replace", "delete"}:
             raise ValueError("Unsupported mutation operation")
+        if kind == "delete" and plan_version < _PLAN_SCHEMA_VERSION:
+            raise ValueError("Delete mutation requires the current mutation plan version")
+        target_start_line = value.get("target_start_line")
+        if target_start_line is not None and (
+            not isinstance(target_start_line, int) or target_start_line < 1
+        ):
+            raise ValueError("Mutation operation target line is invalid")
         return cls(
             kind=kind,
             text=str(value.get("text") or ""),
@@ -45,6 +54,7 @@ class MutationOperation:
             if isinstance(value.get("account_name"), str)
             else None,
             old_text=value.get("old_text") if isinstance(value.get("old_text"), str) else None,
+            target_start_line=target_start_line,
         )
 
 
@@ -115,7 +125,7 @@ class MutationPlan:
     @classmethod
     def from_spec(cls, value: dict[str, object]) -> "MutationPlan":
         version = value.get("version")
-        if version not in {_LEGACY_PLAN_SCHEMA_VERSION, _PLAN_SCHEMA_VERSION}:
+        if version not in {*_LEGACY_PLAN_SCHEMA_VERSIONS, _PLAN_SCHEMA_VERSION}:
             raise ValueError("Unsupported mutation plan version")
         raw_operations = value.get("operations")
         raw_conditions = value.get("preconditions")
@@ -134,12 +144,15 @@ class MutationPlan:
         raw_facts = value.get("semantic_facts")
         if version == _PLAN_SCHEMA_VERSION and not isinstance(raw_facts, list):
             raise ValueError("Mutation plan semantic facts are invalid")
-        if version == _LEGACY_PLAN_SCHEMA_VERSION and raw_facts is None:
+        if version in _LEGACY_PLAN_SCHEMA_VERSIONS and raw_facts is None:
             raw_facts = []
         if not isinstance(raw_facts, list) or not all(isinstance(fact, dict) for fact in raw_facts):
             raise ValueError("Mutation plan semantic facts are invalid")
         return cls(
-            tuple(MutationOperation.from_spec(item) for item in raw_operations),
+            tuple(
+                MutationOperation.from_spec(item, plan_version=int(version))
+                for item in raw_operations
+            ),
             str(value.get("commit_message") or ""),
             str(value.get("remediation") or ""),
             tuple(conditions),

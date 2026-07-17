@@ -45,6 +45,15 @@ class SidecarMutationStore(Protocol):
         config: LedgerConfig | None = None,
     ) -> str: ...
 
+    def delete(
+        self,
+        workspace: str,
+        rel_path: str,
+        old_text: str,
+        target_start_line: int | None = None,
+        config: LedgerConfig | None = None,
+    ) -> str: ...
+
     def copy_workspace(self, workspace: str, target: str) -> None: ...
 
     def snapshot(

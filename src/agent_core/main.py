@@ -260,6 +260,7 @@ class ApplyPendingActionRequest(BaseModel):
     integrity_digest: str
     opaque_payload: dict[str, Any] | None = None
     pending_action: dict[str, Any] | None = None
+    approval_proof: dict[str, Any] | None = None
     ledger: LedgerPayload | None = None
 
 
@@ -475,6 +476,7 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
         user_id=req.user_id,
         request_id=req.request_id,
         pending_action=pending_action,
+        approval_proof=req.approval_proof,
         ledger_config=ledger_config,
     )
     if "usage" not in result:

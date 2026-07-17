@@ -17,7 +17,7 @@ def potential_write_targets(
             targets.extend(
                 (resolved.sidecar_main_path, sidecar_target_file(resolved))
             )
-        elif operation.kind == "replace" and operation.target_file:
+        elif operation.kind in {"replace", "delete"} and operation.target_file:
             targets.append(operation.target_file)
     return tuple(dict.fromkeys(targets))
 

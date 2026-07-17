@@ -246,6 +246,40 @@ class MutationPreparationService:
             whitelist=whitelist,
         )
 
+    def preview_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> Preview | PreparationFailure:
+        return self._preview_registered(
+            "delete_transaction",
+            workspace,
+            ledger_config,
+            transaction_ref=transaction_ref,
+            revision_fingerprint=revision_fingerprint,
+            commit_message=commit_message,
+        )
+
+    def prepare_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | PreparationFailure:
+        return self._prepare_registered(
+            "delete_transaction",
+            workspace,
+            ledger_config,
+            transaction_ref=transaction_ref,
+            revision_fingerprint=revision_fingerprint,
+            commit_message=commit_message,
+        )
+
     def preview_bulk(
         self,
         workspace: str,

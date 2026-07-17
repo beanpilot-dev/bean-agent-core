@@ -7,6 +7,7 @@ from .bulk_commit import BulkCommitPreparationHandler
 from .change_set import ChangeSetPreparationHandler
 from .contracts import MutationPreparationHandler
 from .transaction_commit import TransactionCommitPreparationHandler
+from .transaction_delete import TransactionDeletePreparationHandler
 from .transaction_update import TransactionUpdatePreparationHandler
 
 
@@ -18,6 +19,7 @@ class MutationPreparationHandlerRegistry:
             TransactionCommitPreparationHandler(),
             AccountOpenPreparationHandler(),
             TransactionUpdatePreparationHandler(),
+            TransactionDeletePreparationHandler(),
             BulkCommitPreparationHandler(),
             ChangeSetPreparationHandler(),
             BalanceReconciliationPreparationHandler(),

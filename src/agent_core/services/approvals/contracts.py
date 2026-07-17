@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from ..types import IntegrityFailed, LedgerMutationAction, PendingAction
+from ..types import ApprovalProof, IntegrityFailed, LedgerMutationAction, PendingAction
 
 _PENDING_ACTION_SCHEMA_VERSION = 1
 _PENDING_ACTION_TTL_MINUTES = 30
@@ -50,12 +50,72 @@ def _classify_action_risk(
     if action_type == "balance_reconciliation":
         risk = "elevated"
         reasons.append("balance_reconciliation")
+    if action_type == "delete_transaction":
+        risk = "high"
+        reasons.append("transaction_deletion")
     return {
         "version": "risk-policy-v1",
         "risk": risk,
         "reasons": reasons,
         "requires_elevated_review": risk == "high",
     }
+
+
+def verify_approval_proof(
+    action: dict[str, object],
+    approval_proof: ApprovalProof | dict[str, object] | None,
+    *,
+    required: bool = False,
+) -> IntegrityFailed | None:
+    """Verify host-controlled approval proof against the immutable action."""
+    action_type = str(action.get("action_type") or "")
+    policy = action.get("policy")
+    requires_review = action_type == "delete_transaction" or (
+        isinstance(policy, dict) and policy.get("requires_elevated_review") is True
+    )
+    if approval_proof is None:
+        if required or requires_review:
+            return IntegrityFailed(
+                pending_action_id=str(action.get("pending_action_id") or ""),
+                error="Explicit elevated approval proof is required before applying this action.",
+            )
+        return None
+
+    proof = (
+        approval_proof
+        if isinstance(approval_proof, ApprovalProof)
+        else ApprovalProof(
+            approved_by=str(approval_proof.get("approved_by") or ""),
+            approved_at=str(approval_proof.get("approved_at") or ""),
+            approval_id=str(approval_proof.get("approval_id") or ""),
+            pending_action_id=str(approval_proof.get("pending_action_id") or ""),
+            payload_digest=str(approval_proof.get("payload_digest") or ""),
+            integrity_digest=str(approval_proof.get("integrity_digest") or ""),
+            host=str(approval_proof.get("host") or ""),
+        )
+    )
+    pending_action_id = str(action.get("pending_action_id") or "")
+    if not proof.approved_by or not proof.approved_at or not proof.approval_id:
+        return IntegrityFailed(
+            pending_action_id=pending_action_id,
+            error="Approval proof is required before applying a pending action.",
+        )
+    if (
+        not proof.pending_action_id
+        or not proof.payload_digest
+        or proof.pending_action_id != pending_action_id
+        or proof.payload_digest != digest_payload(action)
+    ):
+        return IntegrityFailed(
+            pending_action_id=pending_action_id,
+            error="Approval proof does not match the pending action payload.",
+        )
+    if not proof.integrity_digest or proof.integrity_digest != str(action.get("digest") or ""):
+        return IntegrityFailed(
+            pending_action_id=pending_action_id,
+            error="Approval proof does not match the pending action digest.",
+        )
+    return None
 
 
 class PendingActionService:

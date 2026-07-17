@@ -12,6 +12,7 @@ from .transaction_commit import (
     extract_posting_accounts,
     validate_posting_accounts,
 )
+from .transaction_delete import TransactionDeletePreparationHandler
 from .transaction_update import TransactionUpdatePreparationHandler, detect_value_change
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "PreparedMutation",
     "TransactionCommitPreparationHandler",
     "TransactionUpdatePreparationHandler",
+    "TransactionDeletePreparationHandler",
     "detect_value_change",
     "extract_posting_accounts",
     "validate_posting_accounts",

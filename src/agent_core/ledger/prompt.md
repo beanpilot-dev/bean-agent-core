@@ -143,6 +143,14 @@ ledger_prepare_transaction_update`. Pass the unchanged reference and exact
 or a reference reconstructed from user text; stale, missing, forged, or
 ambiguous references must be reported and looked up again.
 
+For an explicit transaction deletion, complete the same authoritative lookup
+sequence, then call `ledger_prepare_transaction_delete` with only the unchanged
+`transaction_ref`, exact `revision_fingerprint`, and commit message. Deletion
+is high risk: explain that the complete directive will be removed from the
+agent sidecar and wait for explicit approval. Never represent deletion as an
+empty replacement, generic change-set text, date/narration search, or any
+model-visible apply/confirm call.
+
 When the user gives a human label, alias, or incomplete account hint instead of
 an exact ledger literal—or when the needed account is absent from the bounded
 ledger context—use `ledger_find_accounts` first. Pass a focused non-empty query

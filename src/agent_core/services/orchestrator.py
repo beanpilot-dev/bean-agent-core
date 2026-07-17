@@ -120,6 +120,7 @@ class AgentOrchestrator:
         request_id: str | None,
         pending_action: dict,
         ledger_config: LedgerConfig | None = None,
+        approval_proof: dict | None = None,
     ) -> dict:
         return await self._pending_actions.run(
             repo_url=repo_url,
@@ -128,6 +129,7 @@ class AgentOrchestrator:
             request_id=request_id,
             pending_action=pending_action,
             ledger_config=ledger_config,
+            approval_proof=approval_proof,
         )
 
     async def run_accounts(

@@ -115,6 +115,15 @@ class MutationToolPort(Protocol):
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult: ...
 
+    def prepare_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult: ...
+
     def prepare_open(
         self,
         workspace: str,

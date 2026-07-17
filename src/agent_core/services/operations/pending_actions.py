@@ -28,6 +28,7 @@ class PendingActionOperationHandler:
         request_id: str | None,
         pending_action: dict,
         ledger_config: LedgerConfig | None = None,
+        approval_proof: dict | None = None,
     ) -> dict:
         start_time = time.monotonic()
         try:
@@ -46,6 +47,7 @@ class PendingActionOperationHandler:
                     self._git_service,
                     token,
                     ledger_config=ledger_config,
+                    approval_proof=approval_proof,
                 )
                 payload = {
                     "status": result.status,

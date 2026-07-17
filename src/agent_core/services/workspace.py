@@ -307,6 +307,7 @@ class GitService(ABC):
             ok (bool)           — True if commit succeeded
             error (str|None)    — error message if ok=False
             push (str|None)     — push status (PUSHED:... or PUSH_FAILED:...)
+            commit_sha (str|None) — local commit SHA when commit succeeds
         """
         stage_paths = self._validated_stage_paths(paths)
         stage = subprocess.run(
@@ -329,13 +330,35 @@ class GitService(ABC):
             return {"ok": False, "error": result.stderr.strip(), "push": None}
 
         logger.info("git commit ok")
+        commit_sha_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        commit_sha = (
+            commit_sha_result.stdout.strip()
+            if commit_sha_result.returncode == 0
+            else None
+        )
         try:
             push_status = self.push(workspace, repo_url, token)
         except PushRejectedError as e:
             logger.warning("git push failed")
-            return {"ok": True, "error": None, "push": f"PUSH_FAILED: {e}"}
+            return {
+                "ok": True,
+                "error": None,
+                "push": f"PUSH_FAILED: {e}",
+                "commit_sha": commit_sha,
+            }
 
-        return {"ok": True, "error": None, "push": push_status}
+        return {
+            "ok": True,
+            "error": None,
+            "push": push_status,
+            "commit_sha": commit_sha,
+        }
 
     @staticmethod
     def _validated_stage_paths(paths: Sequence[str] | None) -> tuple[str, ...]:

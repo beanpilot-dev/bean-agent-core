@@ -118,6 +118,25 @@ class ToolExecutionGateway:
             ),
         )
 
+    def prepare_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_transaction_delete",
+            lambda: self._ledger.prepare_transaction_delete(
+                workspace,
+                transaction_ref,
+                revision_fingerprint,
+                commit_message,
+                ledger_config,
+            ),
+        )
+
     def prepare_open(
         self,
         workspace: str,
@@ -309,6 +328,7 @@ class ToolExecutionGateway:
             github_token,
             whitelist,
             ledger_config,
+            proof,
         )
         if isinstance(result, DependencyUnavailable | IntegrityFailed):
             return result

@@ -8,7 +8,7 @@ from .mutations.application import (
 from .mutations.handlers import extract_posting_accounts, validate_posting_accounts
 from .mutations.preparation import MutationPreparationService
 from .reconciliation import ReconciliationCalculator
-from .types import LedgerConfig
+from .types import ApprovalProof, LedgerConfig
 from .workspace import GitService
 
 _git_dependency_error = git_dependency_error
@@ -121,6 +121,38 @@ class LedgerService:
             new_transaction_text,
             commit_message,
             whitelist,
+            ledger_config,
+        )
+
+    def preview_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.preview_transaction_delete(
+            workspace,
+            transaction_ref,
+            revision_fingerprint,
+            commit_message,
+            ledger_config,
+        )
+
+    def prepare_transaction_delete(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.prepare_transaction_delete(
+            workspace,
+            transaction_ref,
+            revision_fingerprint,
+            commit_message,
             ledger_config,
         )
 
@@ -249,6 +281,7 @@ class LedgerService:
         github_token: str | None = None,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
+        approval_proof: ApprovalProof | dict[str, object] | None = None,
     ):
         return self._application.apply_pending_action(
             workspace,
@@ -258,6 +291,7 @@ class LedgerService:
             github_token,
             whitelist,
             ledger_config,
+            approval_proof,
         )
 
     def calculate_balance_adjustment(

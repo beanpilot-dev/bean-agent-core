@@ -33,6 +33,16 @@ class MutationApplier:
                 target = self._store.replace(
                     workspace, operation.target_file, operation.old_text, operation.text, config
                 )
+            elif operation.kind == "delete":
+                if not operation.target_file or operation.old_text is None:
+                    raise ValueError("Delete mutation plan is missing its precondition")
+                target = self._store.delete(
+                    workspace,
+                    operation.target_file,
+                    operation.old_text,
+                    operation.target_start_line,
+                    config,
+                )
             else:  # pragma: no cover - typed plans make this unreachable
                 raise ValueError(f"Unsupported mutation operation: {operation.kind}")
             if target not in touched:
