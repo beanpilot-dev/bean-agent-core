@@ -33,6 +33,12 @@ from .tool_ports import (
     WorkflowToolDependenciesFactory,
     create_workflow_tool_dependencies,
 )
+from .transaction_index import (
+    IndexedTransaction,
+    TransactionIndex,
+    mint_transaction_ref,
+    parse_transaction_ref,
+)
 from .types import (
     DEFAULT_LEDGER_CONFIG,
     AccountSearchResult,
@@ -66,6 +72,10 @@ __all__ = [
     "IngestionService",
     "LedgerService",
     "LedgerQueryService",
+    "IndexedTransaction",
+    "TransactionIndex",
+    "mint_transaction_ref",
+    "parse_transaction_ref",
     "PendingActionService",
     "PreflightService",
     "PriceService",

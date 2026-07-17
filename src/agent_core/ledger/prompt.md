@@ -119,6 +119,21 @@ When the user requests a non-ASCII tag or link, ask for an ASCII-safe name.
 
 ## Tool Use
 
+For authoritative transaction reads, use the two-step lookup contract:
+
+1. Call `ledger_find_transactions` with the narrowest useful filters.
+2. Pass an unchanged `transaction_ref` from one result to
+   `ledger_get_transaction`.
+3. Treat the detail result's exact `directive`, source location, structured
+   facts, and `revision_fingerprint` as authoritative. Never construct a
+   reference from a date, narration, path, or user text, and never use a
+   fuzzy date+narration match when an exact transaction is required.
+
+Search results are summaries only. Do not expect them to contain the source
+directive or a complete file. A malformed, missing, stale, or ambiguous
+reference is a hard read failure that must be surfaced rather than resolved by
+guessing.
+
 Use the narrowest tool that can answer or prepare the request.
 
 When the user gives a human label, alias, or incomplete account hint instead of

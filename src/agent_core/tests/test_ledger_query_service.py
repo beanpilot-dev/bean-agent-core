@@ -143,7 +143,7 @@ def test_read_operations_return_typed_results(
     assert found.count == 1
     assert queried.count == 1
     assert all(isinstance(result, QueryResult) for result in (balance, found, queried))
-    assert len(calls) == 3
+    assert len(calls) == 2
 
 
 def test_balance_search_and_bql_preserve_contracts_and_config(
@@ -169,55 +169,36 @@ def test_balance_search_and_bql_preserve_contracts_and_config(
     queried = LedgerQueryService.query_bql(str(ledger_workspace), "SELECT account", config)
 
     assert balance == QueryResult(status="ERROR", error="broken")
-    assert found == QueryResult(status="ERROR", error="broken")
+    assert found == QueryResult(
+        status="ERROR",
+        error="ledger could not be parsed",
+        error_code="LEDGER_PARSE_ERROR",
+    )
     assert queried == QueryResult(status="ERROR", error="broken", bql="SELECT account")
     assert calls == [
         ('SELECT sum(position) AS balance WHERE account ~ "^Assets:Cash$" ', config),
-        (
-            "SELECT date, flag, payee, narration, account, position  ORDER BY date DESC LIMIT 20",
-            config,
-        ),
         ("SELECT account", config),
     ]
 
 
-def test_find_transactions_preserves_filter_bql_and_result_shape(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
+def test_find_transactions_returns_one_summary_per_transaction(
+    ledger_workspace: Path,
 ) -> None:
-    calls: list[str] = []
-
-    def fake_rows(_workspace: str, bql: str, *_args):
-        calls.append(bql)
-        return [{"narration": "Lunch"}], None
-
-    monkeypatch.setattr(Beancount, "run_bql_rows", fake_rows)
-
     result = LedgerQueryService.find_transactions(
         str(ledger_workspace),
         account="^Expenses:Food",
         date_from="2026-01-01",
-        date_to="2026-01-31",
-        narration_contains="Lunch (team)",
+        date_to="2026-12-31",
+        narration_contains="Lunch",
         limit=7,
     )
 
-    assert calls == [
-        'SELECT date, flag, payee, narration, account, position WHERE account ~ "^Expenses:Food" '
-        'AND date >= 2026-01-01 AND date <= 2026-01-31 AND narration ~ "Lunch\\ \\(team\\)" '
-        "ORDER BY date DESC LIMIT 7"
-    ]
-    assert result == QueryResult(
-        status="SUCCESS",
-        count=1,
-        rows=[{"narration": "Lunch"}],
-        filters_applied={
-            "account": "^Expenses:Food",
-            "date_from": "2026-01-01",
-            "date_to": "2026-01-31",
-            "narration_contains": "Lunch (team)",
-            "limit": 7,
-        },
-    )
+    assert result.status == "SUCCESS"
+    assert result.count == result.total == 1
+    assert result.truncated is False
+    assert result.rows[0]["narration"] == "Lunch"
+    assert len(result.rows[0]["postings"]) == 2
+    assert "directive" not in result.rows[0]
 
 
 def test_queries_use_configured_entry_path(tmp_path: Path) -> None:

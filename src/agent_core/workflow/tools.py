@@ -104,6 +104,25 @@ def tool_find_transactions(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_get_transaction")
+def tool_get_transaction(
+    transaction_ref: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Return one exact transaction directive and its source facts.
+
+    Args:
+        transaction_ref: Opaque reference returned by ledger_find_transactions.
+            Do not construct or alter references.
+    """
+    ws = config.get("configurable", {}).get("workspace", "")
+    ledger_config = config.get("configurable", {}).get("ledger_config")
+    result = _dependencies(config).queries.get_transaction(
+        ws, transaction_ref, ledger_config
+    )
+    return _json_mod.dumps(dataclasses.asdict(result))
+
+
 @tool("ledger_query")
 def tool_query(
     bql: str,
@@ -434,6 +453,7 @@ ANALYTICS_TOOLS = [
     tool_account_balance,
     tool_ledger_calculate_balance_adjustment,
     tool_find_transactions,
+    tool_get_transaction,
     tool_query,
     tool_market_fetch_price,
 ]

@@ -1,24 +1,27 @@
-"""Read-only location of raw transactions in the configured ledger workspace."""
+"""Compatibility façade over the shared parser-backed transaction index."""
 
-import os
-import re
 from dataclasses import dataclass
 
-from .beancount import Beancount
+from .transaction_index import TransactionIndex
 from .types import LedgerConfig
 
 
 @dataclass(frozen=True)
 class LocatedTransaction:
-    """One raw transaction block and its source file."""
+    """One exact transaction block and its source path.
+
+    ``file_content`` remains as a compatibility field for old callers but is
+    intentionally empty: no locator path may expose a complete source file.
+    """
 
     relative_path: str
     file_content: str
     block: str
+    transaction_ref: str = ""
 
 
 class TransactionLocator:
-    """Find raw transaction blocks without mutating the workspace."""
+    """Legacy date/narration lookup backed by the authoritative transaction index."""
 
     @staticmethod
     def find(
@@ -27,44 +30,15 @@ class TransactionLocator:
         narration: str,
         ledger_config: LedgerConfig | None = None,
     ) -> list[LocatedTransaction]:
-        escaped_narration = narration.replace('"', '\\"')
-        bql = (
-            "SELECT DISTINCT date, narration "
-            f'WHERE date = {target_date} AND narration ~ "{escaped_narration}"'
-        )
-        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
-        if error or not rows:
-            return []
-
-        header_re = re.compile(
-            rf"^{re.escape(target_date)}\s+[*!].*?{re.escape(narration)}",
-            re.MULTILINE,
-        )
-        results: list[LocatedTransaction] = []
-        try:
-            for dirpath, dirnames, filenames in os.walk(workspace):
-                dirnames[:] = [name for name in dirnames if name not in {".git", ".venv"}]
-                for filename in sorted(filenames):
-                    if not filename.endswith(".beancount"):
-                        continue
-                    absolute_path = os.path.join(dirpath, filename)
-                    relative_path = os.path.relpath(absolute_path, workspace)
-                    try:
-                        with open(absolute_path, encoding="utf-8") as handle:
-                            content = handle.read()
-                    except OSError:
-                        continue
-                    for match in header_re.finditer(content):
-                        rest = content[match.start() :]
-                        end_match = re.search(r"\n[ \t]*\n", rest)
-                        block = (
-                            rest[: end_match.start()].rstrip()
-                            if end_match
-                            else rest.rstrip()
-                        )
-                        results.append(
-                            LocatedTransaction(relative_path, content, block)
-                        )
-        except OSError:
-            pass
-        return results
+        index = TransactionIndex.build(workspace, ledger_config)
+        matches = index.search(narration_contains=narration)
+        return [
+            LocatedTransaction(
+                relative_path=match.relative_path,
+                file_content="",
+                block=match.directive.rstrip("\r\n"),
+                transaction_ref=match.transaction_ref,
+            )
+            for match in matches
+            if match.facts["date"] == target_date
+        ]

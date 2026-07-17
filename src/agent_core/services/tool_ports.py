@@ -57,6 +57,13 @@ class QueryToolPort(Protocol):
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult: ...
 
+    def get_transaction(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> QueryResult: ...
+
     def query_bql(
         self,
         workspace: str,
@@ -234,6 +241,14 @@ class ServiceQueryToolAdapter:
             limit,
             ledger_config,
         )
+
+    def get_transaction(
+        self,
+        workspace: str,
+        transaction_ref: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> QueryResult:
+        return self._queries.get_transaction(workspace, transaction_ref, ledger_config)
 
     def query_bql(
         self,

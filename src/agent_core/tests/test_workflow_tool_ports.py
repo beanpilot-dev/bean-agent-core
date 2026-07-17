@@ -16,6 +16,7 @@ from agent_core.workflow.tools import (
     tool_account_balance,
     tool_find_accounts,
     tool_find_transactions,
+    tool_get_transaction,
     tool_ingest_file,
     tool_ledger_calculate_balance_adjustment,
     tool_ledger_commit_transaction,
@@ -68,6 +69,13 @@ class FakeQueries:
         ledger_config=None,
     ):
         return QueryResult(status="SUCCESS", count=1, rows=[{"account": account}])
+
+    def get_transaction(self, workspace, transaction_ref, ledger_config=None):
+        return QueryResult(
+            status="SUCCESS",
+            count=1,
+            transaction={"transaction_ref": transaction_ref},
+        )
 
     def query_bql(self, workspace, bql, ledger_config=None):
         return QueryResult(status="SUCCESS", bql=bql)
@@ -235,6 +243,7 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
     config = _config()
     results = [
         json.loads(tool_find_transactions.func("Assets:Cash", config=config)),
+        json.loads(tool_get_transaction.func("txn_v1_test", config=config)),
         json.loads(tool_query.func("SELECT account", config=config)),
         json.loads(
             tool_ledger_update_transaction.func(
@@ -284,9 +293,9 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
 
     assert all(result["status"] in {"SUCCESS", "completed"} for result in results)
     assert results[0]["rows"] == [{"account": "Assets:Cash"}]
-    assert results[2]["result"]["target_date"] == "2026-07-01"
-    assert results[3]["result"]["transactions_file"] == "/tmp/staged.beancount"
-    assert results[5]["result"]["operation_count"] == 1
+    assert results[3]["result"]["target_date"] == "2026-07-01"
+    assert results[4]["result"]["transactions_file"] == "/tmp/staged.beancount"
+    assert results[6]["result"]["operation_count"] == 1
 
 
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
@@ -298,6 +307,7 @@ def test_market_price_manifest_has_no_legacy_ledger_name() -> None:
     names = {tool.name for tool in MODEL_TOOLS}
 
     assert "ledger_find_accounts" in names
+    assert "ledger_get_transaction" in names
     assert "market_fetch_price" in names
     assert "ledger_fetch_price" not in names
     assert "tool_market_fetch_price".endswith("market_fetch_price")

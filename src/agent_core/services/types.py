@@ -217,12 +217,29 @@ class QueryResult(ServiceResult):
     status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
     count: int = 0
     rows: list[dict[str, Any]] = field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
+    omitted: int = 0
     filters_applied: dict[str, Any] | None = None
     account: str | None = None
     as_of: str | None = None
     balance: str | None = None
     error: str | None = None
+    error_code: str | None = None
     bql: str | None = None
+    transaction: dict[str, Any] | None = None
+    transaction_ref: str | None = None
+    directive: str | None = None
+    source_path: str | None = None
+    source_start_line: int | None = None
+    source_end_line: int | None = None
+    payee: str | None = None
+    narration: str | None = None
+    tags: list[str] | None = None
+    links: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+    postings: list[dict[str, Any]] | None = None
+    revision_fingerprint: str | None = None
 
 
 @dataclass

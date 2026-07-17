@@ -7,9 +7,11 @@ Git operations.
 
 import os
 import re
+from datetime import date
 from typing import Any
 
 from .beancount import Beancount, LedgerServiceError, ParsedLedgerAccount
+from .transaction_index import TransactionIndex, parse_transaction_ref
 from .types import AccountSearchResult, LedgerConfig, QueryResult
 
 _OPEN_ACCOUNT_RE = re.compile(
@@ -207,35 +209,118 @@ class LedgerQueryService:
         limit: int = 20,
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult:
-        filters = []
-        if account:
-            filters.append(f'account ~ "{account}"')
-        if date_from:
-            filters.append(f"date >= {date_from}")
-        if date_to:
-            filters.append(f"date <= {date_to}")
-        if narration_contains:
-            filters.append(f'narration ~ "{re.escape(narration_contains)}"')
-
-        where = f"WHERE {' AND '.join(filters)}" if filters else ""
-        bql = (
-            f"SELECT date, flag, payee, narration, account, position "
-            f"{where} ORDER BY date DESC LIMIT {limit}"
-        )
-        rows, error = Beancount.run_bql_rows(workspace, bql, ledger_config)
-        if error:
-            return QueryResult(status="ERROR", error=error)
+        result_limit = min(max(limit, 1), 100)
+        parsed_dates: dict[str, date | None] = {}
+        for name, value in (("date_from", date_from), ("date_to", date_to)):
+            if value:
+                try:
+                    parsed_dates[name] = date.fromisoformat(value)
+                except ValueError:
+                    return QueryResult(
+                        status="ERROR",
+                        error="date filters must be ISO dates",
+                        error_code="INVALID_DATE_FILTER",
+                    )
+            else:
+                parsed_dates[name] = None
+        if parsed_dates["date_from"] and parsed_dates["date_to"]:
+            if parsed_dates["date_from"] > parsed_dates["date_to"]:
+                return QueryResult(
+                    status="ERROR",
+                    error="date_from must not be after date_to",
+                    error_code="INVALID_DATE_RANGE",
+                )
+        try:
+            index = TransactionIndex.build(workspace, ledger_config)
+            matches = index.search(
+                account=account,
+                date_from=parsed_dates["date_from"],
+                date_to=parsed_dates["date_to"],
+                narration_contains=narration_contains,
+            )
+        except re.error:
+            return QueryResult(
+                status="ERROR",
+                error="account must be a valid regular expression",
+                error_code="INVALID_ACCOUNT_FILTER",
+            )
+        except LedgerServiceError:
+            return QueryResult(
+                status="ERROR",
+                error="ledger could not be parsed",
+                error_code="LEDGER_PARSE_ERROR",
+            )
+        total = len(matches)
+        rows = [match.summary() for match in matches[:result_limit]]
         return QueryResult(
             status="SUCCESS",
             count=len(rows),
             rows=rows,
+            total=total,
+            truncated=total > result_limit,
+            omitted=max(0, total - result_limit),
             filters_applied={
                 "account": account,
                 "date_from": date_from,
                 "date_to": date_to,
                 "narration_contains": narration_contains,
-                "limit": limit,
+                "limit": result_limit,
             },
+        )
+
+    @staticmethod
+    def get_transaction(
+        workspace: str,
+        transaction_ref: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> QueryResult:
+        """Resolve one opaque reference against a fresh parser-backed index."""
+        if parse_transaction_ref(transaction_ref) is None:
+            return QueryResult(
+                status="ERROR",
+                error="transaction reference is malformed",
+                error_code="MALFORMED_TRANSACTION_REF",
+            )
+        try:
+            index = TransactionIndex.build(workspace, ledger_config)
+        except LedgerServiceError:
+            return QueryResult(
+                status="ERROR",
+                error="ledger could not be parsed",
+                error_code="LEDGER_PARSE_ERROR",
+            )
+        code, transaction = index.resolve(transaction_ref)
+        if transaction is None:
+            messages = {
+                "MALFORMED_TRANSACTION_REF": "transaction reference is malformed",
+                "TRANSACTION_NOT_FOUND": "transaction reference was not found",
+                "STALE_TRANSACTION_REF": "transaction reference is stale",
+                "AMBIGUOUS_TRANSACTION_REF": "transaction reference is ambiguous",
+            }
+            return QueryResult(
+                status="ERROR",
+                error=messages[code],
+                error_code=code,
+            )
+        detail = transaction.detail()
+        return QueryResult(
+            status="SUCCESS",
+            count=1,
+            total=1,
+            transaction=detail,
+            rows=[detail],
+            transaction_ref=transaction.transaction_ref,
+            directive=transaction.directive,
+            source_path=transaction.relative_path,
+            source_start_line=transaction.start_line,
+            source_end_line=transaction.end_line,
+            payee=transaction.facts["payee"],
+            narration=transaction.facts["narration"],
+            tags=transaction.facts["tags"],
+            links=transaction.facts["links"],
+            metadata=transaction.facts["metadata"],
+            postings=transaction.facts["postings"],
+            revision_fingerprint=transaction.revision_fingerprint,
         )
 
     @staticmethod

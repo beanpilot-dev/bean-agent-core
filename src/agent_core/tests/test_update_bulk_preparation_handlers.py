@@ -148,6 +148,8 @@ def test_transaction_locator_and_update_policy_report_ambiguous_matches(
 ) -> None:
     duplicate = ledger_workspace / "duplicate.beancount"
     duplicate.write_text(REPLACEMENT)
+    sidecar_main = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    sidecar_main.write_text(sidecar_main.read_text() + '\ninclude "../../duplicate.beancount"\n')
 
     matches = TransactionLocator.find(str(ledger_workspace), "2026-05-12", "Lunch")
     result = TransactionUpdatePreparationHandler().build(
