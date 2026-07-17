@@ -67,7 +67,7 @@ def test_preflight_missing_sidecar_raises(ledger_workspace: Path) -> None:
         PreflightService.validate(str(ledger_workspace))
 
 
-def test_price_service_fetches_fx_and_stock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_price_service_fetches_fx_and_equity_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = iter(
         [
             {"rates": {"CNY": 7.8}, "date": "2026-06-15"},
@@ -76,11 +76,20 @@ def test_price_service_fetches_fx_and_stock(monkeypatch: pytest.MonkeyPatch) -> 
     )
     monkeypatch.setattr(PriceService, "_get", lambda _url: next(responses))
 
-    fx = PriceService.fetch_price("eur/cny")
-    stock = PriceService.fetch_price("aapl")
+    fx = PriceService.fetch_market_price("eur/cny")
+    stock = PriceService.fetch_market_price("aapl")
 
-    assert (fx.status, fx.symbol, fx.price) == ("SUCCESS", "EUR/CNY", 7.8)
-    assert (stock.status, stock.symbol, stock.price) == ("SUCCESS", "AAPL", 200.0)
+    assert (fx.status, fx.instrument, fx.price) == ("SUCCESS", "EUR/CNY", 7.8)
+    assert (fx.quote_currency, fx.provider, fx.effective_date, fx.freshness) == (
+        "CNY",
+        "Frankfurter (ECB)",
+        "2026-06-15",
+        "daily",
+    )
+    assert (stock.status, stock.instrument, stock.price) == ("SUCCESS", "AAPL", 200.0)
+    assert stock.quote_currency == "USD"
+    assert stock.provider == "Yahoo Finance"
+    assert stock.freshness == "intraday"
 
 
 @pytest.mark.parametrize(
@@ -88,6 +97,8 @@ def test_price_service_fetches_fx_and_stock(monkeypatch: pytest.MonkeyPatch) -> 
     [
         ("EUR/CNY", {}),
         ("AAPL", {"chart": {"result": []}}),
+        ("AAPL", {"chart": {"result": [None]}}),
+        ("AAPL", {"chart": {"result": [{"meta": {"regularMarketPrice": "n/a"}}]}}),
     ],
 )
 def test_price_service_handles_api_failures(
@@ -95,10 +106,11 @@ def test_price_service_handles_api_failures(
 ) -> None:
     monkeypatch.setattr(PriceService, "_get", lambda _url: payload)
 
-    result = PriceService.fetch_price(symbol)
+    result = PriceService.fetch_market_price(symbol)
 
     assert result.status == "ERROR"
-    assert result.error
+    assert result.error_code == "PROVIDER_INVALID_RESPONSE"
+    assert result.error_message
 
 
 def test_price_service_handles_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +118,70 @@ def test_price_service_handles_network_failure(monkeypatch: pytest.MonkeyPatch) 
         raise urllib.error.URLError("offline")
 
     monkeypatch.setattr(PriceService, "_get", fail)
-    assert PriceService.fetch_price("AAPL").status == "ERROR"
+    result = PriceService.fetch_market_price("AAPL")
+    assert result.status == "ERROR"
+    assert result.error_code == "PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "instrument,error_code",
+    [("", "INVALID_INSTRUMENT"), (" / ", "INVALID_FX_PAIR"), ("EUR/CNY/USD", "INVALID_FX_PAIR")],
+)
+def test_price_service_rejects_invalid_instruments(instrument: str, error_code: str) -> None:
+    result = PriceService.fetch_market_price(instrument)
+
+    assert result.status == "ERROR"
+    assert result.error_code == error_code
+    assert result.error_message
+
+
+def test_price_service_exposes_equity_effective_timestamp_and_market_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        PriceService,
+        "_get",
+        lambda _url: {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {
+                            "regularMarketPrice": 200.0,
+                            "currency": "usd",
+                            "regularMarketTime": 1781524800,
+                            "marketState": "REGULAR",
+                            "exchangeName": "NMS",
+                        }
+                    }
+                ]
+            }
+        },
+    )
+
+    result = PriceService.fetch_market_price("aapl")
+
+    assert result.effective_at == "2026-06-15T12:00:00+00:00"
+    assert result.effective_date == "2026-06-15"
+    assert result.market_state == "REGULAR"
+    assert result.exchange == "NMS"
+
+
+def test_price_service_falls_back_to_previous_close_when_market_price_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        PriceService,
+        "_get",
+        lambda _url: {
+            "chart": {"result": [{"meta": {"regularMarketPrice": None, "previousClose": 199.5}}]}
+        },
+    )
+
+    result = PriceService.fetch_market_price("AAPL")
+
+    assert result.status == "SUCCESS"
+    assert result.price == 199.5
+    assert result.freshness == "previous_close"
 
 
 def test_ingestion_read_file_success_missing_and_too_large(

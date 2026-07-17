@@ -13,7 +13,6 @@ from agent_core.services.types import (
 from agent_core.workflow.tools import (
     MODEL_TOOLS,
     tool_account_balance,
-    tool_fetch_price,
     tool_find_transactions,
     tool_ingest_file,
     tool_ledger_calculate_balance_adjustment,
@@ -24,6 +23,7 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_balance_update,
     tool_ledger_prepare_change_set,
     tool_ledger_update_transaction,
+    tool_market_fetch_price,
     tool_query,
     tool_run_python,
 )
@@ -58,8 +58,16 @@ class FakeIngestion:
 
 
 class FakePrices:
-    def fetch_price(self, symbol):
-        return PriceResult(status="SUCCESS", symbol=symbol, price=123, currency="CNY")
+    def fetch_market_price(self, instrument):
+        return PriceResult(
+            status="SUCCESS",
+            instrument=instrument,
+            price=123,
+            quote_currency="CNY",
+            provider="fake",
+            effective_date="2026-07-17",
+            freshness="daily",
+        )
 
 
 class FakeMutations:
@@ -183,7 +191,7 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     config = _config()
 
     balance = json.loads(tool_account_balance.func("Assets:Cash", config=config))
-    price = json.loads(tool_fetch_price.func("USD/CNY", config=config))
+    price = json.loads(tool_market_fetch_price.func("USD/CNY", config=config))
     file_result = json.loads(tool_ingest_file.func("/tmp/upload.csv", config=config))
     sandbox = json.loads(tool_run_python.func("print('ok')", config=config))
     mutation = json.loads(
@@ -256,8 +264,16 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
 
 
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
-    for workflow_tool in [tool_fetch_price, tool_ingest_file, tool_run_python]:
+    for workflow_tool in [tool_market_fetch_price, tool_ingest_file, tool_run_python]:
         assert "config" not in workflow_tool.args_schema.model_json_schema()["properties"]
+
+
+def test_market_price_manifest_has_no_legacy_ledger_name() -> None:
+    names = {tool.name for tool in MODEL_TOOLS}
+
+    assert "market_fetch_price" in names
+    assert "ledger_fetch_price" not in names
+    assert "tool_market_fetch_price".endswith("market_fetch_price")
 
 
 def test_model_tool_descriptions_stay_compact() -> None:

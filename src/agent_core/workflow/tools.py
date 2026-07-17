@@ -94,17 +94,17 @@ def tool_query(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("ledger_fetch_price")
-def tool_fetch_price(
-    symbol: str,
+@tool("market_fetch_price")
+def tool_market_fetch_price(
+    instrument: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Fetch a current currency-pair or stock price.
+    """Fetch an external market quote without reading or changing the ledger.
 
     Args:
-        symbol: Pair such as EUR/CNY, or ticker/name such as AAPL or Microsoft.
+        instrument: FX pair such as EUR/CNY, or an equity ticker such as AAPL.
     """
-    result = _dependencies(config).prices.fetch_price(symbol)
+    result = _dependencies(config).prices.fetch_market_price(instrument)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
@@ -402,7 +402,7 @@ ANALYTICS_TOOLS = [
     tool_ledger_calculate_balance_adjustment,
     tool_find_transactions,
     tool_query,
-    tool_fetch_price,
+    tool_market_fetch_price,
 ]
 
 INGESTION_TOOLS = [

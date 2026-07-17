@@ -70,7 +70,7 @@ class IngestionToolPort(Protocol):
 class PriceToolPort(Protocol):
     """External price lookup boundary."""
 
-    def fetch_price(self, symbol: str) -> PriceResult: ...
+    def fetch_market_price(self, instrument: str) -> PriceResult: ...
 
 
 class MutationToolPort(Protocol):

@@ -297,15 +297,20 @@ DEFAULT_LEDGER_CONFIG = LedgerConfig()
 
 @dataclass
 class PriceResult(ServiceResult):
-    """Market price fetch result."""
+    """Typed result for an external market quote lookup."""
+
     status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
-    symbol: str = ""
-    price: float = 0.0
-    currency: str = ""
-    source: str = ""
-    date: str | None = None
+    instrument: str = ""
+    price: float | None = None
+    quote_currency: str = ""
+    provider: str = ""
+    effective_date: str | None = None
+    effective_at: str | None = None
+    freshness: Literal["daily", "intraday", "previous_close"] | None = None
+    market_state: str | None = None
     exchange: str | None = None
-    error: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
