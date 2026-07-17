@@ -214,7 +214,7 @@ def commit_transaction(
             f"git commit: {commit_message}",
             git["push"],
         ],
-        "next_capabilities": ["ledger_preflight", "ledger_query_json"],
+        "next_capabilities": ["ledger_find_transactions", "ledger_query"],
     })
 
 
@@ -348,7 +348,7 @@ def update_transaction(
             f"git commit: {commit_message}",
             git["push"],
         ],
-        "next_capabilities": ["ledger_preflight", "ledger_query_json"],
+        "next_capabilities": ["ledger_find_transactions", "ledger_query"],
     })
 
 
@@ -497,7 +497,7 @@ def open_account(
             f"git commit: chore(accounts): open {account_name}",
             git["push"],
         ],
-        "next_capabilities": ["ledger_preflight", "ledger_commit"],
+        "next_capabilities": ["ledger_commit_transaction"],
     })
 
 
@@ -636,5 +636,5 @@ def bulk_commit_transactions(
             f"git commit: {commit_message}",
             git["push"],
         ],
-        "next_capabilities": ["ledger_preflight", "ledger_query"],
+        "next_capabilities": ["ledger_find_transactions", "ledger_query"],
     })

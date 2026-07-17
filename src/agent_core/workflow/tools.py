@@ -20,33 +20,17 @@ def _dependencies(config: RunnableConfig) -> WorkflowToolDependencies:
 # ---------------------------------------------------------------------------
 
 
-@tool("ledger_preflight")
-def tool_preflight(config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:  # pyright: ignore[reportArgumentType]
-    """Refresh the deterministic preflight check on the Beancount ledger.
-    Returns STATUS (CLEAN or ERROR), TARGET file path,
-    valid ACCOUNTS list, and RECENT transactions."""
-    c = config.get("configurable", {})
-    ws: str = c.get("workspace", "")
-    ledger_config = c.get("ledger_config")
-    result = _dependencies(config).queries.preflight(ws, ledger_config)
-    return _json_mod.dumps(dataclasses.asdict(result))
-
-
 @tool("ledger_account_balance")
 def tool_account_balance(
     account: str,
     as_of_date: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Query the current balance of a specific account.
+    """Query one account's balance, optionally as of an ISO date.
 
     Args:
-        account: Exact account name (e.g. 'Assets:Liquid:Bank:Checking').
-        as_of_date: Optional ISO date to get balance as of that date (e.g. '2026-03-31').
-                    Defaults to latest if not provided.
-
-    Returns a JSON string with status SUCCESS or DEPENDENCY_UNAVAILABLE,
-    and balance containing the amount(s).
+        account: Exact account name.
+        as_of_date: ISO date; empty means latest.
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
@@ -65,19 +49,14 @@ def tool_find_transactions(
     limit: int = 20,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Search for transactions matching one or more filters.
-
-    All parameters are optional — combine freely.
+    """Search transactions with optional filters, newest first.
 
     Args:
-        account: Filter by account name (regex-matched, e.g. 'Assets:Liquid:Bank').
-        date_from: Start date inclusive (e.g. '2026-01-01').
-        date_to: End date inclusive (e.g. '2026-03-31').
-        narration_contains: Substring to match in transaction narration.
-        limit: Maximum number of results (default 20, max 100).
-
-    Returns a JSON string with status SUCCESS and rows containing
-    matched transactions ordered by date descending.
+        account: Account regex; empty matches all accounts.
+        date_from: Inclusive ISO start date.
+        date_to: Inclusive ISO end date.
+        narration_contains: Narration substring.
+        limit: Maximum results; capped at 100.
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
@@ -99,44 +78,23 @@ def tool_query_template(
     params: dict,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Execute a named BQL query template for financial analysis.
+    """Run a standard BQL analysis template; prefer this to raw ledger_query.
 
-    Prefer this over ledger_query when the analysis fits a standard pattern —
-    it guarantees correct BQL syntax and is faster to invoke.
+    Templates and required params:
+        spending_breakdown, spending_trend, transaction_frequency:
+            account_pattern, start, end
+        large_transactions: account_pattern, start, end, limit
+        account_snapshot, account_total: account_pattern
+        period_total: account_pattern, start, end
+        narration_search: keyword, account_pattern, start, end, limit
+        savings_monthly: start, end
 
-    Available templates:
-        spending_breakdown      Totals and count by account sub-category
-                                params: account_pattern, start, end
-        spending_trend          Monthly total over time (for trend analysis)
-                                params: account_pattern, start, end
-        transaction_frequency   Monthly count + total (detects high-freq habits)
-                                params: account_pattern, start, end
-        large_transactions      Top N individual transactions by size
-                                params: account_pattern, start, end, limit
-        account_snapshot        Current balance by account (no date filter)
-                                params: account_pattern
-        period_total            Single aggregate sum for a period
-                                params: account_pattern, start, end
-        account_total           Single aggregate sum, all time (no date filter)
-                                params: account_pattern
-        narration_search        Search by keyword when accounts lack granularity
-                                params: keyword, account_pattern, start, end, limit
-        savings_monthly         Income + expenses by month for savings rate
-                                params: start, end
-
-    Param conventions:
-        account_pattern  BQL regex, e.g. "^Expenses:Food" or "^(Assets:|Liabilities:)"
-        start / end      ISO date strings, end is exclusive, e.g. "2026-01-01" / "2026-02-01"
-        limit            integer, default 10
-
-    Note on income: Income accounts hold negative values in Beancount.
-    Negate the result numbers to get positive income figures when interpreting.
+    start is inclusive and end exclusive. account_pattern is a BQL regex.
+    Beancount income values are negative; interpret their negation as positive income.
 
     Args:
-        template_name: One of the template names listed above.
-        params: Dict of parameter values to substitute into the template.
-
-    Returns JSON with status SUCCESS (rows) or ERROR (error + bql that failed).
+        template_name: A template listed above.
+        params: Values for that template.
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
@@ -151,46 +109,16 @@ def tool_query(
     bql: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Execute a BQL (Bean Query Language) query against the ledger for financial analysis.
-
-    Use this as a last resort when no ledger_query_template fits. Prefer templates
-    for standard patterns (trends, breakdowns, snapshots, frequency, search).
-
-    BQL is a SQL-like language for querying Beancount data. Use this to answer any
-    financial question: spending patterns, income trends, category breakdowns,
-    balance history, large transaction detection, period comparisons, etc.
+    """Run raw BQL only when no ledger_query_template fits.
 
     BQL reference:
-        Columns:  date, flag, payee, narration, account, position, balance
-        Filters:  WHERE account ~ "regex"  |  date >= YYYY-MM-DD  |  date < YYYY-MM-DD
-        Aggregate: sum(position), count(*), first(date), last(date)
-        Grouping:  GROUP BY account  |  GROUP BY year, month
-        Ordering:  ORDER BY date DESC  |  ORDER BY sum(position)
-        Limit:     LIMIT 50
-
-    Analysis patterns:
-        Spending by category (current year):
-            SELECT account, sum(position) AS total
-            WHERE account ~ "^Expenses" AND date >= 2026-01-01
-            GROUP BY account ORDER BY sum(position)
-
-        Monthly income vs expenses trend:
-            SELECT year, month, account, sum(position) AS total
-            WHERE account ~ "^(Income|Expenses)"
-            GROUP BY year, month, account ORDER BY year, month
-
-        Large single transactions:
-            SELECT date, payee, narration, position
-            WHERE account ~ "^Expenses" ORDER BY position DESC LIMIT 20
-
-        Asset snapshot:
-            SELECT account, sum(position) AS balance
-            WHERE account ~ "^Assets" GROUP BY account
+        columns: date, flag, payee, narration, account, position, balance
+        filters: WHERE account ~ "regex", date >= YYYY-MM-DD, date < YYYY-MM-DD
+        aggregates: sum(position), count(*), first(date), last(date)
+        clauses: GROUP BY, ORDER BY, LIMIT
 
     Args:
-        bql: A complete BQL SELECT statement.
-
-    Returns JSON with status SUCCESS (rows) or ERROR (error message).
+        bql: Complete BQL SELECT statement.
     """
     ws = config.get("configurable", {}).get("workspace", "")
     ledger_config = config.get("configurable", {}).get("ledger_config")
@@ -204,15 +132,12 @@ def tool_query_report(
     month: int = 0,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Generate the full HTML monthly financial report file.
-    Runs all queries and renders the dark-theme dashboard with charts,
-    savings goal progress, MoM comparisons, and per-account breakdowns.
+    """Generate an HTML monthly report with charts and account breakdowns.
 
     Args:
-        year: Year to report (e.g. 2026). Defaults to current year.
-        month: Month to report as integer (e.g. 3 for March). Defaults to current month.
-
-    Returns the absolute path to the generated HTML report file."""
+        year: Report year; 0 means current year.
+        month: Month 1-12; 0 means current month.
+    """
     cfg = config.get("configurable", {})
     ws = cfg.get("workspace", "")
     ledger_config = cfg.get("ledger_config")
@@ -224,23 +149,10 @@ def tool_fetch_price(
     symbol: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Fetch a current market price for a currency pair or stock ticker.
-
-    Supports two formats:
-      Currency pair — e.g. "EUR/CNY", "USD/CNY", "HKD/CNY"
-                      Uses the Frankfurter API (ECB data, free, no key needed).
-      Stock ticker  — e.g. "Microsoft", "AAPL", "0700.HK"
-                      Uses the Yahoo Finance JSON endpoint (free, no key needed).
-
-    Use this to record ESPP valuations, foreign transactions, or to answer
-    questions like "what is the Microsoft share price today?" before recording
-    a cost-basis entry.
+    """Fetch a current currency-pair or stock price.
 
     Args:
-        symbol: Currency pair (e.g. "EUR/CNY") or stock ticker (e.g. "Microsoft").
-
-    Returns a JSON string with status SUCCESS (result.symbol, result.price,
-    result.currency, result.source) or ERROR.
+        symbol: Pair such as EUR/CNY, or ticker/name such as AAPL or Microsoft.
     """
     result = _dependencies(config).prices.fetch_price(symbol)
     return _json_mod.dumps(dataclasses.asdict(result))
@@ -251,21 +163,10 @@ def tool_ingest_file(
     file_path: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Read a file and return its text content for processing.
-
-    Use this to inspect an uploaded bank export (CSV, TSV, plain text) before
-    running ledger_run_python to parse it into beancount transactions.
-
-    Upload files via POST /upload first — it returns the container-local path
-    to pass here.
-
-    Supports any UTF-8 text file up to 2 MB.
+    """Read an uploaded UTF-8 text file up to 2 MB.
 
     Args:
-        file_path: Container-local path to the file (e.g. '/tmp/a2a_uploads/export.csv_abc123.csv').
-
-    Returns a JSON string with status SUCCESS (result.content, result.lines,
-    result.size_bytes) or ERROR.
+        file_path: Container-local upload path.
     """
     result = _dependencies(config).ingestion.read_file(file_path)
     return _json_mod.dumps(dataclasses.asdict(result))
@@ -279,66 +180,28 @@ def tool_run_python(
     stage_label: str = "import",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Run a Python script in a sandboxed subprocess and return its stdout.
-
-    Primary use case: parse a bank CSV export and print beancount transaction
-    blocks to stdout, which the agent then validates with ledger_import_transactions.
+    """Run Python in a sandbox, commonly to parse uploaded transaction files.
 
     Sandbox constraints:
-    - Fresh temp directory per run; no access to the ledger workspace or git.
-    - Input files (if given) are copied into the sandbox by their basename.
-    - Standard library + pandas, csv, json, re, datetime available.
-    - Hard timeout 60 seconds.
-
-    Two output modes:
-
-    stage=False (default) — stdout returned inline (max 200 KB).
-      Use for small batches or when you need to inspect the full output.
-
-    stage=True — stdout written to a /tmp staging file; only metadata returned.
-      result.staging_file   path to pass to ledger_import_transactions(transactions_file=...)
-      result.transaction_count  total parsed
-      result.sample         first 5 transaction headers
-      Use for large batches (50+ transactions) — the full text never enters LLM
-      context, which keeps token cost low and avoids truncation.
-
-    Typical workflow for large batch import:
-        1. ledger_ingest_file(path)                        — inspect columns
-        2. ledger_run_python(code, [path], stage=True)      — parse + stage
-        3. ledger_import_transactions(transactions_file=..., msg)  — approval request
-
-    Example script:
-
-        import csv
-        with open("export.csv") as f:
-            for row in csv.DictReader(f):
-                date = row["Date"]
-                narration = row["Note"]
-                amount = float(row["Amount"])
-                if amount < 0:
-                    print(f'{date} * "" "{narration}"')
-                    print(f"  Liabilities:CMB-Credit  {amount:.2f} CNY")
-                    print(f"  Expenses:Unknown        {-amount:.2f} CNY")
-                    print()
+    - Fresh temporary directory; no ledger or git access.
+    - Input files are copied by basename.
+    - Standard library and pandas are available; timeout is 60 seconds.
+    - stage=False returns stdout inline, capped at 200 KB.
+    - stage=True returns a staging_file for ledger_import_transactions plus a
+      transaction count and sample, avoiding large output in model context.
 
     Args:
         code: Python source code to execute.
-        input_files: Absolute paths to files copied into the sandbox by basename.
-        stage: If True, write stdout to /tmp and return staging_file path + metadata.
-        stage_label: Short label embedded in the staging filename (e.g. "cmb_april").
-
-    Returns JSON with status SUCCESS and either:
-      stage=False: result.stdout, result.stderr, result.exit_code
-      stage=True:  result.staging_file, result.transaction_count, result.sample,
-                   result.stderr, result.exit_code
-    or ERROR.
+        input_files: Absolute paths copied into the sandbox.
+        stage: Store stdout in a staging file instead of returning it inline.
+        stage_label: Short staging filename label.
     """
     result = _dependencies(config).ingestion.run_python(code, input_files, stage, stage_label)
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
 # ---------------------------------------------------------------------------
-# Write tools — model-visible mutation intents plus execution-only confirm functions
+# Model-visible mutation tools
 # ---------------------------------------------------------------------------
 
 
@@ -348,19 +211,11 @@ def tool_ledger_commit_transaction(
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate a transaction mutation and return an approval-required outcome.
-
-    This looks like a write tool, but it never performs a durable ledger write.
-    It validates accounts, runs an isolated dry-run bean-check, and returns a
-    signed/digested pending action for explicit user approval.
+    """Validate and prepare one transaction for approval.
 
     Args:
         transaction_text: The complete beancount transaction text.
-        commit_message: Git commit message for the later approved apply step.
-
-    Returns a JSON string. Possible statuses:
-        approval_required — dry-run validated; host/user approval is required
-        repairable_error  — revise the draft and retry the mutation tool
+        commit_message: Git commit message used if the user later approves.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -380,22 +235,13 @@ def tool_ledger_update_transaction(
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate a transaction replacement and return an approval-required outcome.
-
-    Workflow:
-    1. Use ledger_find_transactions to locate the entry and confirm which one to edit.
-    2. Call this tool with the replacement text.
-    3. Show the returned approval-required action to the user.
+    """Validate and prepare replacement of one uniquely identified transaction.
 
     Args:
-        date: Transaction date in ISO format (e.g. '2026-04-10').
-        narration: Substring of the narration or payee that uniquely identifies it.
-        new_transaction_text: The complete replacement Beancount transaction text.
-        commit_message: Git commit message for the later approved apply step.
-
-    Returns a JSON string. Possible statuses:
-        approval_required — replacement dry-run validated; approval is required
-        repairable_error  — revise the replacement or search target and retry
+        date: Existing transaction's ISO date.
+        narration: Narration/payee substring that uniquely identifies it.
+        new_transaction_text: Complete replacement Beancount transaction.
+        commit_message: Git commit message used if later approved.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -420,23 +266,13 @@ def tool_ledger_import_transactions(
     transactions_file: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate a batch import and return one approval-required outcome.
-
-    Two input modes:
-    - transactions_text: raw Beancount transaction blocks for small batches.
-    - transactions_file: staging file path returned by ledger_run_python(stage=True).
-
-    The tool reads staged text when provided, validates accounts, runs isolated
-    bean-check, and returns a pending action. It does not append, commit, or push.
+    """Validate and prepare a batch import from text or a staged file.
 
     Args:
         transactions_text: Raw Beancount transaction blocks separated by blank lines.
-        commit_message: Git commit message for the later approved apply step.
-        transactions_file: Optional /tmp staging file from ledger_run_python(stage=True).
-
-    Returns a JSON string. Possible statuses:
-        approval_required — batch dry-run validated; approval is required
-        repairable_error  — revise the batch input and retry
+        commit_message: Git commit message used if later approved.
+        transactions_file: Staging file from ledger_run_python(stage=True); use
+            instead of transactions_text for large batches.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -461,24 +297,13 @@ def tool_ledger_open_account(
     display_name: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate opening a Beancount account and return an approval-required outcome.
-
-    Use this when the user explicitly asks to create an account, or when a
-    requested ledger mutation needs a new account that does not yet exist.
-    This tool never performs a durable ledger write. It validates the account
-    directive, runs isolated dry-run bean-check, and returns a pending action
-    for explicit user approval.
+    """Validate and prepare opening a Beancount account for approval.
 
     Args:
-        account_name: Full Beancount account path (e.g. 'Assets:Liquid:Bank:NewBank').
-                      Must start with Assets, Liabilities, Equity, Income, or Expenses.
-        currency: Optional commodity constraint (e.g. 'USD'). Pass empty string for none.
-        open_date: ISO date when the account should be opened (e.g. '2026-01-01').
-        display_name: Optional human-readable label stored as account metadata.
-
-    Returns a JSON string. Possible statuses:
-        approval_required — account directive dry-run validated; approval is required
-        repairable_error  — revise the account details and retry
+        account_name: Full path beginning with a Beancount root account type.
+        currency: Optional commodity constraint; empty means none.
+        open_date: ISO account opening date.
+        display_name: Optional human-readable metadata label.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -500,12 +325,7 @@ def tool_ledger_prepare_change_set(
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate related ledger mutations as one approval-required change set.
-
-    Use this when a user-approved transaction depends on a new account in the
-    same request. The tool replays operations in order in one isolated dry-run,
-    so a later transaction can use an account opened by an earlier operation.
-    It never performs a durable ledger write.
+    """Validate and prepare ordered, dependent mutations as one change set.
 
     Supported operations:
       {"type": "open_account", "account_name": "...", "currency": "CNY",
@@ -514,11 +334,7 @@ def tool_ledger_prepare_change_set(
 
     Args:
         operations: Ordered open_account and commit_transaction operation objects.
-        commit_message: One Git commit message for the whole approved change set.
-
-    Returns a JSON string. Possible statuses:
-        approval_required — ordered dry-run validated; approval is required
-        repairable_error  — revise the operation at the reported index and retry
+        commit_message: One Git commit message for the whole change set.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -543,11 +359,10 @@ def tool_ledger_calculate_balance_adjustment(
     cutoff: str = "end_of_day",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Calculate the ledger balance and signed unexplained difference without writing.
+    """Calculate ledger balance and signed unexplained difference without writing.
 
-    observed_date and cutoff define the observation precisely. End-of-day is the
-    default: postings through observed_date are included and the assertion would
-    be dated the following day. Start-of-day includes only earlier postings.
+    end_of_day includes postings through observed_date and dates a future
+    assertion the following day; start_of_day includes only earlier postings.
     """
     c = config.get("configurable", {})
     result = _dependencies(config).mutations.calculate_balance_adjustment(
@@ -573,10 +388,9 @@ def tool_ledger_prepare_balance_reconciliation(
     commit_message: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Prepare an approval-gated explicit balance adjustment and assertion.
+    """Validate and prepare an explicit balance adjustment and assertion.
 
-    adjustment_account must already exist and is never inferred. This tool never
-    writes until the user approves the exact generated transaction and assertion.
+    adjustment_account must already exist and is never inferred.
     """
     c = config.get("configurable", {})
     result = _dependencies(config).mutations.prepare_balance_reconciliation(
@@ -602,10 +416,9 @@ def tool_ledger_prepare_balance_update(
     commit_message: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Prepare an explicit adjustment for an existing failed balance checkpoint.
+    """Validate and prepare an adjustment for a failed balance checkpoint.
 
-    The original transaction and assertion remain unchanged. The user must review
-    and approve the new adjustment transaction.
+    The original transaction and assertion remain unchanged.
     """
     c = config.get("configurable", {})
     result = _dependencies(config).mutations.prepare_balance_update(

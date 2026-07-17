@@ -16,7 +16,6 @@ from .queries import LedgerQueryService
 from .types import (
     FileReadResult,
     LedgerConfig,
-    PreflightResult,
     PriceResult,
     QueryResult,
     SandboxResult,
@@ -26,10 +25,6 @@ from .types import (
 
 class QueryToolPort(Protocol):
     """Read-only ledger operations exposed to workflow tools."""
-
-    def preflight(
-        self, workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> PreflightResult: ...
 
     def get_balance(
         self,
@@ -201,20 +196,10 @@ WorkflowToolDependenciesFactory = Callable[[], WorkflowToolDependencies]
 
 
 class ServiceQueryToolAdapter:
-    """Adapt focused query services and the compatibility preflight façade."""
+    """Adapt focused query services to the workflow query port."""
 
-    def __init__(
-        self,
-        queries: LedgerQueryService | None = None,
-        ledger: LedgerService | None = None,
-    ) -> None:
+    def __init__(self, queries: LedgerQueryService | None = None) -> None:
         self._queries = queries or LedgerQueryService()
-        self._ledger = ledger or LedgerService()
-
-    def preflight(
-        self, workspace: str, ledger_config: LedgerConfig | None = None
-    ) -> PreflightResult:
-        return self._ledger.preflight_report(workspace, ledger_config)
 
     def get_balance(
         self,
@@ -289,7 +274,7 @@ def create_workflow_tool_dependencies() -> WorkflowToolDependencies:
 
     ledger = LedgerService()
     return WorkflowToolDependencies(
-        queries=ServiceQueryToolAdapter(ledger=ledger),
+        queries=ServiceQueryToolAdapter(),
         reports=LegacyReportToolAdapter(),
         ingestion=IngestionService(),
         prices=PriceService(),

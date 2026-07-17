@@ -108,7 +108,7 @@ def preflight_report(workspace: str) -> str:
             "ACTION: Add the following line to your data/main.beancount file "
             "to enable the agent sidecar:\n\n"
             '    include "agent_inc/main.beancount"\n\n'
-            "Then call ledger_preflight again."
+            "Then retry the request."
         )
 
     target = _ensure_agent_sidecar(workspace)

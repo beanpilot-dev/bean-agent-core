@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 
@@ -36,36 +35,6 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_FILE = os.path.join(os.path.dirname(__file__), "ledger", "prompt.md")
 SYSTEM_PROMPT = open(_PROMPT_FILE).read()
-
-SINGLE_LOOP_POLICY = """
-
-RUNTIME POLICY:
-- You are one agent loop. Do not invent planner, specialist, reviewer, or
-  synthesizer handoffs.
-- You may inspect the ledger with read tools and call ledger mutation tools for
-  approval-gated actions.
-- Deterministic preflight has already supplied ledger context when available.
-  Use exact account names from that context or from tool results. Do not invent
-  near-miss accounts or pluralization variants.
-- To open a new account, call ledger_open_account only after the user explicitly
-  asks for account creation or explicitly approves that a requested mutation
-  needs a new account. Do not invent near-miss account names. If a transaction
-  needs an unknown account, ask for approval to open that account before
-  preparing the transaction that depends on it.
-- You cannot commit, push, confirm, apply, or discard ledger changes. Those
-  execution capabilities are deterministic server actions after user approval.
-- When a ledger mutation tool returns status approval_required, say the ledger
-  change has been prepared and passed bean-check, but do not reproduce its
-  directives, transaction lines, account names, amounts, postings, validation
-  result, or preview content in assistant Markdown. The deterministic proposal
-  card is the sole user-facing representation of executable changes. Use the
-  final assistant message only for concise rationale or a confirmation request.
-  Do not use Markdown code fences for pending mutations. Say that confirming
-  will commit and push the reviewed change and that the user can also discard
-  or request changes. Legacy PENDING_ACTION payloads mean the same thing.
-- Treat pending-action preview text as display-only. The pending action payload
-  is the executable contract.
-"""
 
 
 def _serialize_history(messages) -> list[dict]:
@@ -207,15 +176,12 @@ def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
 
 
 def _build_single_loop_prompt(
-    today: str,
     conversation_context: str,
     ledger_context: dict[str, Any] | None,
     preferred_language: str,
 ) -> str:
     return (
         SYSTEM_PROMPT
-        + SINGLE_LOOP_POLICY
-        + f"\nTODAY: {today}\n"
         + _format_ledger_context(ledger_context)
         + (f"\nCONVERSATION CONTEXT:\n{conversation_context}\n" if conversation_context else "")
         + "\nRESPONSE LANGUAGE:\n"
@@ -228,12 +194,10 @@ async def _single_agent_node(state: AgentState, config: RunnableConfig) -> dict:
     if llm is None:
         return {"messages": []}
     cfg = config.get("configurable", {})
-    today = cfg.get("today", "")
     conversation_context = cfg.get("conversation_context", "")
     ledger_context = cfg.get("ledger_context")
     preferred_language = state.get("preferred_language", "auto")
     prompt = _build_single_loop_prompt(
-        today=today,
         conversation_context=conversation_context,
         ledger_context=ledger_context,
         preferred_language=preferred_language,
@@ -412,7 +376,6 @@ class PersonalFinanceAgent:
         tool_dependencies = self._tool_dependencies_factory()
 
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
             conv_ctx = ""
             if conversation_meta:
                 parts = []
@@ -433,7 +396,6 @@ class PersonalFinanceAgent:
             preferred_language = detect_preferred_language(query)
             system = SystemMessage(
                 content=_build_single_loop_prompt(
-                    today=today,
                     conversation_context=conv_ctx,
                     ledger_context=ledger_context,
                     preferred_language=preferred_language,
@@ -469,7 +431,6 @@ class PersonalFinanceAgent:
                     "configurable": {
                         "single_loop_llm": base_llm.bind_tools(MODEL_TOOLS),
                         "router_system_prompt": SYSTEM_PROMPT,
-                        "today": today,
                         "conversation_context": conv_ctx,
                         "workspace": workspace,
                         "repo_url": repo_url,

@@ -15,9 +15,9 @@ from langchain_core.messages import (
 )
 
 from agent_core.agent import (
-    SINGLE_LOOP_POLICY,
     SYSTEM_PROMPT,
     PersonalFinanceAgent,
+    _build_single_loop_prompt,
     _format_ledger_context,
     _pending_actions,
     _single_agent_node,
@@ -423,14 +423,22 @@ def test_response_language_instruction_preserves_ledger_literals():
 
 
 def test_pending_action_prompt_avoids_duplicate_preview_code_blocks():
-    combined = f"{SYSTEM_PROMPT}\n{SINGLE_LOOP_POLICY}"
+    assert "do not reproduce proposal-card contents" in SYSTEM_PROMPT
+    assert "do not repeat its directives, postings, accounts, amounts" in SYSTEM_PROMPT
+    assert "do not use Markdown code fences to restate a pending mutation" in SYSTEM_PROMPT
+    assert "include the exact Beancount" not in SYSTEM_PROMPT
 
-    assert "do not reproduce its\n  directives, transaction lines" in combined
-    assert "do not reproduce its directives, transaction lines" in combined
-    assert "deterministic proposal card" in combined
-    assert "Do not use Markdown code fences for pending mutations" in combined
-    assert "include the exact Beancount" not in combined
-    assert "in a fenced\n  code block" not in combined
+
+def test_single_loop_prompt_uses_ledger_as_of_as_its_only_current_date():
+    prompt = _build_single_loop_prompt(
+        conversation_context="",
+        ledger_context={"ledger_meta": {"as_of": "2026-07-17"}},
+        preferred_language="en",
+    )
+
+    assert '"as_of":"2026-07-17"' in prompt
+    assert "TODAY:" not in prompt
+    assert "RUNTIME POLICY:" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -592,6 +600,7 @@ async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeyp
     ledger_context = {
         "status": "CLEAN",
         "target": "data/agent_inc/2026-06.beancount",
+        "ledger_meta": {"as_of": "2026-07-17"},
         "accounts": ["Assets:Liquid:Bank:Checking"],
         "recent": "",
         "errors": None,
@@ -612,7 +621,11 @@ async def test_stream_includes_preflight_ledger_context_in_system_prompt(monkeyp
 
     assert graph.captured_config is not None
     assert graph.captured_config["configurable"]["ledger_context"] == ledger_context
+    assert "today" not in graph.captured_config["configurable"]
     assert graph.captured_input is not None
+    system_prompt = graph.captured_input["messages"][0].content
+    assert '"as_of":"2026-07-17"' in system_prompt
+    assert "TODAY:" not in system_prompt
     assert "ledger_preflight" not in CapturingLLM.bound_tool_names
     assert "ledger_open_account" in CapturingLLM.bound_tool_names
 
@@ -630,10 +643,10 @@ async def test_single_agent_node_adds_ledger_context_to_system_prompt():
     config = {
         "configurable": {
             "single_loop_llm": llm,
-            "today": "2026-06-29",
             "ledger_context": {
                 "status": "CLEAN",
                 "target": "data/agent_inc/2026-06.beancount",
+                "ledger_meta": {"as_of": "2026-06-29"},
                 "accounts": ["Assets:Liquid:Bank:Checking"],
             },
         }
@@ -644,6 +657,8 @@ async def test_single_agent_node_adds_ledger_context_to_system_prompt():
     assert llm.messages is not None
     system_prompt = llm.messages[0].content
     assert "LEDGER CONTEXT" in system_prompt
+    assert '"as_of":"2026-06-29"' in system_prompt
+    assert "TODAY:" not in system_prompt
     assert "Assets:Liquid:Bank:Checking" in system_prompt
 
 
@@ -679,7 +694,7 @@ def test_single_loop_prompt_analysis_contract_has_no_global_cny_default():
     assert "There is no global default currency" in prompt
     assert "Always use primary currency CNY" not in prompt
     assert "spendable cash separate from net worth" in prompt
-    assert "Do not present net worth as spendable cash" in prompt
+    assert "do not silently combine cash, credit capacity, investments" in prompt
 
 
 def test_normalize_conversation_title_strips_markup_and_punctuation():

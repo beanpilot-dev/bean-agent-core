@@ -5,13 +5,13 @@ from pathlib import Path
 from agent_core.services import WorkflowToolDependencies
 from agent_core.services.types import (
     FileReadResult,
-    PreflightResult,
     PriceResult,
     QueryResult,
     SandboxResult,
     ToolCompleted,
 )
 from agent_core.workflow.tools import (
+    MODEL_TOOLS,
     tool_account_balance,
     tool_fetch_price,
     tool_find_transactions,
@@ -24,7 +24,6 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_balance_update,
     tool_ledger_prepare_change_set,
     tool_ledger_update_transaction,
-    tool_preflight,
     tool_query,
     tool_query_report,
     tool_query_template,
@@ -33,9 +32,6 @@ from agent_core.workflow.tools import (
 
 
 class FakeQueries:
-    def preflight(self, workspace, ledger_config=None):
-        return PreflightResult(status="CLEAN", target=f"{workspace}/main.beancount")
-
     def get_balance(self, workspace, account, as_of_date=None, ledger_config=None):
         return QueryResult(status="SUCCESS", account=account, balance="42 CNY")
 
@@ -197,7 +193,6 @@ def _config() -> dict:
 def test_workflow_tools_use_injected_fake_ports() -> None:
     config = _config()
 
-    preflight = json.loads(tool_preflight.func(config=config))
     balance = json.loads(tool_account_balance.func("Assets:Cash", config=config))
     price = json.loads(tool_fetch_price.func("USD/CNY", config=config))
     file_result = json.loads(tool_ingest_file.func("/tmp/upload.csv", config=config))
@@ -207,7 +202,6 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     )
     report_path = tool_query_report.func(2026, 7, config=config)
 
-    assert preflight["status"] == "CLEAN"
     assert balance["balance"] == "42 CNY"
     assert price["price"] == 123
     assert file_result["content"] == "date,amount"
@@ -278,6 +272,10 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
     for workflow_tool in [tool_fetch_price, tool_ingest_file, tool_run_python]:
         assert "config" not in workflow_tool.args_schema.model_json_schema()["properties"]
+
+
+def test_model_tool_descriptions_stay_compact() -> None:
+    assert sum(len(tool.description or "") for tool in MODEL_TOOLS) <= 5_000
 
 
 def test_workflow_layer_does_not_import_legacy_ledger_or_create_service_globals() -> None:

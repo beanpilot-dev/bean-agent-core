@@ -13,6 +13,7 @@ from agent_core.services.ledger import (
 )
 from agent_core.services.mutations import sidecar as mutation_sidecar
 from agent_core.services.pending_actions import PendingActionService
+from agent_core.services.preflight import PreflightService
 from agent_core.services.types import (
     ApplyReceipt,
     ApprovalRequired,
@@ -1021,11 +1022,11 @@ def test_preflight_uses_configured_entry_path(
 ) -> None:
     workspace, config = custom_ledger_workspace
 
-    report = LedgerService.preflight_report(str(workspace), config)
+    result = PreflightService.validate(str(workspace), config)
 
-    assert report.status == "CLEAN"
-    assert report.target is not None
-    assert report.target.startswith("books/agent_sidecar/")
+    assert result.status == "CLEAN"
+    assert result.target is not None
+    assert result.target.startswith("books/agent_sidecar/")
 
 
 def test_ledger_config_derives_sidecar_main_from_write_dir() -> None:

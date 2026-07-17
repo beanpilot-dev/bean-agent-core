@@ -1,7 +1,6 @@
 """Compatibility facade over focused ledger preparation, apply, and read services."""
 
 from .beancount import Beancount, LedgerServiceError
-from .inspection import preflight_report
 from .mutations.application import (
     PendingActionApplicationService,
     git_dependency_error,
@@ -301,5 +300,3 @@ class LedgerService:
                 workspace, target_date, narration, ledger_config
             )
         ]
-
-    preflight_report = staticmethod(preflight_report)
