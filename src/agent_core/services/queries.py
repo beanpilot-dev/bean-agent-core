@@ -7,15 +7,82 @@ Git operations.
 
 import os
 import re
+from typing import Any
 
-from .beancount import Beancount, LedgerServiceError
-from .types import LedgerConfig, QueryResult
+from .beancount import Beancount, LedgerServiceError, ParsedLedgerAccount
+from .types import AccountSearchResult, LedgerConfig, QueryResult
 
 _OPEN_ACCOUNT_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}\s+open\s+"
     r"((?:Assets|Liabilities|Equity|Income|Expenses)(?::[A-Za-z][A-Za-z0-9\-]+)+)",
     re.MULTILINE,
 )
+_ACCOUNT_TYPES = {"Assets", "Liabilities", "Equity", "Income", "Expenses"}
+_ACCOUNT_SEARCH_MAX_RESULTS = 100
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _search_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _tokens(value: str) -> tuple[str, ...]:
+    return tuple(_TOKEN_RE.findall(_search_text(value)))
+
+
+def _account_match_basis(account: ParsedLedgerAccount, query: str) -> tuple[int, str] | None:
+    normalized_query = _search_text(query)
+    query_tokens = _tokens(query)
+    name = _search_text(account.account_name)
+    display_name = _search_text(account.display_name or "")
+    name_components = tuple(_search_text(part) for part in account.account_name.split(":"))
+    display_tokens = _tokens(account.display_name or "")
+    fields = (name, display_name)
+
+    if normalized_query in fields:
+        basis = "exact_account_name" if normalized_query == name else "exact_display_name"
+        return 0, basis
+
+    component_tokens = set(name_components) | set(display_tokens)
+    if query_tokens and all(token in component_tokens for token in query_tokens):
+        return 1, "exact_component"
+
+    if any(field.startswith(normalized_query) for field in fields if field):
+        return 2, "prefix"
+    if any(
+        component.startswith(normalized_query)
+        for component in name_components + display_tokens
+        if component
+    ):
+        return 2, "prefix"
+
+    if any(normalized_query in field for field in fields if field):
+        return 3, "substring"
+    if any(
+        normalized_query in component
+        for component in name_components + display_tokens
+        if component
+    ):
+        return 3, "substring"
+    return None
+
+
+def _account_candidate(
+    account: ParsedLedgerAccount,
+    match_basis: str,
+    whitelist: list[str] | None,
+) -> dict[str, Any]:
+    return {
+        "account_name": account.account_name,
+        "match_basis": match_basis,
+        "status": account.status,
+        "open_date": account.open_date.isoformat() if account.open_date else None,
+        "close_date": account.close_date.isoformat() if account.close_date else None,
+        "declared_currencies": list(account.declared_currencies),
+        "display_name": account.display_name,
+        "within_conversation_scope": not whitelist
+        or any(account.account_name.startswith(prefix) for prefix in whitelist),
+    }
 
 
 class LedgerQueryService:
@@ -40,6 +107,75 @@ class LedgerQueryService:
         except OSError:
             pass
         return sorted(accounts)
+
+    @staticmethod
+    def find_accounts(
+        workspace: str,
+        query: str,
+        account_type: str = "",
+        status: str = "open",
+        limit: int = 20,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> AccountSearchResult:
+        """Find exact ledger accounts using parsed lifecycle and display facts."""
+        normalized_query = _search_text(query) if isinstance(query, str) else ""
+        if not normalized_query:
+            return AccountSearchResult(
+                status="ERROR",
+                query=query if isinstance(query, str) else "",
+                account_type=account_type,
+                lifecycle_status=status,
+                error="query must be non-empty",
+            )
+        if account_type and account_type not in _ACCOUNT_TYPES:
+            return AccountSearchResult(
+                status="ERROR",
+                query=query,
+                account_type=account_type,
+                lifecycle_status=status,
+                error="account_type must be one of Assets, Liabilities, Equity, Income, Expenses",
+            )
+        if status not in {"open", "closed", "all"}:
+            return AccountSearchResult(
+                status="ERROR",
+                query=query,
+                account_type=account_type,
+                lifecycle_status=status,
+                error="status must be one of open, closed, all",
+            )
+
+        result_limit = min(max(limit, 1), _ACCOUNT_SEARCH_MAX_RESULTS)
+        parsed = Beancount.parsed_ledger(workspace, ledger_config)
+        matches: list[tuple[int, str, ParsedLedgerAccount, str]] = []
+        for account in parsed.account_index:
+            if account_type and account.account_name.split(":", 1)[0] != account_type:
+                continue
+            if status != "all" and account.status != status:
+                continue
+            match = _account_match_basis(account, normalized_query)
+            if match is not None:
+                rank, basis = match
+                matches.append((rank, account.account_name.casefold(), account, basis))
+
+        matches.sort(key=lambda item: (item[0], item[1], item[2].account_name))
+        candidates = [
+            _account_candidate(account, basis, whitelist)
+            for _rank, _sort_name, account, basis in matches[:result_limit]
+        ]
+        total = len(matches)
+        return AccountSearchResult(
+            status="SUCCESS",
+            query=query,
+            account_type=account_type,
+            lifecycle_status=status,
+            limit=result_limit,
+            candidates=candidates,
+            count=len(candidates),
+            total=total,
+            truncated=total > result_limit,
+            omitted=max(0, total - result_limit),
+        )
 
     @staticmethod
     def get_balance(

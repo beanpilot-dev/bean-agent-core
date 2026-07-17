@@ -226,6 +226,23 @@ class QueryResult(ServiceResult):
 
 
 @dataclass
+class AccountSearchResult(ServiceResult):
+    """Bounded deterministic account lookup results."""
+
+    status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
+    query: str = ""
+    account_type: str = ""
+    lifecycle_status: str = "open"
+    limit: int = 20
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    count: int = 0
+    total: int = 0
+    truncated: bool = False
+    omitted: int = 0
+    error: str | None = None
+
+
+@dataclass
 class PreflightResult(ServiceResult):
     """Ledger preflight check result."""
     status: Literal["CLEAN", "ERROR", "SETUP_REQUIRED"] = "CLEAN"

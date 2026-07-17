@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_core.services import WorkflowToolDependencies
 from agent_core.services.types import (
+    AccountSearchResult,
     FileReadResult,
     PriceResult,
     QueryResult,
@@ -13,6 +14,7 @@ from agent_core.services.types import (
 from agent_core.workflow.tools import (
     MODEL_TOOLS,
     tool_account_balance,
+    tool_find_accounts,
     tool_find_transactions,
     tool_ingest_file,
     tool_ledger_calculate_balance_adjustment,
@@ -30,6 +32,28 @@ from agent_core.workflow.tools import (
 
 
 class FakeQueries:
+    def find_accounts(
+        self,
+        workspace,
+        query,
+        account_type="",
+        status="open",
+        limit=20,
+        whitelist=None,
+        ledger_config=None,
+    ):
+        return AccountSearchResult(
+            query=query,
+            candidates=[
+                {
+                    "account_name": "Assets:Cash",
+                    "within_conversation_scope": True,
+                }
+            ],
+            count=1,
+            total=1,
+        )
+
     def get_balance(self, workspace, account, as_of_date=None, ledger_config=None):
         return QueryResult(status="SUCCESS", account=account, balance="42 CNY")
 
@@ -191,6 +215,7 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     config = _config()
 
     balance = json.loads(tool_account_balance.func("Assets:Cash", config=config))
+    accounts = json.loads(tool_find_accounts.func("cash", config=config))
     price = json.loads(tool_market_fetch_price.func("USD/CNY", config=config))
     file_result = json.loads(tool_ingest_file.func("/tmp/upload.csv", config=config))
     sandbox = json.loads(tool_run_python.func("print('ok')", config=config))
@@ -199,6 +224,7 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     )
 
     assert balance["balance"] == "42 CNY"
+    assert accounts["candidates"][0]["account_name"] == "Assets:Cash"
     assert price["price"] == 123
     assert file_result["content"] == "date,amount"
     assert sandbox["stdout"] == "ran:import"
@@ -271,6 +297,7 @@ def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
 def test_market_price_manifest_has_no_legacy_ledger_name() -> None:
     names = {tool.name for tool in MODEL_TOOLS}
 
+    assert "ledger_find_accounts" in names
     assert "market_fetch_price" in names
     assert "ledger_fetch_price" not in names
     assert "tool_market_fetch_price".endswith("market_fetch_price")

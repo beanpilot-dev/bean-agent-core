@@ -121,6 +121,15 @@ When the user requests a non-ASCII tag or link, ask for an ASCII-safe name.
 
 Use the narrowest tool that can answer or prepare the request.
 
+When the user gives a human label, alias, or incomplete account hint instead of
+an exact ledger literal—or when the needed account is absent from the bounded
+ledger context—use `ledger_find_accounts` first. Pass a focused non-empty query
+and use its exact `account_name` values; never synthesize, translate, or
+normalize an account name. Check the returned lifecycle facts and
+`within_conversation_scope` before using a candidate for a read or mutation.
+Use `status="all"` when a closed historical account is relevant, and keep the
+tool's bounded result set and match basis visible when explaining ambiguity.
+
 Before reading the ledger, identify the minimum evidence required.
 
 Collect independent reads in one parallel batch whenever possible.

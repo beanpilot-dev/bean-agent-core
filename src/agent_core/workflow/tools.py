@@ -20,6 +20,38 @@ def _dependencies(config: RunnableConfig) -> WorkflowToolDependencies:
 # ---------------------------------------------------------------------------
 
 
+@tool("ledger_find_accounts")
+def tool_find_accounts(
+    query: str,
+    account_type: str = "",
+    status: str = "open",
+    limit: int = 20,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Resolve a human account hint to exact ledger names and lifecycle facts.
+
+    Use this before a read or approval-gated write when the user supplies a
+    label instead of an exact ledger account literal.
+
+    Args:
+        query: Non-empty account name, component, or display-name hint.
+        account_type: Native root filter: Assets, Liabilities, Equity, Income, or Expenses.
+        status: Lifecycle filter: open, closed, or all.
+        limit: Maximum candidates; hard-capped at 100.
+    """
+    c = config.get("configurable", {})
+    result = _dependencies(config).queries.find_accounts(
+        c.get("workspace", ""),
+        query,
+        account_type,
+        status,
+        min(limit, 100),
+        c.get("whitelist"),
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result), ensure_ascii=False)
+
+
 @tool("ledger_account_balance")
 def tool_account_balance(
     account: str,
@@ -398,6 +430,7 @@ TRANSACTION_TOOLS = [
 ]
 
 ANALYTICS_TOOLS = [
+    tool_find_accounts,
     tool_account_balance,
     tool_ledger_calculate_balance_adjustment,
     tool_find_transactions,

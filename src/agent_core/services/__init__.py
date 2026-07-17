@@ -35,6 +35,7 @@ from .tool_ports import (
 )
 from .types import (
     DEFAULT_LEDGER_CONFIG,
+    AccountSearchResult,
     ApplyReceipt,
     ApprovalProof,
     ApprovalRequired,
@@ -78,6 +79,7 @@ __all__ = [
     "create_workflow_tool_dependencies",
     # Types
     "ApprovalProof",
+    "AccountSearchResult",
     "ApprovalRequired",
     "ApplyReceipt",
     "CommitResult",

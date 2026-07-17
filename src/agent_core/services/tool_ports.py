@@ -14,6 +14,7 @@ from .ledger import LedgerService
 from .prices import PriceService
 from .queries import LedgerQueryService
 from .types import (
+    AccountSearchResult,
     FileReadResult,
     LedgerConfig,
     PriceResult,
@@ -25,6 +26,17 @@ from .types import (
 
 class QueryToolPort(Protocol):
     """Read-only ledger operations exposed to workflow tools."""
+
+    def find_accounts(
+        self,
+        workspace: str,
+        query: str,
+        account_type: str = "",
+        status: str = "open",
+        limit: int = 20,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> AccountSearchResult: ...
 
     def get_balance(
         self,
@@ -179,6 +191,20 @@ class ServiceQueryToolAdapter:
 
     def __init__(self, queries: LedgerQueryService | None = None) -> None:
         self._queries = queries or LedgerQueryService()
+
+    def find_accounts(
+        self,
+        workspace: str,
+        query: str,
+        account_type: str = "",
+        status: str = "open",
+        limit: int = 20,
+        whitelist: list[str] | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> AccountSearchResult:
+        return self._queries.find_accounts(
+            workspace, query, account_type, status, limit, whitelist, ledger_config
+        )
 
     def get_balance(
         self,
