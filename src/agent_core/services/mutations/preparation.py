@@ -204,11 +204,11 @@ class MutationPreparationService:
             display_name=display_name,
         )
 
-    def preview_update(
+    def preview_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
@@ -218,18 +218,18 @@ class MutationPreparationService:
             "update_transaction",
             workspace,
             ledger_config,
-            target_date=target_date,
-            narration=narration,
+            transaction_ref=transaction_ref,
+            revision_fingerprint=revision_fingerprint,
             new_transaction_text=new_transaction_text,
             commit_message=commit_message,
             whitelist=whitelist,
         )
 
-    def prepare_update(
+    def prepare_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
@@ -239,8 +239,8 @@ class MutationPreparationService:
             "update_transaction",
             workspace,
             ledger_config,
-            target_date=target_date,
-            narration=narration,
+            transaction_ref=transaction_ref,
+            revision_fingerprint=revision_fingerprint,
             new_transaction_text=new_transaction_text,
             commit_message=commit_message,
             whitelist=whitelist,

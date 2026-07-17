@@ -8,7 +8,6 @@ from .mutations.application import (
 from .mutations.handlers import extract_posting_accounts, validate_posting_accounts
 from .mutations.preparation import MutationPreparationService
 from .reconciliation import ReconciliationCalculator
-from .transaction_locator import TransactionLocator
 from .types import LedgerConfig
 from .workspace import GitService
 
@@ -85,40 +84,40 @@ class LedgerService:
             ledger_config,
         )
 
-    def preview_update(
+    def preview_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
     ):
-        return self._preparation.preview_update(
+        return self._preparation.preview_transaction_update(
             workspace,
-            target_date,
-            narration,
+            transaction_ref,
+            revision_fingerprint,
             new_transaction_text,
             commit_message,
             whitelist,
             ledger_config,
         )
 
-    def prepare_update(
+    def prepare_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
     ):
-        return self._preparation.prepare_update(
+        return self._preparation.prepare_transaction_update(
             workspace,
-            target_date,
-            narration,
+            transaction_ref,
+            revision_fingerprint,
             new_transaction_text,
             commit_message,
             whitelist,
@@ -286,17 +285,3 @@ class LedgerService:
         return extract_posting_accounts(transaction_text)
 
     validate_accounts = staticmethod(validate_posting_accounts)
-
-    @staticmethod
-    def find_transaction_block(
-        workspace: str,
-        target_date: str,
-        narration: str,
-        ledger_config: LedgerConfig | None = None,
-    ) -> list[tuple[str, str, str]]:
-        return [
-            (match.relative_path, match.file_content, match.block)
-            for match in TransactionLocator.find(
-                workspace, target_date, narration, ledger_config
-            )
-        ]

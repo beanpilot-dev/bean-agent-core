@@ -228,19 +228,21 @@ def tool_ledger_commit_transaction(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("ledger_update_transaction")
-def tool_ledger_update_transaction(
-    date: str,
-    narration: str,
+@tool("ledger_prepare_transaction_update")
+def tool_ledger_prepare_transaction_update(
+    transaction_ref: str,
+    revision_fingerprint: str,
     new_transaction_text: str,
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and prepare replacement of one uniquely identified transaction.
+    """Validate and prepare replacement of one authoritative transaction.
 
     Args:
-        date: Existing transaction's ISO date.
-        narration: Narration/payee substring that uniquely identifies it.
+        transaction_ref: Unchanged opaque reference returned by
+            ledger_find_transactions and ledger_get_transaction.
+        revision_fingerprint: Exact fingerprint returned by
+            ledger_get_transaction for this directive revision.
         new_transaction_text: Complete replacement Beancount transaction.
         commit_message: Git commit message used if later approved.
     """
@@ -248,10 +250,10 @@ def tool_ledger_update_transaction(
     ws: str = c.get("workspace", "")
     whitelist = c.get("whitelist")
     ledger_config = c.get("ledger_config")
-    result = _dependencies(config).mutations.prepare_update(
+    result = _dependencies(config).mutations.prepare_transaction_update(
         ws,
-        date,
-        narration,
+        transaction_ref,
+        revision_fingerprint,
         new_transaction_text,
         commit_message,
         whitelist,
@@ -440,7 +442,7 @@ def tool_ledger_prepare_balance_update(
 
 TRANSACTION_TOOLS = [
     tool_ledger_commit_transaction,
-    tool_ledger_update_transaction,
+    tool_ledger_prepare_transaction_update,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,

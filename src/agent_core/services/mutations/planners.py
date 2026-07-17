@@ -30,7 +30,7 @@ class MutationPlanner:
         )
 
     @staticmethod
-    def update(
+    def transaction_update(
         target_file: str, old_text: str, new_text: str, commit_message: str
     ) -> MutationPlan:
         return MutationPlan.from_operations(

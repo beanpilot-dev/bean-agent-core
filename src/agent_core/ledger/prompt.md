@@ -136,6 +136,13 @@ guessing.
 
 Use the narrowest tool that can answer or prepare the request.
 
+For an existing transaction update, always complete the authoritative sequence
+`ledger_find_transactions -> ledger_get_transaction ->
+ledger_prepare_transaction_update`. Pass the unchanged reference and exact
+`revision_fingerprint` from the detail result. Never update by date, narration,
+or a reference reconstructed from user text; stale, missing, forged, or
+ambiguous references must be reported and looked up again.
+
 When the user gives a human label, alias, or incomplete account hint instead of
 an exact ledger literal—or when the needed account is absent from the bounded
 ledger context—use `ledger_find_accounts` first. Pass a focused non-empty query

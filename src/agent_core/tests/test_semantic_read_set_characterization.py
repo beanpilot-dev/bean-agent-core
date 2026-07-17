@@ -23,6 +23,7 @@ from agent_core.services.mutations.facts import (
     capture_checkpoint_fact,
     semantic_facts_hold,
 )
+from agent_core.services.queries import LedgerQueryService
 from agent_core.services.types import (
     ApplyReceipt,
     InvariantViolation,
@@ -41,6 +42,15 @@ def _publisher() -> Mock:
     publisher = Mock()
     publisher.commit_and_push.return_value = {"ok": True, "error": None, "push": "PUSHED"}
     return publisher
+
+
+def _transaction_detail(workspace: Path) -> dict[str, object]:
+    found = LedgerQueryService.find_transactions(
+        str(workspace), narration_contains="Lunch"
+    )
+    return LedgerQueryService.get_transaction(
+        str(workspace), found.rows[0]["transaction_ref"]
+    ).transaction or {}
 
 
 def _add_primary_include(workspace: Path, filename: str) -> Path:
@@ -168,10 +178,11 @@ def test_replace_plan_allows_unrelated_current_month_ledger_change(
         "  Expenses:Food:Dining  95 CNY\n"
         "  Assets:Cash          -95 CNY"
     )
-    pending = LedgerService().prepare_update(
+    detail = _transaction_detail(ledger_workspace)
+    pending = LedgerService().prepare_transaction_update(
         str(ledger_workspace),
-        "2026-05-12",
-        "Lunch",
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
         replacement,
         "update lunch",
     )
@@ -205,10 +216,11 @@ def test_replace_plan_rejects_change_to_its_explicit_target(
         "  Expenses:Food:Dining  95 CNY\n"
         "  Assets:Cash          -95 CNY"
     )
-    pending = LedgerService().prepare_update(
+    detail = _transaction_detail(ledger_workspace)
+    pending = LedgerService().prepare_transaction_update(
         str(ledger_workspace),
-        "2026-05-12",
-        "Lunch",
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
         replacement,
         "update lunch",
     )

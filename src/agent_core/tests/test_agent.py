@@ -717,7 +717,8 @@ def test_default_model_manifest_excludes_confirm_tools():
     assert "confirm_update" not in tool_names
     assert "confirm_bulk" not in tool_names
     assert "ledger_commit_transaction" in tool_names
-    assert "ledger_update_transaction" in tool_names
+    assert "ledger_prepare_transaction_update" in tool_names
+    assert "ledger_update_transaction" not in tool_names
     assert "ledger_import_transactions" in tool_names
     assert "ledger_open_account" in tool_names
     assert "ledger_prepare_balance_reconciliation" in tool_names

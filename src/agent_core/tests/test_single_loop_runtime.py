@@ -38,7 +38,8 @@ def test_model_tool_manifest_excludes_execution_tools() -> None:
     model_names = {_tool_name(tool) for tool in MODEL_TOOLS}
 
     assert "ledger_commit_transaction" in model_names
-    assert "ledger_update_transaction" in model_names
+    assert "ledger_prepare_transaction_update" in model_names
+    assert "ledger_update_transaction" not in model_names
     assert "ledger_import_transactions" in model_names
     assert "ledger_open_account" in model_names
     assert "ledger_prepare_change_set" in model_names

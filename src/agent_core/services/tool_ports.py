@@ -104,11 +104,11 @@ class MutationToolPort(Protocol):
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult: ...
 
-    def prepare_update(
+    def prepare_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,

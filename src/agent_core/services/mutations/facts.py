@@ -12,6 +12,7 @@ from beancount import loader
 from ..beancount import _cfg, _repo_path
 from ..queries import LedgerQueryService
 from ..reconciliation import ReconciliationCalculator, format_decimal
+from ..transaction_index import TransactionIndex, parse_transaction_ref
 from ..types import LedgerConfig
 
 _INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"\s*$')
@@ -123,6 +124,24 @@ def capture_account_state_fact(
             lifecycle.append({"type": "close", "date": entry.date.isoformat()})
     serialized = json.dumps(lifecycle, sort_keys=True, separators=(",", ":"))
     return SemanticFact("account_state", account_name, _file_digest(serialized))
+
+
+def capture_transaction_revision_fact(
+    workspace: str,
+    transaction_ref: str,
+    ledger_config: LedgerConfig | None = None,
+) -> SemanticFact:
+    """Capture the exact directive revision addressed by an opaque reference."""
+    revision: str | None = None
+    if parse_transaction_ref(transaction_ref) is not None:
+        try:
+            index = TransactionIndex.build(workspace, ledger_config)
+            code, transaction = index.resolve(transaction_ref)
+            if code == "OK" and transaction is not None:
+                revision = transaction.revision_fingerprint
+        except Exception:
+            revision = None
+    return SemanticFact("transaction_revision", transaction_ref, revision)
 
 
 def _encode_subject(**fields: str) -> str:
@@ -237,6 +256,19 @@ def _current_fact(
             fields["date"],
             fields["currency"],
             ledger_config,
+        )
+    if fact.kind == "transaction_revision":
+        if parse_transaction_ref(fact.subject) is None:
+            return None
+        try:
+            index = TransactionIndex.build(workspace, ledger_config)
+            code, transaction = index.resolve(fact.subject)
+        except Exception:
+            return None
+        if code != "OK" or transaction is None:
+            return None
+        return SemanticFact(
+            "transaction_revision", fact.subject, transaction.revision_fingerprint
         )
     # Unknown fact kinds are integrity failures rather than a permissive replay.
     return None

@@ -25,7 +25,7 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_balance_reconciliation,
     tool_ledger_prepare_balance_update,
     tool_ledger_prepare_change_set,
-    tool_ledger_update_transaction,
+    tool_ledger_prepare_transaction_update,
     tool_market_fetch_price,
     tool_query,
     tool_run_python,
@@ -119,17 +119,19 @@ class FakeMutations:
             "ledger_commit_transaction", workspace=workspace, message=commit_message
         )
 
-    def prepare_update(
+    def prepare_transaction_update(
         self,
         workspace,
-        target_date,
-        narration,
+        transaction_ref,
+        revision_fingerprint,
         new_transaction_text,
         commit_message,
         whitelist=None,
         ledger_config=None,
     ):
-        return self._completed("ledger_update_transaction", target_date=target_date)
+        return self._completed(
+            "ledger_prepare_transaction_update", transaction_ref=transaction_ref
+        )
 
     def prepare_open(
         self,
@@ -246,8 +248,8 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
         json.loads(tool_get_transaction.func("txn_v1_test", config=config)),
         json.loads(tool_query.func("SELECT account", config=config)),
         json.loads(
-            tool_ledger_update_transaction.func(
-                "2026-07-01", "Lunch", "txn", "update", config=config
+            tool_ledger_prepare_transaction_update.func(
+                "txn_v1_ref", "sha256:fingerprint", "txn", "update", config=config
             )
         ),
         json.loads(
@@ -293,7 +295,7 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
 
     assert all(result["status"] in {"SUCCESS", "completed"} for result in results)
     assert results[0]["rows"] == [{"account": "Assets:Cash"}]
-    assert results[3]["result"]["target_date"] == "2026-07-01"
+    assert results[3]["result"]["transaction_ref"] == "txn_v1_ref"
     assert results[4]["result"]["transactions_file"] == "/tmp/staged.beancount"
     assert results[6]["result"]["operation_count"] == 1
 

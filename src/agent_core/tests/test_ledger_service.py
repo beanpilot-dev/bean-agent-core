@@ -14,6 +14,7 @@ from agent_core.services.ledger import (
 from agent_core.services.mutations import sidecar as mutation_sidecar
 from agent_core.services.pending_actions import PendingActionService
 from agent_core.services.preflight import PreflightService
+from agent_core.services.queries import LedgerQueryService
 from agent_core.services.types import (
     ApplyReceipt,
     ApprovalRequired,
@@ -33,6 +34,15 @@ DEPENDENT_TXN = (
     "  Assets:Bank:Savings   100 CNY\n"
     "  Assets:Cash          -100 CNY"
 )
+
+
+def _transaction_detail(workspace: Path, narration: str = "Lunch") -> dict[str, object]:
+    found = LedgerQueryService.find_transactions(
+        str(workspace), narration_contains=narration
+    )
+    return LedgerQueryService.get_transaction(
+        str(workspace), found.rows[0]["transaction_ref"]
+    ).transaction or {}
 
 
 @pytest.fixture
@@ -437,13 +447,18 @@ def test_update_preview_and_apply(
     )
     service = LedgerService()
 
-    preview = service.preview_update(
-        str(ledger_workspace), "2026-05-12", "Lunch", replacement, "update lunch"
-    )
-    pending = service.prepare_update(
+    detail = _transaction_detail(ledger_workspace)
+    preview = service.preview_transaction_update(
         str(ledger_workspace),
-        "2026-05-12",
-        "Lunch",
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
+        replacement,
+        "update lunch",
+    )
+    pending = service.prepare_transaction_update(
+        str(ledger_workspace),
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
         replacement,
         "update lunch",
     )
@@ -465,25 +480,35 @@ def test_prepare_update_materializes_pending_action_contract(
         '2026-05-12 * "Lunch"\n  Expenses:Food:Dining  95 CNY\n  Assets:Cash          -95 CNY'
     )
 
-    result = LedgerService().prepare_update(
-        str(ledger_workspace), "2026-05-12", "Lunch", replacement, "update lunch"
+    detail = _transaction_detail(ledger_workspace)
+    result = LedgerService().prepare_transaction_update(
+        str(ledger_workspace),
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
+        replacement,
+        "update lunch",
     )
 
     assert isinstance(result, PendingAction)
     assert result.action_type == "update_transaction"
-    assert result.execution_spec["target_date"] == "2026-05-12"
+    assert result.execution_spec["transaction_ref"] == detail["transaction_ref"]
+    assert result.execution_spec["revision_fingerprint"] == detail["revision_fingerprint"]
     assert result.execution_spec["new_transaction_text"] == replacement
     assert result.validation["dry_run"]["status"] == "validated"
     assert result.policy["risk"] == "elevated"
 
 
 def test_update_reports_missing_transaction(ledger_workspace: Path) -> None:
-    result = LedgerService().preview_update(
-        str(ledger_workspace), "2026-05-12", "Missing", TXN, "update"
+    result = LedgerService().preview_transaction_update(
+        str(ledger_workspace),
+        "txn_v1_missing",
+        "sha256:missing",
+        TXN,
+        "update",
     )
 
     assert isinstance(result, InvariantViolation)
-    assert result.invariant == "TRANSACTION_NOT_FOUND"
+    assert result.invariant == "MALFORMED_TRANSACTION_REF"
 
 
 def test_bulk_preview_and_apply(

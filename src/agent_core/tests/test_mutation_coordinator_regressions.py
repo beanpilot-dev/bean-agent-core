@@ -20,7 +20,8 @@ from agent_core.services.mutations import (
 )
 from agent_core.services.mutations.plans import MutationPlan
 from agent_core.services.pending_actions import PendingActionService
-from agent_core.services.types import IntegrityFailed
+from agent_core.services.queries import LedgerQueryService
+from agent_core.services.types import ApplyReceipt, IntegrityFailed
 
 TXN = (
     '2026-06-15 * "Dinner"\n'
@@ -37,6 +38,53 @@ class _CleanValidator:
 class _NoopFormatter:
     def format(self, _workspace: str, _path: str) -> None:
         return None
+
+
+def _prepare_transaction_update(service: LedgerService, workspace: str):
+    found = LedgerQueryService.find_transactions(workspace, narration_contains="Lunch")
+    detail = LedgerQueryService.get_transaction(
+        workspace, found.rows[0]["transaction_ref"]
+    ).transaction or {}
+    return service.prepare_transaction_update(
+        workspace,
+        detail["transaction_ref"],
+        detail["revision_fingerprint"],
+        '2026-05-12 * "Lunch"\n'
+        "  Expenses:Food:Dining  95 CNY\n"
+        "  Assets:Cash          -95 CNY",
+        "update lunch",
+    )
+
+
+def test_persisted_v1_transaction_update_plan_still_uses_generic_apply(
+    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model schema migration does not invalidate old sealed replace plans."""
+    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
+    prepared = _prepare_transaction_update(LedgerService(), str(ledger_workspace))
+    assert hasattr(prepared, "execution_spec")
+    execution_spec = dict(prepared.execution_spec)
+    legacy_plan = dict(execution_spec["mutation_plan"])
+    legacy_plan["version"] = 1
+    legacy_plan.pop("semantic_facts", None)
+    execution_spec["mutation_plan"] = legacy_plan
+    pending = PendingActionService.create_pending_action(
+        action_type="update_transaction",
+        execution_spec=execution_spec,
+        display=prepared.display,
+        validation=prepared.validation,
+    )
+    publisher = type(
+        "Publisher",
+        (), {"commit_and_push": lambda *_args: {"ok": True, "push": "PUSHED"}},
+    )()
+
+    result = LedgerService().apply_pending_action(
+        str(ledger_workspace), pending.__dict__.copy(), "repo", publisher
+    )
+
+    assert isinstance(result, ApplyReceipt)
+    assert "95 CNY" in (ledger_workspace / pending.validation["file"]).read_text()
 
 
 class _SpyApplier(MutationApplier):
@@ -205,15 +253,7 @@ def test_legacy_pending_action_without_a_mutation_plan_fails_closed(
         ),
         (
             "update_transaction",
-            lambda service, workspace: service.prepare_update(
-                workspace,
-                "2026-05-12",
-                "Lunch",
-                '2026-05-12 * "Lunch"\n'
-                "  Expenses:Food:Dining  95 CNY\n"
-                "  Assets:Cash          -95 CNY",
-                "update lunch",
-            ),
+            _prepare_transaction_update,
         ),
         (
             "bulk_commit",

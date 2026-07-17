@@ -14,7 +14,7 @@ from .tools import (
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,
-    tool_ledger_update_transaction,
+    tool_ledger_prepare_transaction_update,
     tool_market_fetch_price,
     tool_query,
     tool_run_python,
@@ -37,7 +37,7 @@ __all__ = [
     "tool_ledger_import_transactions",
     "tool_ledger_open_account",
     "tool_ledger_prepare_change_set",
-    "tool_ledger_update_transaction",
+    "tool_ledger_prepare_transaction_update",
     "tool_query",
     "tool_run_python",
 ]

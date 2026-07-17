@@ -95,22 +95,22 @@ class ToolExecutionGateway:
             ),
         )
 
-    def prepare_update(
+    def prepare_transaction_update(
         self,
         workspace: str,
-        target_date: str,
-        narration: str,
+        transaction_ref: str,
+        revision_fingerprint: str,
         new_transaction_text: str,
         commit_message: str,
         whitelist: list[str] | None = None,
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult:
         return self._prepare(
-            "ledger_update_transaction",
-            lambda: self._ledger.prepare_update(
+            "ledger_prepare_transaction_update",
+            lambda: self._ledger.prepare_transaction_update(
                 workspace,
-                target_date,
-                narration,
+                transaction_ref,
+                revision_fingerprint,
                 new_transaction_text,
                 commit_message,
                 whitelist,
