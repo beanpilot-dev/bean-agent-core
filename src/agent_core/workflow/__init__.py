@@ -15,8 +15,6 @@ from .tools import (
     tool_ledger_prepare_change_set,
     tool_ledger_update_transaction,
     tool_query,
-    tool_query_report,
-    tool_query_template,
     tool_run_python,
 )
 
@@ -37,7 +35,5 @@ __all__ = [
     "tool_ledger_prepare_change_set",
     "tool_ledger_update_transaction",
     "tool_query",
-    "tool_query_report",
-    "tool_query_template",
     "tool_run_python",
 ]

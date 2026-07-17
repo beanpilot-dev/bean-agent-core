@@ -1,8 +1,0 @@
--- id: account_snapshot
--- desc: Current balance of each account matching the pattern (point-in-time, no date filter).
---       Use for balance sheet views: liquid assets, liabilities, fixed assets.
--- params:
---   account_pattern  regex matched against account path  e.g. ^Assets:Liquid
-SELECT account, sum(position) AS total
-WHERE account ~ '{account_pattern}'
-GROUP BY account ORDER BY account

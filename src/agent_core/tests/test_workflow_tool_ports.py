@@ -25,8 +25,6 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_change_set,
     tool_ledger_update_transaction,
     tool_query,
-    tool_query_report,
-    tool_query_template,
     tool_run_python,
 )
 
@@ -47,16 +45,8 @@ class FakeQueries:
     ):
         return QueryResult(status="SUCCESS", count=1, rows=[{"account": account}])
 
-    def query_template(self, workspace, template_name, params, ledger_config=None):
-        return QueryResult(status="SUCCESS", template=template_name, params=params)
-
     def query_bql(self, workspace, bql, ledger_config=None):
         return QueryResult(status="SUCCESS", bql=bql)
-
-
-class FakeReports:
-    def generate(self, workspace, year, month, ledger_config=None):
-        return f"{workspace}/reports/{year}-{month:02d}.html"
 
 
 class FakeIngestion:
@@ -181,7 +171,6 @@ def _config() -> dict:
             "workspace": "/isolated/request",
             "tool_dependencies": WorkflowToolDependencies(
                 queries=FakeQueries(),
-                reports=FakeReports(),
                 ingestion=FakeIngestion(),
                 prices=FakePrices(),
                 mutations=FakeMutations(),
@@ -200,21 +189,18 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     mutation = json.loads(
         tool_ledger_commit_transaction.func("txn", "message", config=config)
     )
-    report_path = tool_query_report.func(2026, 7, config=config)
 
     assert balance["balance"] == "42 CNY"
     assert price["price"] == 123
     assert file_result["content"] == "date,amount"
     assert sandbox["stdout"] == "ran:import"
     assert mutation["result"]["workspace"] == "/isolated/request"
-    assert report_path == "/isolated/request/reports/2026-07.html"
 
 
 def test_every_migrated_tool_is_wired_to_its_port() -> None:
     config = _config()
     results = [
         json.loads(tool_find_transactions.func("Assets:Cash", config=config)),
-        json.loads(tool_query_template.func("account_snapshot", {}, config=config)),
         json.loads(tool_query.func("SELECT account", config=config)),
         json.loads(
             tool_ledger_update_transaction.func(
@@ -264,9 +250,9 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
 
     assert all(result["status"] in {"SUCCESS", "completed"} for result in results)
     assert results[0]["rows"] == [{"account": "Assets:Cash"}]
-    assert results[3]["result"]["target_date"] == "2026-07-01"
-    assert results[4]["result"]["transactions_file"] == "/tmp/staged.beancount"
-    assert results[6]["result"]["operation_count"] == 1
+    assert results[2]["result"]["target_date"] == "2026-07-01"
+    assert results[3]["result"]["transactions_file"] == "/tmp/staged.beancount"
+    assert results[5]["result"]["operation_count"] == 1
 
 
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
@@ -276,6 +262,11 @@ def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
 
 def test_model_tool_descriptions_stay_compact() -> None:
     assert sum(len(tool.description or "") for tool in MODEL_TOOLS) <= 5_000
+
+
+def test_removed_query_surfaces_are_not_model_visible() -> None:
+    names = {tool.name for tool in MODEL_TOOLS}
+    assert names.isdisjoint({"ledger_query_report", "ledger_query_template"})
 
 
 def test_workflow_layer_does_not_import_legacy_ledger_or_create_service_globals() -> None:

@@ -72,44 +72,12 @@ def tool_find_transactions(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("ledger_query_template")
-def tool_query_template(
-    template_name: str,
-    params: dict,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
-) -> str:
-    """Run a standard BQL analysis template; prefer this to raw ledger_query.
-
-    Templates and required params:
-        spending_breakdown, spending_trend, transaction_frequency:
-            account_pattern, start, end
-        large_transactions: account_pattern, start, end, limit
-        account_snapshot, account_total: account_pattern
-        period_total: account_pattern, start, end
-        narration_search: keyword, account_pattern, start, end, limit
-        savings_monthly: start, end
-
-    start is inclusive and end exclusive. account_pattern is a BQL regex.
-    Beancount income values are negative; interpret their negation as positive income.
-
-    Args:
-        template_name: A template listed above.
-        params: Values for that template.
-    """
-    ws = config.get("configurable", {}).get("workspace", "")
-    ledger_config = config.get("configurable", {}).get("ledger_config")
-    result = _dependencies(config).queries.query_template(
-        ws, template_name, params, ledger_config=ledger_config
-    )
-    return _json_mod.dumps(dataclasses.asdict(result))
-
-
 @tool("ledger_query")
 def tool_query(
     bql: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Run raw BQL only when no ledger_query_template fits.
+    """Run a raw BQL query against the ledger.
 
     BQL reference:
         columns: date, flag, payee, narration, account, position, balance
@@ -124,24 +92,6 @@ def tool_query(
     ledger_config = config.get("configurable", {}).get("ledger_config")
     result = _dependencies(config).queries.query_bql(ws, bql, ledger_config)
     return _json_mod.dumps(dataclasses.asdict(result))
-
-
-@tool("ledger_query_report")
-def tool_query_report(
-    year: int = 0,
-    month: int = 0,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
-) -> str:
-    """Generate an HTML monthly report with charts and account breakdowns.
-
-    Args:
-        year: Report year; 0 means current year.
-        month: Month 1-12; 0 means current month.
-    """
-    cfg = config.get("configurable", {})
-    ws = cfg.get("workspace", "")
-    ledger_config = cfg.get("ledger_config")
-    return _dependencies(config).reports.generate(ws, year, month, ledger_config)
 
 
 @tool("ledger_fetch_price")
@@ -451,9 +401,7 @@ ANALYTICS_TOOLS = [
     tool_account_balance,
     tool_ledger_calculate_balance_adjustment,
     tool_find_transactions,
-    tool_query_template,
     tool_query,
-    tool_query_report,
     tool_fetch_price,
 ]
 

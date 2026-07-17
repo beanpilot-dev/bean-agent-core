@@ -45,32 +45,12 @@ class QueryToolPort(Protocol):
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult: ...
 
-    def query_template(
-        self,
-        workspace: str,
-        template_name: str,
-        params: dict[str, Any],
-        ledger_config: LedgerConfig | None = None,
-    ) -> QueryResult: ...
-
     def query_bql(
         self,
         workspace: str,
         bql: str,
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult: ...
-
-
-class ReportToolPort(Protocol):
-    """Monthly report generation boundary."""
-
-    def generate(
-        self,
-        workspace: str,
-        year: int,
-        month: int,
-        ledger_config: LedgerConfig | None = None,
-    ) -> str: ...
 
 
 class IngestionToolPort(Protocol):
@@ -186,7 +166,6 @@ class WorkflowToolDependencies:
     """Request-scoped workflow dependency bundle."""
 
     queries: QueryToolPort
-    reports: ReportToolPort
     ingestion: IngestionToolPort
     prices: PriceToolPort
     mutations: MutationToolPort
@@ -230,20 +209,6 @@ class ServiceQueryToolAdapter:
             ledger_config,
         )
 
-    def query_template(
-        self,
-        workspace: str,
-        template_name: str,
-        params: dict[str, Any],
-        ledger_config: LedgerConfig | None = None,
-    ) -> QueryResult:
-        return self._queries.query_template(
-            workspace,
-            template_name,
-            params,
-            ledger_config=ledger_config,
-        )
-
     def query_bql(
         self,
         workspace: str,
@@ -253,29 +218,12 @@ class ServiceQueryToolAdapter:
         return self._queries.query_bql(workspace, bql, ledger_config)
 
 
-class LegacyReportToolAdapter:
-    """Keep legacy analytics/report modules behind the deterministic boundary."""
-
-    @staticmethod
-    def generate(
-        workspace: str,
-        year: int,
-        month: int,
-        ledger_config: LedgerConfig | None = None,
-    ) -> str:
-        from agent_core.ledger import analytics, report
-
-        entry_path = getattr(ledger_config, "entry_path", "data/main.beancount")
-        return report.run(workspace, analytics.run(workspace, year, month, entry_path))
-
-
 def create_workflow_tool_dependencies() -> WorkflowToolDependencies:
     """Compose fresh concrete tool services for one agent request."""
 
     ledger = LedgerService()
     return WorkflowToolDependencies(
         queries=ServiceQueryToolAdapter(),
-        reports=LegacyReportToolAdapter(),
         ingestion=IngestionService(),
         prices=PriceService(),
         mutations=ToolExecutionGateway(ledger),

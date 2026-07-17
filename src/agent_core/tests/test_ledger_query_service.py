@@ -120,66 +120,6 @@ def test_find_transactions_preserves_filter_bql_and_result_shape(
     )
 
 
-def test_query_template_preserves_template_substitution(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    templates = tmp_path / "templates"
-    templates.mkdir()
-    (templates / "test.bql").write_text("-- description: test\nSELECT {column}")
-    config = LedgerConfig(
-        entry_path="books/root.beancount",
-        sidecar_main_path="books/agent_sidecar/main.beancount",
-        sidecar_write_dir="books/agent_sidecar",
-    )
-    received_configs: list[LedgerConfig | None] = []
-
-    def fake_rows(_workspace: str, bql: str, received_config: LedgerConfig | None = None):
-        received_configs.append(received_config)
-        return [{"bql": bql}], None
-
-    monkeypatch.setattr(Beancount, "run_bql_rows", fake_rows)
-
-    queried = LedgerQueryService.query_template(
-        str(ledger_workspace),
-        "test",
-        {"column": "account"},
-        str(templates),
-        config,
-    )
-
-    assert queried.status == "SUCCESS"
-    assert queried.rows == [{"bql": "SELECT account"}]
-    assert received_configs == [config]
-
-
-def test_query_template_preserves_error_contracts(
-    ledger_workspace: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    templates = tmp_path / "templates"
-    templates.mkdir()
-    (templates / "broken.bql").write_text("SELECT {column}")
-
-    unknown = LedgerQueryService.query_template(
-        str(ledger_workspace), "missing", {}, str(templates)
-    )
-    assert unknown == QueryResult(
-        status="ERROR", error="Unknown template 'missing'. Available: ['broken']"
-    )
-
-    with monkeypatch.context() as context:
-        context.setattr("agent_core.services.queries.os.listdir", lambda _path: ["gone.bql"])
-        missing = LedgerQueryService.query_template(
-            str(ledger_workspace), "gone", {}, str(templates)
-        )
-    assert missing == QueryResult(status="ERROR", error="Template file not found: gone")
-
-    monkeypatch.setattr(Beancount, "run_bql_rows", lambda *_args: ([], "invalid BQL"))
-    errored = LedgerQueryService.query_template(
-        str(ledger_workspace), "broken", {"column": "account"}, str(templates)
-    )
-    assert errored == QueryResult(status="ERROR", error="invalid BQL", bql="SELECT account")
-
-
 def test_queries_use_configured_entry_path(tmp_path: Path) -> None:
     books = tmp_path / "books"
     sidecar = books / "agent_sidecar"

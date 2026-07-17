@@ -131,7 +131,7 @@ graph TB
 |------|---------|----------|-------|
 | **Planner** | Task decomposer | Structured-output LLM → `PlannerOutput` | None (classification only) |
 | **Clerk** | Data entry specialist | Clerk LLM + transaction tools | `preview_commit`, `confirm_commit`, `preview_open`, `confirm_open`, `preview_update`, `confirm_update`, `preview_bulk`, `confirm_bulk` |
-| **Analyst** | Financial analyst | Analyst LLM + analytics tools | `ledger_account_balance`, `ledger_find_transactions`, `ledger_query_template`, `ledger_query`, `ledger_query_report`, `ledger_fetch_price` |
+| **Analyst** | Financial analyst | Analyst LLM + analytics tools | `ledger_account_balance`, `ledger_find_transactions`, `ledger_query`, `ledger_fetch_price` |
 | **Engineer** | Data pipeline engineer | Engineer LLM + ingestion tools | `ledger_ingest_file`, `ledger_run_python`, `preview_bulk`, `confirm_bulk` |
 | **QA** | Onboarding assistant | QA LLM | None (chitchat only) |
 | **Merge** | Control-flow router | Deterministic (no LLM) | Pops next sub-task or routes to synthesizer |

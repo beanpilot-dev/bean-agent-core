@@ -20,32 +20,12 @@ from agent_core.services.workspace import (
     LocalGitService,
     RepoAuthFailedError,
 )
-from agent_core.workflow.tools import tool_account_balance, tool_query_template
+from agent_core.workflow.tools import tool_account_balance
 
 
 @pytest.fixture(autouse=True)
 def safe_main_import_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOCAL_REPO_URL", str(tmp_path))
-
-
-def test_query_template_tool_works_directly(ledger_workspace: Path) -> None:
-    result = json.loads(
-        tool_query_template.invoke(
-            {
-                "template_name": "account_snapshot",
-                "params": {"account_pattern": "^Assets"},
-            },
-            config={
-                "configurable": {
-                    "workspace": str(ledger_workspace),
-                    "tool_dependencies": create_workflow_tool_dependencies(),
-                }
-            },
-        )
-    )
-
-    assert result["status"] == "SUCCESS"
-    assert result["template"] == "account_snapshot"
 
 
 def test_account_balance_tool_works_directly(ledger_workspace: Path) -> None:

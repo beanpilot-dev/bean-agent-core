@@ -218,8 +218,6 @@ class QueryResult(ServiceResult):
     count: int = 0
     rows: list[dict[str, Any]] = field(default_factory=list)
     filters_applied: dict[str, Any] | None = None
-    template: str | None = None
-    params: dict[str, Any] | None = None
     account: str | None = None
     as_of: str | None = None
     balance: str | None = None

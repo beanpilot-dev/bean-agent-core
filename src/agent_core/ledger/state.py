@@ -6,7 +6,6 @@ import os
 import re
 
 from . import _beancount as bc
-from . import analytics
 
 logger = logging.getLogger(__name__)
 
@@ -203,40 +202,6 @@ def query_bql(workspace: str, bql: str) -> str:
     if error is not None:
         return json.dumps({"status": "ERROR", "error": error})
     return json.dumps({"status": "SUCCESS", "result": {"count": len(rows), "rows": rows}})
-
-
-def query_template(workspace: str, template_name: str, params: dict) -> str:
-    """Execute a named query template with given parameters. Returns JSON results.
-
-    Loads the template from query_templates/, substitutes {param_name} placeholders,
-    then runs the BQL. Unknown params are silently ignored; missing required params
-    leave their {placeholder} in the query and will produce a BQL error.
-    """
-    available = analytics.list_templates()
-    if template_name not in available:
-        return json.dumps({
-            "status": "ERROR",
-            "error": f"Unknown template '{template_name}'. Available: {available}",
-        })
-
-    try:
-        bql = analytics.load_template(template_name)
-    except FileNotFoundError:
-        return json.dumps({"status": "ERROR", "error": f"Template file not found: {template_name}"})
-
-    # Substitute all provided params
-    for key, value in params.items():
-        bql = bql.replace(f"{{{key}}}", str(value))
-
-    rows, error = bc.run_bql_rows(workspace, bql)
-    if error is not None:
-        return json.dumps({"status": "ERROR", "error": error, "bql": bql})
-    return json.dumps({
-        "status": "SUCCESS",
-        "template": template_name,
-        "params": params,
-        "result": {"count": len(rows), "rows": rows},
-    })
 
 
 def find_transaction_block(
