@@ -72,35 +72,40 @@ def test_context_reports_native_metadata_balances_and_flows_without_reclassifica
         },
         "bean_check_passed": True,
     }
-    assert context["accounts"]["Assets"] == [
-        "Assets:Bank",
-        "Assets:Broker",
-        "Assets:Savings",
-    ]
+    assert context["accounts"] == {
+        "Assets": ["Assets:Bank", "Assets:Broker", "Assets:Savings"],
+        "Liabilities": ["Liabilities:Card"],
+        "Equity": ["Equity:Opening", "Equity:USD-Opening"],
+        "Income": ["Income:Salary"],
+        "Expenses": ["Expenses:Food"],
+    }
+    assert context["prompt_accounts"] == {
+        "Income": ["Income:Salary"],
+        "Expenses": ["Expenses:Food"],
+    }
+    assert context["accounts_scope"] == "income_expense"
+    assert context["accounts_complete"] is True
+    assert context["balance_snapshot"]["scope"] == "nonzero_assets_liabilities_equity"
+    assert context["balance_snapshot"]["complete"] is True
     assert context["balance_snapshot"]["accounts"] == [
         {
             "account": "Assets:Bank",
-            "type": "Assets",
             "positions": [{"number": "220", "commodity": "CNY"}],
         },
         {
             "account": "Assets:Broker",
-            "type": "Assets",
             "positions": [{"number": "10", "commodity": "USD"}],
         },
         {
             "account": "Assets:Savings",
-            "type": "Assets",
             "positions": [{"number": "200", "commodity": "CNY"}],
         },
         {
             "account": "Liabilities:Card",
-            "type": "Liabilities",
             "positions": [{"number": "500", "commodity": "CNY"}],
         },
         {
             "account": "Equity:USD-Opening",
-            "type": "Equity",
             "positions": [{"number": "-10", "commodity": "USD"}],
         },
     ]
@@ -155,8 +160,16 @@ def test_context_groups_only_native_account_types_and_reports_account_truncation
 
     assert context["accounts_truncated"] is True
     assert context["accounts_omitted"] == 10
+    assert context["accounts_scope"] == "income_expense"
+    assert context["accounts_complete"] is False
     assert sum(len(accounts) for accounts in context["accounts"].values()) == MAX_CONTEXT_ACCOUNTS
-    assert set(context["accounts"]) == {"Assets", "Liabilities", "Equity", "Income", "Expenses"}
+    assert set(context["accounts"]) == {
+        "Assets",
+        "Liabilities",
+        "Equity",
+        "Income",
+        "Expenses",
+    }
     assert all(
         "primary" not in account.lower()
         for accounts in context["accounts"].values()
@@ -175,3 +188,17 @@ def test_context_recent_raw_text_is_bounded_and_truncation_is_explicit():
     assert len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))) <= (
         MAX_LEDGER_CONTEXT_CHARS + 32
     )
+
+
+def test_context_budget_reports_prompt_account_omissions():
+    opens = "\n".join(
+        f"2025-01-01 open Expenses:Category{index}{'LongName' * 30} CNY"
+        for index in range(MAX_CONTEXT_ACCOUNTS)
+    )
+    context = _context(opens)
+
+    assert context["accounts_truncated"] is True
+    assert context["accounts_omitted"] > 0
+    assert context["prompt_accounts_truncated"] is True
+    assert context["prompt_accounts_omitted"] > 0
+    assert context["accounts_complete"] is False

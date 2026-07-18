@@ -133,15 +133,30 @@ def normalize_conversation_title(raw_title: str) -> str:
 def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
     if not isinstance(ledger_context, dict):
         return ""
+    has_context_payload = any(
+        bool(ledger_context.get(key))
+        for key in (
+            "ledger_meta",
+            "balance_snapshot",
+            "flow_summary",
+            "recent_activity",
+            "prompt_accounts",
+            "accounts_by_type",
+            "accounts",
+        )
+    )
+    if not has_context_payload:
+        return ""
     compact_context: dict[str, Any] = {}
     for key in (
         "status",
-        "target",
         "ledger_meta",
         "balance_snapshot",
         "flow_summary",
         "recent_activity",
-        "recent_ledger_text",
+        "accounts_scope",
+        "accounts_complete",
+        "prompt_accounts_omitted",
         "context_truncated",
         "accounts_truncated",
         "accounts_omitted",
@@ -150,21 +165,53 @@ def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
     ):
         if key in ledger_context and ledger_context[key] is not None:
             value = ledger_context[key]
+            if key in {
+                "context_truncated",
+                "accounts_truncated",
+                "accounts_omitted",
+                "prompt_accounts_omitted",
+            }:
+                if value is False or value == 0:
+                    continue
+            if key == "ledger_meta" and isinstance(value, dict):
+                value = {
+                    nested_key: nested_value
+                    for nested_key, nested_value in value.items()
+                    if nested_key != "bean_check_passed"
+                }
             if key == "errors" and isinstance(value, str) and len(value) > 2_000:
                 compact_context[key] = value[-2_000:]
                 compact_context["errors_truncated"] = True
             else:
                 compact_context[key] = value
 
-    # The grouped representation is canonical in the prompt. Keep support for
-    # older callers that still provide only the flat account list.
-    grouped_accounts = ledger_context.get("accounts_by_type")
+    # The bounded Income/Expenses catalog is canonical in the prompt. Keep
+    # support for older callers that still provide only grouped or flat data.
+    grouped_accounts = ledger_context.get("prompt_accounts")
+    if grouped_accounts is None:
+        grouped_accounts = ledger_context.get("accounts_by_type")
     if grouped_accounts is None:
         grouped_accounts = ledger_context.get("accounts")
     if grouped_accounts is not None:
-        compact_context["accounts"] = grouped_accounts
+        if isinstance(grouped_accounts, dict):
+            grouped_accounts = {
+                root: grouped_accounts[root]
+                for root in ("Income", "Expenses")
+                if root in grouped_accounts
+            }
+        elif isinstance(grouped_accounts, list):
+            grouped_accounts = [
+                account
+                for account in grouped_accounts
+                if isinstance(account, str)
+                and account.split(":", 1)[0] in {"Income", "Expenses"}
+            ]
+        if not grouped_accounts and ledger_context.get("accounts_complete") is False:
+            grouped_accounts = None
+        if grouped_accounts is not None:
+            compact_context["accounts"] = grouped_accounts
 
-    if "recent_activity" not in compact_context and "recent_ledger_text" not in compact_context:
+    if "recent_activity" not in compact_context:
         if "recent" in ledger_context and ledger_context["recent"] is not None:
             compact_context["recent"] = ledger_context["recent"]
 

@@ -647,7 +647,7 @@ async def test_single_agent_node_adds_ledger_context_to_system_prompt():
                 "status": "CLEAN",
                 "target": "data/agent_inc/2026-06.beancount",
                 "ledger_meta": {"as_of": "2026-06-29"},
-                "accounts": ["Assets:Liquid:Bank:Checking"],
+                "accounts": ["Expenses:Food"],
             },
         }
     }
@@ -659,7 +659,7 @@ async def test_single_agent_node_adds_ledger_context_to_system_prompt():
     assert "LEDGER CONTEXT" in system_prompt
     assert '"as_of":"2026-06-29"' in system_prompt
     assert "TODAY:" not in system_prompt
-    assert "Assets:Liquid:Bank:Checking" in system_prompt
+    assert "Expenses:Food" in system_prompt
 
 
 def test_ledger_context_prompt_preserves_false_zero_and_empty_values():
@@ -670,21 +670,58 @@ def test_ledger_context_prompt_preserves_false_zero_and_empty_values():
                 "current_month_is_partial": False,
                 "account_counts": {"Assets": 0},
             },
-            "accounts_by_type": {"Assets": [], "Expenses": []},
+            "accounts_by_type": {"Income": [], "Expenses": []},
+            "accounts_scope": "income_expense",
+            "accounts_complete": True,
             "accounts_truncated": False,
             "accounts_omitted": 0,
-            "balance_snapshot": {"accounts": [], "truncated": False},
+            "balance_snapshot": {
+                "scope": "nonzero_assets_liabilities_equity",
+                "complete": True,
+                "accounts": [],
+            },
             "flow_summary": {"current_partial_month": {"income": [], "expenses": []}},
-            "recent_activity": {"transactions": [], "truncated": False},
-            "recent_ledger_text": {"text": "", "truncated": False},
+            "recent_activity": {"transactions": []},
+            "recent_ledger_text": {"text": ""},
             "context_truncated": False,
         }
     )
 
     assert '"current_month_is_partial":false' in prompt
-    assert '"accounts_omitted":0' in prompt
     assert '"transactions":[]' in prompt
-    assert '"truncated":false' in prompt
+    assert '"accounts_complete":true' in prompt
+    assert '"scope":"nonzero_assets_liabilities_equity"' in prompt
+    assert '"accounts":{"Income":[],"Expenses":[]}' in prompt
+    assert '"Assets":[]' not in prompt
+    assert "recent_ledger_text" not in prompt
+    assert '"accounts_omitted":0' not in prompt
+
+
+def test_ledger_context_prompt_filters_legacy_flat_account_catalog():
+    prompt = _format_ledger_context(
+        {
+            "ledger_meta": {"as_of": "2026-07-18"},
+            "accounts": ["Assets:Cash", "Expenses:Food", "Income:Salary"],
+            "accounts_complete": True,
+        }
+    )
+
+    assert "Assets:Cash" not in prompt
+    assert "Expenses:Food" in prompt
+    assert "Income:Salary" in prompt
+
+
+def test_ledger_context_prompt_omits_unavailable_optional_context():
+    prompt = _format_ledger_context(
+        {
+            "status": "CLEAN",
+            "accounts_scope": "income_expense",
+            "accounts_complete": False,
+            "prompt_accounts": {},
+        }
+    )
+
+    assert prompt == ""
 
 
 def test_single_loop_prompt_analysis_contract_has_no_global_cny_default():

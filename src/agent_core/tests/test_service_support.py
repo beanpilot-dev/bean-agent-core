@@ -24,6 +24,9 @@ def test_preflight_validate_and_account_helpers(ledger_workspace: Path) -> None:
         "Income",
         "Expenses",
     }
+    assert set(result.prompt_accounts) == {"Income", "Expenses"}
+    assert result.accounts_scope == "income_expense"
+    assert result.accounts_complete is True
     assert result.balance_snapshot is not None
     assert result.flow_summary is not None
     assert result.recent_activity is not None

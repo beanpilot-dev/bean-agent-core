@@ -267,6 +267,10 @@ class PreflightResult(ServiceResult):
     target: str | None = None
     accounts: list[str] = field(default_factory=list)
     accounts_by_type: dict[str, list[str]] = field(default_factory=dict)
+    prompt_accounts: dict[str, list[str]] = field(default_factory=dict)
+    accounts_scope: str = "income_expense"
+    accounts_complete: bool = False
+    prompt_accounts_omitted: int = 0
     accounts_truncated: bool = False
     accounts_omitted: int = 0
     errors: str | None = None

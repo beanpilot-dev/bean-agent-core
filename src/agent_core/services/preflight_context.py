@@ -12,7 +12,7 @@ from typing import Any, Iterable
 NATIVE_ACCOUNT_TYPES = ("Assets", "Liabilities", "Equity", "Income", "Expenses")
 MAX_CONTEXT_ACCOUNTS = 120
 MAX_BALANCE_ACCOUNTS = 50
-MAX_FLOW_MONTHS = 6
+MAX_FLOW_MONTHS = 3
 MAX_RECENT_TRANSACTIONS = 8
 MAX_RECENT_POSTINGS_PER_TRANSACTION = 12
 MAX_RECENT_LABELS = 12
@@ -74,20 +74,22 @@ def all_accounts(entries: Iterable[object]) -> list[str]:
     return sorted(_entry_accounts(entries))
 
 
-def _group_accounts(accounts: set[str]) -> tuple[dict[str, list[str]], bool, int]:
+def _group_accounts(
+    accounts: set[str], roots: tuple[str, ...] = NATIVE_ACCOUNT_TYPES
+) -> tuple[dict[str, list[str]], bool, int]:
     grouped = {
         root: sorted(account for account in accounts if _account_type(account) == root)
-        for root in NATIVE_ACCOUNT_TYPES
+        for root in roots
     }
     total = sum(len(values) for values in grouped.values())
     if total <= MAX_CONTEXT_ACCOUNTS:
         return grouped, False, 0
 
-    selected = {root: [] for root in NATIVE_ACCOUNT_TYPES}
+    selected = {root: [] for root in roots}
     remaining = {root: list(values) for root, values in grouped.items()}
     while sum(len(values) for values in selected.values()) < MAX_CONTEXT_ACCOUNTS:
         progressed = False
-        for root in NATIVE_ACCOUNT_TYPES:
+        for root in roots:
             if (
                 remaining[root]
                 and sum(len(values) for values in selected.values()) < MAX_CONTEXT_ACCOUNTS
@@ -275,12 +277,13 @@ def _balance_snapshot(transactions: list[object], as_of: date) -> dict[str, Any]
         ),
     )
     selected = ordered[:MAX_BALANCE_ACCOUNTS]
-    return {
-        "as_of": as_of.isoformat(),
+    omitted_accounts = max(0, len(ordered) - len(selected))
+    result: dict[str, Any] = {
+        "scope": "nonzero_assets_liabilities_equity",
+        "complete": omitted_accounts == 0,
         "accounts": [
             {
                 "account": account,
-                "type": _account_type(account),
                 "positions": [
                     {"number": _number(number), "commodity": commodity}
                     for commodity, number in sorted(positions[account].items())
@@ -289,9 +292,10 @@ def _balance_snapshot(transactions: list[object], as_of: date) -> dict[str, Any]
             }
             for account in selected
         ],
-        "truncated": len(selected) < len(ordered),
-        "omitted_accounts": max(0, len(ordered) - len(selected)),
     }
+    if omitted_accounts:
+        result["omitted_accounts"] = omitted_accounts
+    return result
 
 
 def _recent_transaction(transaction: object) -> dict[str, Any]:
@@ -304,10 +308,12 @@ def _recent_transaction(transaction: object) -> dict[str, Any]:
     links = sorted(getattr(transaction, "links", ()) or ())
     if tags:
         result["tags"] = tags[:MAX_RECENT_LABELS]
-        result["tags_truncated"] = len(tags) > MAX_RECENT_LABELS
+        if len(tags) > MAX_RECENT_LABELS:
+            result["tags_truncated"] = True
     if links:
         result["links"] = links[:MAX_RECENT_LABELS]
-        result["links_truncated"] = len(links) > MAX_RECENT_LABELS
+        if len(links) > MAX_RECENT_LABELS:
+            result["links_truncated"] = True
     postings: list[dict[str, Any]] = []
     all_postings = list(getattr(transaction, "postings", ()) or ())
     for posting in all_postings[:MAX_RECENT_POSTINGS_PER_TRANSACTION]:
@@ -321,10 +327,10 @@ def _recent_transaction(transaction: object) -> dict[str, Any]:
             item.update({"number": _number(number), "commodity": commodity})
         postings.append(item)
     result["postings"] = postings
-    result["postings_truncated"] = len(all_postings) > MAX_RECENT_POSTINGS_PER_TRANSACTION
-    result["postings_omitted"] = max(
-        0, len(all_postings) - MAX_RECENT_POSTINGS_PER_TRANSACTION
-    )
+    omitted_postings = max(0, len(all_postings) - MAX_RECENT_POSTINGS_PER_TRANSACTION)
+    if omitted_postings:
+        result["postings_truncated"] = True
+        result["postings_omitted"] = omitted_postings
     return result
 
 
@@ -337,21 +343,24 @@ def _recent_activity(transactions: list[object], as_of: date) -> dict[str, Any]:
     ]
     eligible.sort(key=lambda transaction: getattr(transaction, "date"))
     selected = eligible[-MAX_RECENT_TRANSACTIONS:]
-    return {
+    result: dict[str, Any] = {
         "transactions": [_recent_transaction(transaction) for transaction in selected],
-        "truncated": len(selected) < len(eligible),
-        "omitted_transactions": max(0, len(eligible) - len(selected)),
     }
+    omitted_transactions = max(0, len(eligible) - len(selected))
+    if omitted_transactions:
+        result["truncated"] = True
+        result["omitted_transactions"] = omitted_transactions
+    return result
 
 
 def _recent_ledger_text(
     raw_text: str, max_chars: int = MAX_RECENT_LEDGER_TEXT_CHARS
 ) -> dict[str, Any]:
     truncated = len(raw_text) > max_chars
-    return {
-        "text": raw_text[-max_chars:] if truncated else raw_text,
-        "truncated": truncated,
-    }
+    result: dict[str, Any] = {"text": raw_text[-max_chars:] if truncated else raw_text}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 def _context_size(context: dict[str, Any]) -> int:
@@ -385,7 +394,7 @@ def _enforce_context_budget(context: dict[str, Any]) -> dict[str, Any]:
         accounts = balance["accounts"]
         if len(accounts) > 20:
             balance["accounts"] = accounts[:20]
-            balance["truncated"] = True
+            balance["complete"] = False
             balance["omitted_accounts"] = max(
                 balance.get("omitted_accounts", 0), len(accounts) - 20
             )
@@ -394,7 +403,26 @@ def _enforce_context_budget(context: dict[str, Any]) -> dict[str, Any]:
         for root in NATIVE_ACCOUNT_TYPES:
             values = accounts.get(root)
             if isinstance(values, list):
-                accounts[root] = values[:24]
+                omitted = max(0, len(values) - 24)
+                if omitted:
+                    accounts[root] = values[:24]
+                    context["accounts_truncated"] = True
+                    context["accounts_omitted"] = (
+                        context.get("accounts_omitted", 0) + omitted
+                    )
+    prompt_accounts = context.get("prompt_accounts")
+    if isinstance(prompt_accounts, dict):
+        for root in ("Income", "Expenses"):
+            values = prompt_accounts.get(root)
+            if isinstance(values, list):
+                omitted = max(0, len(values) - 24)
+                if omitted:
+                    prompt_accounts[root] = values[:24]
+                    context["accounts_complete"] = False
+                    context["prompt_accounts_truncated"] = True
+                    context["prompt_accounts_omitted"] = (
+                        context.get("prompt_accounts_omitted", 0) + omitted
+                    )
     while _context_size(context) > MAX_LEDGER_CONTEXT_CHARS:
         changed = False
         if isinstance(raw, dict) and len(str(raw.get("text", ""))) > 200:
@@ -412,16 +440,30 @@ def _enforce_context_budget(context: dict[str, Any]) -> dict[str, Any]:
             balance_accounts = balance["accounts"]
             if balance_accounts:
                 balance["accounts"] = balance_accounts[:-1]
-                balance["truncated"] = True
+                balance["complete"] = False
                 balance["omitted_accounts"] = balance.get("omitted_accounts", 0) + 1
                 changed = True
-        elif isinstance(accounts, dict):
+        elif isinstance(accounts, dict) and any(
+            isinstance(values, list) and values for values in accounts.values()
+        ):
             for root in reversed(NATIVE_ACCOUNT_TYPES):
                 values = accounts.get(root)
                 if isinstance(values, list) and values:
                     values.pop()
                     context["accounts_truncated"] = True
                     context["accounts_omitted"] = context.get("accounts_omitted", 0) + 1
+                    changed = True
+                    break
+        elif isinstance(prompt_accounts, dict):
+            for root in reversed(("Income", "Expenses")):
+                values = prompt_accounts.get(root)
+                if isinstance(values, list) and values:
+                    values.pop()
+                    context["accounts_complete"] = False
+                    context["prompt_accounts_truncated"] = True
+                    context["prompt_accounts_omitted"] = (
+                        context.get("prompt_accounts_omitted", 0) + 1
+                    )
                     changed = True
                     break
         if not changed:
@@ -437,13 +479,20 @@ def _enforce_context_budget(context: dict[str, Any]) -> dict[str, Any]:
             ),
         }
         context["balance_snapshot"] = {
+            "scope": "nonzero_assets_liabilities_equity",
             "accounts": [],
-            "truncated": True,
+            "complete": False,
             "omitted_accounts": context.get("balance_snapshot", {}).get(
                 "omitted_accounts", 0
             ),
         }
-        context["accounts"] = {root: [] for root in NATIVE_ACCOUNT_TYPES}
+        context["prompt_accounts"] = {root: [] for root in ("Income", "Expenses")}
+        context["accounts_scope"] = "income_expense"
+        context["accounts_complete"] = False
+        context["prompt_accounts_truncated"] = True
+        context["prompt_accounts_omitted"] = context.get(
+            "prompt_accounts_omitted", 0
+        )
         context["accounts_truncated"] = True
     return context
 
@@ -469,6 +518,10 @@ def build_ledger_context(
     grouped, accounts_truncated, accounts_omitted = timed(
         "account_extraction", lambda: _group_accounts(known_accounts)
     )
+    prompt_accounts, prompt_accounts_truncated, prompt_accounts_omitted = timed(
+        "prompt_account_extraction",
+        lambda: _group_accounts(known_accounts, ("Income", "Expenses")),
+    )
     ledger_meta: dict[str, Any] = timed(
         "ledger_metadata",
         lambda: _ledger_metadata(
@@ -484,6 +537,11 @@ def build_ledger_context(
         "status": "CLEAN" if bean_check_passed else "ERROR",
         "target": target,
         "accounts": grouped,
+        "prompt_accounts": prompt_accounts,
+        "accounts_scope": "income_expense",
+        "accounts_complete": not prompt_accounts_truncated,
+        "prompt_accounts_truncated": prompt_accounts_truncated,
+        "prompt_accounts_omitted": prompt_accounts_omitted,
         "accounts_truncated": accounts_truncated,
         "accounts_omitted": accounts_omitted,
         "ledger_meta": ledger_meta,
