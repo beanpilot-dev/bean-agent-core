@@ -652,8 +652,6 @@ wheels = [
 ]
 
 [[package]]
-
-[[package]]
 name = "openai"
 version = "2.43.0"
 source = { registry = "https://pypi.org/simple" }
