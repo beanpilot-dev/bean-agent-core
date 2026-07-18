@@ -10,6 +10,12 @@ from datetime import date
 from beancount import loader
 
 from ..beancount import _cfg, _repo_path
+from ..price_directives import (
+    PriceIdentity,
+    price_fact_subject,
+    price_state,
+    price_state_digest,
+)
 from ..queries import LedgerQueryService
 from ..reconciliation import ReconciliationCalculator, format_decimal
 from ..transaction_index import TransactionIndex, parse_transaction_ref
@@ -144,6 +150,19 @@ def capture_transaction_revision_fact(
     return SemanticFact("transaction_revision", transaction_ref, revision)
 
 
+def capture_price_state_fact(
+    workspace: str,
+    identity: PriceIdentity,
+    ledger_config: LedgerConfig | None = None,
+) -> SemanticFact:
+    """Capture the exact same-date/base/quote price state for replay."""
+    return SemanticFact(
+        "price_state",
+        price_fact_subject(identity),
+        price_state_digest(price_state(workspace, identity, ledger_config)),
+    )
+
+
 def _encode_subject(**fields: str) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"))
 
@@ -269,6 +288,24 @@ def _current_fact(
             return None
         return SemanticFact(
             "transaction_revision", fact.subject, transaction.revision_fingerprint
+        )
+    if fact.kind == "price_state":
+        try:
+            fields = json.loads(fact.subject)
+            if not isinstance(fields, dict):
+                return None
+            identity = PriceIdentity(
+                str(fields["date"]),
+                str(fields["base"]),
+                str(fields["quote"]),
+                str(fields["value"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return SemanticFact(
+            "price_state",
+            fact.subject,
+            price_state_digest(price_state(workspace, identity, ledger_config)),
         )
     # Unknown fact kinds are integrity failures rather than a permissive replay.
     return None

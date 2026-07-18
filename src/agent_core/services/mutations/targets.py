@@ -13,7 +13,7 @@ def potential_write_targets(
     resolved = _cfg(config)
     targets: list[str] = []
     for operation in plan.operations:
-        if operation.kind in {"append", "open"}:
+        if operation.kind in {"append", "open", "price"}:
             targets.extend(
                 (resolved.sidecar_main_path, sidecar_target_file(resolved))
             )

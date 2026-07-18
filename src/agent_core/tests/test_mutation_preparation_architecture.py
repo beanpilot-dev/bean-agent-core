@@ -66,12 +66,13 @@ def test_preparation_shell_does_not_branch_on_action_identity() -> None:
             assert "handler_key" not in branch
 
 
-def test_registry_is_the_only_eight_action_extension_point() -> None:
+def test_registry_is_the_only_nine_action_extension_point() -> None:
     assert MutationPreparationHandlerRegistry().keys() == (
         "commit_transaction",
         "open_account",
         "update_transaction",
         "delete_transaction",
+        "price",
         "bulk_commit",
         "change_set",
         "balance_reconciliation",

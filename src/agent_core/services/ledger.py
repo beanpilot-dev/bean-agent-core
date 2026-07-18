@@ -156,6 +156,54 @@ class LedgerService:
             ledger_config,
         )
 
+    def preview_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.preview_price(
+            workspace,
+            price_date,
+            base_commodity,
+            price,
+            quote_commodity,
+            source,
+            effective_at,
+            commit_message,
+            ledger_config,
+        )
+
+    def prepare_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.prepare_price(
+            workspace,
+            price_date,
+            base_commodity,
+            price,
+            quote_commodity,
+            source,
+            effective_at,
+            commit_message,
+            ledger_config,
+        )
+
     def preview_bulk(
         self,
         workspace: str,

@@ -72,6 +72,17 @@ class MutationPlanner:
         )
 
     @staticmethod
+    def price(directive_text: str, commit_message: str) -> MutationPlan:
+        return MutationPlan.from_operations(
+            [MutationOperation(kind="price", text=directive_text)],
+            commit_message=commit_message,
+            remediation=(
+                "The price state changed before recording. Re-check the exact quote "
+                "and prepare it again."
+            ),
+        )
+
+    @staticmethod
     def bulk(transactions_text: str, commit_message: str) -> MutationPlan:
         return MutationPlan.from_operations(
             [MutationOperation(kind="append", text=transactions_text)],

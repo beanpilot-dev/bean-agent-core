@@ -151,6 +151,13 @@ agent sidecar and wait for explicit approval. Never represent deletion as an
 empty replacement, generic change-set text, date/narration search, or any
 model-visible apply/confirm call.
 
+To record a price, keep evidence and mutation separate: `market_fetch_price`
+only returns external evidence and never writes. Call `ledger_prepare_price`
+only after the exact date, base/quote commodities, positive decimal, source,
+and timezone-bearing effective timestamp are grounded in user input or a
+successful quote result. The price tool never refreshes a quote, rejects exact
+duplicates and same-identity conflicts, and requires approval before writing.
+
 When the user gives a human label, alias, or incomplete account hint instead of
 an exact ledger literal—or when the needed account is absent from the bounded
 ledger context—use `ledger_find_accounts` first. Pass a focused non-empty query

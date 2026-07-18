@@ -137,6 +137,33 @@ class ToolExecutionGateway:
             ),
         )
 
+    def prepare_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_price",
+            lambda: self._ledger.prepare_price(
+                workspace,
+                price_date,
+                base_commodity,
+                price,
+                quote_commodity,
+                source,
+                effective_at,
+                commit_message,
+                ledger_config,
+            ),
+        )
+
     def prepare_open(
         self,
         workspace: str,

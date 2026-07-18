@@ -25,6 +25,7 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_balance_reconciliation,
     tool_ledger_prepare_balance_update,
     tool_ledger_prepare_change_set,
+    tool_ledger_prepare_price,
     tool_ledger_prepare_transaction_update,
     tool_market_fetch_price,
     tool_query,
@@ -133,6 +134,27 @@ class FakeMutations:
             "ledger_prepare_transaction_update", transaction_ref=transaction_ref
         )
 
+    def prepare_price(
+        self,
+        workspace,
+        price_date,
+        base_commodity,
+        price,
+        quote_commodity,
+        source,
+        effective_at,
+        commit_message,
+        ledger_config=None,
+    ):
+        return self._completed(
+            "ledger_prepare_price",
+            price_date=price_date,
+            base_commodity=base_commodity,
+            price=price,
+            quote_commodity=quote_commodity,
+            source=source,
+        )
+
     def prepare_open(
         self,
         workspace,
@@ -232,6 +254,18 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     mutation = json.loads(
         tool_ledger_commit_transaction.func("txn", "message", config=config)
     )
+    prepared_price = json.loads(
+        tool_ledger_prepare_price.func(
+            "2026-07-17",
+            "AAPL",
+            "213.45",
+            "USD",
+            "user statement",
+            "2026-07-17T09:30:00+08:00",
+            "record price",
+            config=config,
+        )
+    )
 
     assert balance["balance"] == "42 CNY"
     assert accounts["candidates"][0]["account_name"] == "Assets:Cash"
@@ -239,6 +273,7 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     assert file_result["content"] == "date,amount"
     assert sandbox["stdout"] == "ran:import"
     assert mutation["result"]["workspace"] == "/isolated/request"
+    assert prepared_price["tool_name"] == "ledger_prepare_price"
 
 
 def test_every_migrated_tool_is_wired_to_its_port() -> None:
@@ -250,6 +285,18 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
         json.loads(
             tool_ledger_prepare_transaction_update.func(
                 "txn_v1_ref", "sha256:fingerprint", "txn", "update", config=config
+            )
+        ),
+        json.loads(
+            tool_ledger_prepare_price.func(
+                "2026-07-17",
+                "AAPL",
+                "213.45",
+                "USD",
+                "user statement",
+                "2026-07-17T09:30:00+08:00",
+                "record price",
+                config=config,
             )
         ),
         json.loads(
@@ -296,8 +343,8 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
     assert all(result["status"] in {"SUCCESS", "completed"} for result in results)
     assert results[0]["rows"] == [{"account": "Assets:Cash"}]
     assert results[3]["result"]["transaction_ref"] == "txn_v1_ref"
-    assert results[4]["result"]["transactions_file"] == "/tmp/staged.beancount"
-    assert results[6]["result"]["operation_count"] == 1
+    assert results[5]["result"]["transactions_file"] == "/tmp/staged.beancount"
+    assert results[7]["result"]["operation_count"] == 1
 
 
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:

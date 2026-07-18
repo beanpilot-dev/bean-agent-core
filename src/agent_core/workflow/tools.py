@@ -269,18 +269,10 @@ def tool_ledger_prepare_transaction_delete(
     commit_message: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and prepare deletion of one authoritative sidecar transaction.
+    """Prepare high-risk deletion of one exact sidecar transaction.
 
-    This is a high-risk deletion. It requires an unchanged opaque reference
-    and exact revision fingerprint from the authoritative read tools. It does
-    not accept date, narration, search, replacement, or change-set fallback.
-
-    Args:
-        transaction_ref: Unchanged opaque reference returned by
-            ledger_find_transactions and ledger_get_transaction.
-        revision_fingerprint: Exact fingerprint returned by
-            ledger_get_transaction for this directive revision.
-        commit_message: Git commit message used if later approved.
+    Use only the unchanged reference and revision fingerprint returned by the
+    authoritative transaction read tools; never use fuzzy search or replacement.
     """
     c = config.get("configurable", {})
     result = _dependencies(config).mutations.prepare_transaction_delete(
@@ -291,6 +283,33 @@ def tool_ledger_prepare_transaction_delete(
         c.get("ledger_config"),
     )
     return _json_mod.dumps(dataclasses.asdict(result))
+
+
+@tool("ledger_prepare_price")
+def tool_ledger_prepare_price(
+    price_date: str,
+    base_commodity: str,
+    price: str,
+    quote_commodity: str,
+    source: str,
+    effective_at: str,
+    commit_message: str,
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Prepare one reviewed native price directive; never fetch a quote."""
+    c = config.get("configurable", {})
+    result = _dependencies(config).mutations.prepare_price(
+        c.get("workspace", ""),
+        price_date,
+        base_commodity,
+        price,
+        quote_commodity,
+        source,
+        effective_at,
+        commit_message,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result), ensure_ascii=False)
 
 
 @tool("ledger_import_transactions")
@@ -475,6 +494,7 @@ TRANSACTION_TOOLS = [
     tool_ledger_commit_transaction,
     tool_ledger_prepare_transaction_update,
     tool_ledger_prepare_transaction_delete,
+    tool_ledger_prepare_price,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_change_set,

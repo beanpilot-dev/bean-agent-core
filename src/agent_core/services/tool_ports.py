@@ -124,6 +124,19 @@ class MutationToolPort(Protocol):
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult: ...
 
+    def prepare_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult: ...
+
     def prepare_open(
         self,
         workspace: str,

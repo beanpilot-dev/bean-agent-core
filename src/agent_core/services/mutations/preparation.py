@@ -280,6 +280,56 @@ class MutationPreparationService:
             commit_message=commit_message,
         )
 
+    def preview_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> Preview | PreparationFailure:
+        return self._preview_registered(
+            "price",
+            workspace,
+            ledger_config,
+            price_date=price_date,
+            base_commodity=base_commodity,
+            price=price,
+            quote_commodity=quote_commodity,
+            source=source,
+            effective_at=effective_at,
+            commit_message=commit_message,
+        )
+
+    def prepare_price(
+        self,
+        workspace: str,
+        price_date: str,
+        base_commodity: str,
+        price: str,
+        quote_commodity: str,
+        source: str,
+        effective_at: str,
+        commit_message: str,
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | PreparationFailure:
+        return self._prepare_registered(
+            "price",
+            workspace,
+            ledger_config,
+            price_date=price_date,
+            base_commodity=base_commodity,
+            price=price,
+            quote_commodity=quote_commodity,
+            source=source,
+            effective_at=effective_at,
+            commit_message=commit_message,
+        )
+
     def preview_bulk(
         self,
         workspace: str,
