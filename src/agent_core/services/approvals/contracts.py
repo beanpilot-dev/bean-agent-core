@@ -53,6 +53,9 @@ def _classify_action_risk(
     if action_type == "delete_transaction":
         risk = "high"
         reasons.append("transaction_deletion")
+    if action_type == "close_account":
+        risk = "high"
+        reasons.append("account_closure")
     return {
         "version": "risk-policy-v1",
         "risk": risk,

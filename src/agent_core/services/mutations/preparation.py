@@ -204,6 +204,40 @@ class MutationPreparationService:
             display_name=display_name,
         )
 
+    def preview_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> Preview | PreparationFailure:
+        return self._preview_registered(
+            "close_account",
+            workspace,
+            ledger_config,
+            account_name=account_name,
+            close_date=close_date,
+            commit_message=commit_message,
+        )
+
+    def prepare_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> PendingAction | PreparationFailure:
+        return self._prepare_registered(
+            "close_account",
+            workspace,
+            ledger_config,
+            account_name=account_name,
+            close_date=close_date,
+            commit_message=commit_message,
+        )
+
     def preview_transaction_update(
         self,
         workspace: str,

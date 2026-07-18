@@ -6,7 +6,6 @@ from agent_core.agent import PersonalFinanceAgent
 from agent_core.services import create_workflow_tool_dependencies
 from agent_core.workflow.tools import (
     MODEL_TOOLS,
-    tool_ledger_commit_transaction,
     tool_ledger_open_account,
     tool_ledger_prepare_balance_reconciliation,
     tool_ledger_prepare_change_set,
@@ -37,7 +36,7 @@ def _tool_config(workspace: Path) -> dict:
 def test_model_tool_manifest_excludes_execution_tools() -> None:
     model_names = {_tool_name(tool) for tool in MODEL_TOOLS}
 
-    assert "ledger_commit_transaction" in model_names
+    assert "ledger_commit_transaction" not in model_names
     assert "ledger_prepare_transaction_update" in model_names
     assert "ledger_update_transaction" not in model_names
     assert "ledger_import_transactions" in model_names
@@ -73,14 +72,14 @@ def test_system_prompt_requires_complete_change_sets_before_approval() -> None:
     assert "continuation summary" in prompt
 
 
-def test_ledger_commit_transaction_returns_approval_required_without_write(
+def test_one_transaction_change_set_returns_approval_required_without_write(
     ledger_workspace: Path,
 ) -> None:
     target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
     original = target.read_text()
 
-    raw = tool_ledger_commit_transaction.func(
-        TXN,
+    raw = tool_ledger_prepare_change_set.func(
+        [{"type": "commit_transaction", "transaction_text": TXN}],
         "record dinner",
         config=_tool_config(ledger_workspace),
     )
@@ -179,14 +178,17 @@ def test_ledger_prepare_balance_reconciliation_returns_approval_required_without
     assert target.read_text() == original
 
 
-def test_ledger_commit_transaction_returns_repairable_validation_failure(
+def test_one_transaction_change_set_returns_repairable_validation_failure(
     ledger_workspace: Path,
 ) -> None:
     target = ledger_workspace / "data" / "agent_inc" / f"{date.today():%Y-%m}.beancount"
     original = target.read_text()
 
-    raw = tool_ledger_commit_transaction.func(
-        '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+    raw = tool_ledger_prepare_change_set.func(
+        [{
+            "type": "commit_transaction",
+            "transaction_text": '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        }],
         "bad",
         config=_tool_config(ledger_workspace),
     )

@@ -95,15 +95,6 @@ class PriceToolPort(Protocol):
 class MutationToolPort(Protocol):
     """Approval-gated mutation operations exposed to the model."""
 
-    def prepare_commit(
-        self,
-        workspace: str,
-        transaction_text: str,
-        commit_message: str,
-        whitelist: list[str] | None = None,
-        ledger_config: LedgerConfig | None = None,
-    ) -> ServiceResult: ...
-
     def prepare_transaction_update(
         self,
         workspace: str,
@@ -144,6 +135,15 @@ class MutationToolPort(Protocol):
         currency: str | None,
         open_date: str,
         display_name: str | None = None,
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult: ...
+
+    def prepare_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
         ledger_config: LedgerConfig | None = None,
     ) -> ServiceResult: ...
 

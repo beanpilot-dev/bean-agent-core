@@ -7,6 +7,7 @@ from ...queries import LedgerQueryService
 from ...types import InvariantViolation, LedgerConfig
 from ..facts import capture_account_state_fact
 from ..planners import MutationPlanner
+from ..plans import MutationOperation
 from .contracts import PreparedMutation
 
 _POSTING_ACCOUNT_RE = re.compile(
@@ -27,10 +28,11 @@ def validate_posting_accounts(
     transaction_text: str,
     whitelist: list[str] | None = None,
     ledger_config: LedgerConfig | None = None,
+    known_accounts: set[str] | None = None,
 ) -> InvariantViolation | None:
     """Enforce ledger-account existence and conversation scope."""
     used = extract_posting_accounts(transaction_text)
-    valid = set(LedgerQueryService.get_accounts(workspace, ledger_config))
+    valid = known_accounts or set(LedgerQueryService.get_accounts(workspace, ledger_config))
     unknown = [account for account in used if account not in valid]
     if unknown:
         return InvariantViolation(
@@ -60,6 +62,23 @@ def validate_posting_accounts(
     return None
 
 
+def transaction_operation(transaction_text: str) -> MutationOperation:
+    """Build the canonical append operation used by standalone and composite writes."""
+    return MutationOperation(kind="append", text=transaction_text)
+
+
+def transaction_account_facts(
+    workspace: str,
+    accounts: list[str],
+    ledger_config: LedgerConfig | None = None,
+) -> tuple:
+    """Capture the canonical account lifecycle read set for a transaction."""
+    return tuple(
+        capture_account_state_fact(workspace, account, ledger_config)
+        for account in accounts
+    )
+
+
 class TransactionCommitPreparationHandler:
     handler_key = "commit_transaction"
 
@@ -81,10 +100,7 @@ class TransactionCommitPreparationHandler:
             return violation
         accounts = extract_posting_accounts(transaction_text)
         plan = MutationPlanner.commit(transaction_text, commit_message).with_semantic_facts(
-            tuple(
-                capture_account_state_fact(workspace, account, ledger_config)
-                for account in accounts
-            )
+            transaction_account_facts(workspace, accounts, ledger_config)
         )
         return PreparedMutation(
             handler_key=self.handler_key,

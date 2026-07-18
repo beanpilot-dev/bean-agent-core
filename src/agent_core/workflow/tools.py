@@ -206,28 +206,6 @@ def tool_run_python(
 # ---------------------------------------------------------------------------
 
 
-@tool("ledger_commit_transaction")
-def tool_ledger_commit_transaction(
-    transaction_text: str,
-    commit_message: str,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
-) -> str:
-    """Validate and prepare one transaction for approval.
-
-    Args:
-        transaction_text: The complete beancount transaction text.
-        commit_message: Git commit message used if the user later approves.
-    """
-    c = config.get("configurable", {})
-    ws: str = c.get("workspace", "")
-    whitelist = c.get("whitelist")
-    ledger_config = c.get("ledger_config")
-    result = _dependencies(config).mutations.prepare_commit(
-        ws, transaction_text, commit_message, whitelist, ledger_config
-    )
-    return _json_mod.dumps(dataclasses.asdict(result))
-
-
 @tool("ledger_prepare_transaction_update")
 def tool_ledger_prepare_transaction_update(
     transaction_ref: str,
@@ -372,6 +350,25 @@ def tool_ledger_open_account(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
+@tool("ledger_prepare_account_close")
+def tool_ledger_prepare_account_close(
+    account_name: str,
+    close_date: str,
+    commit_message: str = "",
+    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
+) -> str:
+    """Prepare one exact open-account close after lifecycle and balance checks."""
+    c = config.get("configurable", {})
+    result = _dependencies(config).mutations.prepare_account_close(
+        c.get("workspace", ""),
+        account_name,
+        close_date,
+        commit_message,
+        c.get("ledger_config"),
+    )
+    return _json_mod.dumps(dataclasses.asdict(result), ensure_ascii=False)
+
+
 @tool("ledger_prepare_change_set")
 def tool_ledger_prepare_change_set(
     operations: list[dict],
@@ -491,12 +488,12 @@ def tool_ledger_prepare_balance_update(
 # ---------------------------------------------------------------------------
 
 TRANSACTION_TOOLS = [
-    tool_ledger_commit_transaction,
     tool_ledger_prepare_transaction_update,
     tool_ledger_prepare_transaction_delete,
     tool_ledger_prepare_price,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
+    tool_ledger_prepare_account_close,
     tool_ledger_prepare_change_set,
     tool_ledger_prepare_balance_reconciliation,
     tool_ledger_prepare_balance_update,

@@ -67,7 +67,10 @@ def test_registry_exposes_all_preparation_keys() -> None:
     assert registry.keys() == (
         "commit_transaction",
         "open_account",
+        "close_account",
         "update_transaction",
+        "delete_transaction",
+        "price",
         "bulk_commit",
         "change_set",
         "balance_reconciliation",

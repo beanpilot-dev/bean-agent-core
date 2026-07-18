@@ -19,7 +19,6 @@ from agent_core.workflow.tools import (
     tool_get_transaction,
     tool_ingest_file,
     tool_ledger_calculate_balance_adjustment,
-    tool_ledger_commit_transaction,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
     tool_ledger_prepare_balance_reconciliation,
@@ -252,7 +251,11 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     file_result = json.loads(tool_ingest_file.func("/tmp/upload.csv", config=config))
     sandbox = json.loads(tool_run_python.func("print('ok')", config=config))
     mutation = json.loads(
-        tool_ledger_commit_transaction.func("txn", "message", config=config)
+        tool_ledger_prepare_change_set.func(
+            [{"type": "commit_transaction", "transaction_text": "txn"}],
+            "message",
+            config=config,
+        )
     )
     prepared_price = json.loads(
         tool_ledger_prepare_price.func(
@@ -272,7 +275,7 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     assert price["price"] == 123
     assert file_result["content"] == "date,amount"
     assert sandbox["stdout"] == "ran:import"
-    assert mutation["result"]["workspace"] == "/isolated/request"
+    assert mutation["result"]["operation_count"] == 1
     assert prepared_price["tool_name"] == "ledger_prepare_price"
 
 

@@ -49,7 +49,11 @@ def test_fake_host_receives_approval_required_and_applies_after_proof(
     monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
     gateway = ToolExecutionGateway()
 
-    outcome = gateway.prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    outcome = gateway.prepare_change_set(
+        str(ledger_workspace),
+        [{"type": "commit_transaction", "transaction_text": TXN}],
+        "record dinner",
+    )
 
     assert isinstance(outcome, ToolApprovalRequired)
     assert outcome.status == "approval_required"
@@ -89,7 +93,11 @@ def test_gateway_rejects_apply_without_approval_proof(
     git_service: Mock,
 ) -> None:
     gateway = ToolExecutionGateway()
-    outcome = gateway.prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    outcome = gateway.prepare_change_set(
+        str(ledger_workspace),
+        [{"type": "commit_transaction", "transaction_text": TXN}],
+        "record dinner",
+    )
     assert isinstance(outcome, ToolApprovalRequired)
 
     applied = gateway.apply_approved_action(
@@ -110,7 +118,11 @@ def test_gateway_rejects_apply_with_unbound_approval_proof(
     git_service: Mock,
 ) -> None:
     gateway = ToolExecutionGateway()
-    outcome = gateway.prepare_commit(str(ledger_workspace), TXN, "record dinner")
+    outcome = gateway.prepare_change_set(
+        str(ledger_workspace),
+        [{"type": "commit_transaction", "transaction_text": TXN}],
+        "record dinner",
+    )
     assert isinstance(outcome, ToolApprovalRequired)
 
     applied = gateway.apply_approved_action(
@@ -136,9 +148,12 @@ def test_gateway_rejects_apply_with_unbound_approval_proof(
 def test_gateway_maps_validation_failure_to_repairable_error(
     ledger_workspace: Path,
 ) -> None:
-    outcome = ToolExecutionGateway().prepare_commit(
+    outcome = ToolExecutionGateway().prepare_change_set(
         str(ledger_workspace),
-        '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        [{
+            "type": "commit_transaction",
+            "transaction_text": '2026-06-15 * "Bad"\n  Expenses:Food:Dining  100 CNY',
+        }],
         "bad",
     )
 

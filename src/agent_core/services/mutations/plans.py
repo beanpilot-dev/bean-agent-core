@@ -6,7 +6,7 @@ from typing import Literal
 
 from .facts import SemanticFact
 
-OperationKind = Literal["append", "open", "replace", "delete", "price"]
+OperationKind = Literal["append", "open", "close", "replace", "delete", "price"]
 _PLAN_SCHEMA_VERSION = 3
 _LEGACY_PLAN_SCHEMA_VERSIONS = {1, 2}
 
@@ -35,10 +35,10 @@ class MutationOperation:
     @classmethod
     def from_spec(cls, value: dict[str, object], *, plan_version: int) -> "MutationOperation":
         kind = value.get("kind")
-        if kind not in {"append", "open", "replace", "delete", "price"}:
+        if kind not in {"append", "open", "close", "replace", "delete", "price"}:
             raise ValueError("Unsupported mutation operation")
-        if kind in {"delete", "price"} and plan_version < _PLAN_SCHEMA_VERSION:
-            raise ValueError("Delete mutation requires the current mutation plan version")
+        if kind in {"close", "delete", "price"} and plan_version < _PLAN_SCHEMA_VERSION:
+            raise ValueError("Native directive mutation requires the current mutation plan version")
         target_start_line = value.get("target_start_line")
         if target_start_line is not None and (
             not isinstance(target_start_line, int) or target_start_line < 1

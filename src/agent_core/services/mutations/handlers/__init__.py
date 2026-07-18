@@ -1,5 +1,6 @@
 """Registered action-specific mutation preparation handlers."""
 
+from .account_close import AccountClosePreparationHandler
 from .account_open import AccountOpenPreparationHandler
 from .balance_reconciliation import BalanceReconciliationPreparationHandler
 from .balance_update import BalanceUpdatePreparationHandler
@@ -17,6 +18,7 @@ from .transaction_update import TransactionUpdatePreparationHandler, detect_valu
 
 __all__ = [
     "AccountOpenPreparationHandler",
+    "AccountClosePreparationHandler",
     "BalanceReconciliationPreparationHandler",
     "BalanceUpdatePreparationHandler",
     "BulkCommitPreparationHandler",

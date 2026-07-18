@@ -7,11 +7,16 @@ from ...beancount import _cfg
 from ...ledger_paths import sidecar_target_file
 from ...queries import LedgerQueryService
 from ...types import InvariantViolation, LedgerConfig
-from ..facts import capture_account_state_fact
 from ..planners import MutationPlanner
 from ..plans import MutationOperation
 from .contracts import PreparedMutation
-from .transaction_commit import extract_posting_accounts
+from .transaction_commit import (
+    TransactionCommitPreparationHandler,
+    extract_posting_accounts,
+    transaction_account_facts,
+    transaction_operation,
+    validate_posting_accounts,
+)
 
 _ACCOUNT_NAME_RE = re.compile(
     r"^(Assets|Liabilities|Equity|Income|Expenses)(:[A-Z][A-Za-z0-9\-]+)+$"
@@ -75,6 +80,28 @@ class ChangeSetPreparationHandler:
                 remediation="Provide at least one change-set operation.",
             )
 
+        if len(operations) == 1 and isinstance(operations[0], dict):
+            if _operation_type(operations[0]) == "commit_transaction":
+                operation = operations[0]
+                prepared = TransactionCommitPreparationHandler().build(
+                    workspace,
+                    ledger_config,
+                    transaction_text=str(operation.get("transaction_text") or ""),
+                    commit_message=commit_message,
+                    whitelist=whitelist,
+                )
+                if isinstance(prepared, InvariantViolation):
+                    detail = dict(prepared.detail or {})
+                    detail.setdefault("operation_index", 0)
+                    return InvariantViolation(
+                        invariant=prepared.invariant,
+                        severity=prepared.severity,
+                        provided=prepared.provided,
+                        remediation=prepared.remediation,
+                        detail=detail,
+                    )
+                return prepared
+
         known_accounts = set(LedgerQueryService.get_accounts(workspace, ledger_config))
         plan_operations: list[MutationOperation] = []
         display_items: list[dict[str, object]] = []
@@ -134,32 +161,22 @@ class ChangeSetPreparationHandler:
             if operation_type == "commit_transaction":
                 transaction_text = str(operation.get("transaction_text") or "")
                 accounts = extract_posting_accounts(transaction_text)
-                unknown = [account for account in accounts if account not in known_accounts]
-                if unknown:
+                violation = validate_posting_accounts(
+                    workspace,
+                    transaction_text,
+                    whitelist,
+                    ledger_config,
+                    known_accounts,
+                )
+                if violation:
                     return _operation_error(
                         operation_index=index,
-                        invariant="ACCOUNT_WHITELIST",
-                        provided=unknown,
-                        remediation=(
-                            "Unknown accounts detected. Use open_account to create them first."
-                        ),
-                        detail={"valid_accounts": sorted(known_accounts)},
+                        invariant=violation.invariant,
+                        provided=violation.provided,
+                        remediation=violation.remediation,
+                        detail=violation.detail,
                     )
-                if whitelist:
-                    out_of_scope = [
-                        account
-                        for account in accounts
-                        if not any(account.startswith(prefix) for prefix in whitelist)
-                    ]
-                    if out_of_scope:
-                        return _operation_error(
-                            operation_index=index,
-                            invariant="CONVERSATION_SCOPE",
-                            provided=out_of_scope,
-                            remediation="Use accounts within the allowed prefixes.",
-                            detail={"allowed_prefixes": whitelist},
-                        )
-                plan_operations.append(MutationOperation(kind="append", text=transaction_text))
+                plan_operations.append(transaction_operation(transaction_text))
                 display_items.append(
                     {
                         "operation_index": index,
@@ -186,10 +203,7 @@ class ChangeSetPreparationHandler:
 
         sorted_accounts = sorted(affected_accounts)
         plan = MutationPlanner.change_set(plan_operations, commit_message).with_semantic_facts(
-            tuple(
-                capture_account_state_fact(workspace, account, ledger_config)
-                for account in sorted_accounts
-            )
+            transaction_account_facts(workspace, sorted_accounts, ledger_config)
         )
         diff = "\n\n".join(str(item["diff"]) for item in display_items)
         target_files = list(dict.fromkeys(str(item["target_file"]) for item in display_items))

@@ -30,6 +30,17 @@ class MutationPlanner:
         )
 
     @staticmethod
+    def account_close(directive_text: str, commit_message: str) -> MutationPlan:
+        return MutationPlan.from_operations(
+            [MutationOperation(kind="close", text=directive_text)],
+            commit_message=commit_message or "chore(accounts): close account",
+            remediation=(
+                "The account lifecycle or balance changed before close could be applied. "
+                "Inspect the exact account again and prepare a new close."
+            ),
+        )
+
+    @staticmethod
     def transaction_update(
         target_file: str, old_text: str, new_text: str, commit_message: str
     ) -> MutationPlan:

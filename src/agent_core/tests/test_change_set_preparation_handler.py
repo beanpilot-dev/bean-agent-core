@@ -4,9 +4,10 @@ from datetime import date
 from pathlib import Path
 
 from agent_core.services.approvals.contracts import PendingActionService
+from agent_core.services.ledger import LedgerService
 from agent_core.services.mutations.handlers.change_set import ChangeSetPreparationHandler
 from agent_core.services.mutations.handlers.contracts import PreparedMutation
-from agent_core.services.types import InvariantViolation
+from agent_core.services.types import InvariantViolation, PendingAction
 
 DEPENDENT_TRANSACTION = (
     '2026-06-16 * "Savings transfer"\n'
@@ -100,6 +101,55 @@ def test_change_set_handler_preserves_order_payload_and_read_set(
     assert {
         path: path.read_text() for path in (ledger_workspace / "data").rglob("*.beancount")
     } == before
+
+
+def test_one_transaction_change_set_preserves_transaction_contract(
+    ledger_workspace: Path,
+) -> None:
+    transaction = (
+        '2026-06-15 * "Dinner"\n'
+        "  Expenses:Food:Dining  100 CNY\n"
+        "  Assets:Cash          -100 CNY"
+    )
+    service = LedgerService()
+    direct = service.prepare_commit(str(ledger_workspace), transaction, "record dinner")
+    consolidated = service.prepare_change_set(
+        str(ledger_workspace),
+        [{"type": "commit_transaction", "transaction_text": transaction}],
+        "record dinner",
+    )
+
+    assert isinstance(direct, PendingAction)
+    assert isinstance(consolidated, PendingAction)
+    assert consolidated.action_type == direct.action_type == "commit_transaction"
+    assert consolidated.display == direct.display
+    assert consolidated.validation == direct.validation
+    assert consolidated.execution_spec == direct.execution_spec
+    assert consolidated.policy["risk"] == direct.policy["risk"] == "normal"
+
+
+def test_one_transaction_change_set_reuses_account_policy(
+    ledger_workspace: Path,
+) -> None:
+    transaction = (
+        '2026-06-15 * "Dinner"\n'
+        "  Assets:Missing  100 CNY\n"
+        "  Assets:Cash    -100 CNY"
+    )
+    direct = LedgerService().prepare_commit(
+        str(ledger_workspace), transaction, "bad", ["Assets:Cash"]
+    )
+    consolidated = LedgerService().prepare_change_set(
+        str(ledger_workspace),
+        [{"type": "commit_transaction", "transaction_text": transaction}],
+        "bad",
+        ["Assets:Cash"],
+    )
+
+    assert isinstance(direct, InvariantViolation)
+    assert isinstance(consolidated, InvariantViolation)
+    assert consolidated.invariant == direct.invariant == "ACCOUNT_WHITELIST"
+    assert consolidated.provided == direct.provided == ["Assets:Missing"]
 
 
 def test_change_set_handler_rejects_dependency_before_account_open(

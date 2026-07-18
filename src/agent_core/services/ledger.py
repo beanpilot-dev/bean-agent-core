@@ -84,6 +84,30 @@ class LedgerService:
             ledger_config,
         )
 
+    def preview_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.preview_account_close(
+            workspace, account_name, close_date, commit_message, ledger_config
+        )
+
+    def prepare_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ):
+        return self._preparation.prepare_account_close(
+            workspace, account_name, close_date, commit_message, ledger_config
+        )
+
     def preview_transaction_update(
         self,
         workspace: str,

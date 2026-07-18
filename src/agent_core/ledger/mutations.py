@@ -497,7 +497,7 @@ def open_account(
             f"git commit: chore(accounts): open {account_name}",
             git["push"],
         ],
-        "next_capabilities": ["ledger_commit_transaction"],
+        "next_capabilities": ["ledger_prepare_change_set"],
     })
 
 

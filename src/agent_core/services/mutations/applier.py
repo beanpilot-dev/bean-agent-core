@@ -21,7 +21,7 @@ class MutationApplier:
     ) -> tuple[str, ...]:
         touched: list[str] = []
         for operation in plan.operations:
-            if operation.kind in {"append", "price"}:
+            if operation.kind in {"append", "close", "price"}:
                 target = self._store.append(workspace, operation.text, config)
             elif operation.kind == "open":
                 target = self._store.open_directive(

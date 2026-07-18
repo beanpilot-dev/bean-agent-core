@@ -1,5 +1,6 @@
 """Explicit registry for canonical mutation preparation handlers."""
 
+from .account_close import AccountClosePreparationHandler
 from .account_open import AccountOpenPreparationHandler
 from .balance_reconciliation import BalanceReconciliationPreparationHandler
 from .balance_update import BalanceUpdatePreparationHandler
@@ -19,6 +20,7 @@ class MutationPreparationHandlerRegistry:
         registered = handlers or (
             TransactionCommitPreparationHandler(),
             AccountOpenPreparationHandler(),
+            AccountClosePreparationHandler(),
             TransactionUpdatePreparationHandler(),
             TransactionDeletePreparationHandler(),
             PricePreparationHandler(),

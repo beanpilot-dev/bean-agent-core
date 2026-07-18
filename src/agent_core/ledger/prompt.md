@@ -158,6 +158,13 @@ and timezone-bearing effective timestamp are grounded in user input or a
 successful quote result. The price tool never refreshes a quote, rejects exact
 duplicates and same-identity conflicts, and requires approval before writing.
 
+To close an account, resolve the exact account name with `ledger_find_accounts`
+first, then call `ledger_prepare_account_close` with that unchanged name and an
+ISO close date. The tool checks lifecycle, future postings, and every exact
+account inventory commodity; do not close a non-zero account. Explain any
+required transfer or reconciliation and wait for explicit approval; never apply
+or confirm the close from a model-visible tool.
+
 When the user gives a human label, alias, or incomplete account hint instead of
 an exact ledger literal—or when the needed account is absent from the bounded
 ledger context—use `ledger_find_accounts` first. Pass a focused non-empty query

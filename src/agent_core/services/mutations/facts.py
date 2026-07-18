@@ -9,6 +9,7 @@ from datetime import date
 
 from beancount import loader
 
+from ..account_lifecycle import account_close_state_payload, inspect_account_close
 from ..beancount import _cfg, _repo_path
 from ..price_directives import (
     PriceIdentity,
@@ -132,6 +133,27 @@ def capture_account_state_fact(
     return SemanticFact("account_state", account_name, _file_digest(serialized))
 
 
+def capture_account_close_state_fact(
+    workspace: str,
+    account_name: str,
+    close_date: str,
+    ledger_config: LedgerConfig | None = None,
+) -> SemanticFact:
+    """Capture the exact lifecycle, posting, and inventory inputs for close."""
+    try:
+        parsed_date = date.fromisoformat(close_date)
+        state = inspect_account_close(workspace, account_name, parsed_date, ledger_config)
+    except (TypeError, ValueError, OSError):
+        state = None
+    payload = account_close_state_payload(state) if state is not None else None
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return SemanticFact(
+        "account_close_state",
+        _encode_subject(account=account_name, close_date=close_date),
+        _file_digest(serialized),
+    )
+
+
 def capture_transaction_revision_fact(
     workspace: str,
     transaction_ref: str,
@@ -244,6 +266,17 @@ def _current_fact(
         if fact.digest in _LEGACY_ACCOUNT_DIGESTS:
             return _legacy_account_state_fact(workspace, fact.subject, ledger_config)
         return capture_account_state_fact(workspace, fact.subject, ledger_config)
+    if fact.kind == "account_close_state":
+        fields = _decode_subject(fact.subject, frozenset({"account", "close_date"}))
+        if fields is None or not _ACCOUNT_RE.fullmatch(fields["account"]):
+            return None
+        try:
+            date.fromisoformat(fields["close_date"])
+        except ValueError:
+            return None
+        return capture_account_close_state_fact(
+            workspace, fields["account"], fields["close_date"], ledger_config
+        )
     if fact.kind == "balance_state":
         fields = _decode_subject(fact.subject, frozenset({"account", "as_of"}))
         if fields is None or not _ACCOUNT_RE.fullmatch(fields["account"]):

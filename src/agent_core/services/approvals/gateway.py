@@ -76,25 +76,6 @@ class ToolExecutionGateway:
     ) -> ServiceResult:
         return self.normalize(tool_name, prepare())
 
-    def prepare_commit(
-        self,
-        workspace: str,
-        transaction_text: str,
-        commit_message: str,
-        whitelist: list[str] | None = None,
-        ledger_config: LedgerConfig | None = None,
-    ) -> ServiceResult:
-        return self._prepare(
-            "ledger_commit_transaction",
-            lambda: self._ledger.prepare_commit(
-                workspace,
-                transaction_text,
-                commit_message,
-                whitelist,
-                ledger_config,
-            ),
-        )
-
     def prepare_transaction_update(
         self,
         workspace: str,
@@ -182,6 +163,21 @@ class ToolExecutionGateway:
                 open_date,
                 display_name,
                 ledger_config,
+            ),
+        )
+
+    def prepare_account_close(
+        self,
+        workspace: str,
+        account_name: str,
+        close_date: str,
+        commit_message: str = "",
+        ledger_config: LedgerConfig | None = None,
+    ) -> ServiceResult:
+        return self._prepare(
+            "ledger_prepare_account_close",
+            lambda: self._ledger.prepare_account_close(
+                workspace, account_name, close_date, commit_message, ledger_config
             ),
         )
 
