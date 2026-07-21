@@ -48,16 +48,36 @@ def _serialize_history(messages) -> list[dict]:
     ]
 
 
-def _has_pending_action_status(payload: Any) -> bool:
+def _decode_tool_payload(payload: Any) -> dict[str, Any] | None:
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
         except json.JSONDecodeError:
-            return False
-    return isinstance(payload, dict) and payload.get("status") in {
-        "PENDING_ACTION",
-        "approval_required",
-    }
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _tool_payloads(content: Any) -> list[dict[str, Any]]:
+    """Decode JSON tool results across LangChain's supported content shapes."""
+    parts = content if isinstance(content, list) else [content]
+    payloads: list[dict[str, Any]] = []
+    for part in parts:
+        if isinstance(part, dict) and "status" not in part and "text" in part:
+            part = part["text"]
+        payload = _decode_tool_payload(part)
+        if payload is not None:
+            payloads.append(payload)
+    return payloads
+
+
+def _pending_action_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if payload.get("status") == "PENDING_ACTION":
+        return payload
+    if payload.get("status") == "approval_required":
+        pending_action = payload.get("pending_action")
+        if isinstance(pending_action, dict) and pending_action.get("status") == "PENDING_ACTION":
+            return pending_action
+    return None
 
 
 def is_deepseek_thinking_model(model: str) -> bool:
@@ -363,16 +383,11 @@ class PersonalFinanceAgent:
         for msg in messages:
             if not isinstance(msg, ToolMessage):
                 continue
-
-            content = getattr(msg, "content", "") or ""
-            if _has_pending_action_status(content):
+            if any(
+                _pending_action_from_payload(payload) is not None
+                for payload in _tool_payloads(getattr(msg, "content", ""))
+            ):
                 return True
-            if isinstance(content, list):
-                for part in content:
-                    if _has_pending_action_status(part):
-                        return True
-                    if isinstance(part, dict) and _has_pending_action_status(part.get("text")):
-                        return True
 
         return False
 
@@ -674,17 +689,8 @@ def _pending_actions(result: dict) -> list[dict[str, Any]]:
         if not isinstance(msg, ToolMessage):
             continue
         content = getattr(msg, "content", "") or ""
-        if isinstance(content, str):
-            try:
-                payload = json.loads(content)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("status") == "PENDING_ACTION":
-                actions.append(payload)
-            elif payload.get("status") == "approval_required":
-                pending_action = payload.get("pending_action")
-                if isinstance(pending_action, dict):
-                    actions.append(pending_action)
+        for payload in _tool_payloads(content):
+            pending_action = _pending_action_from_payload(payload)
+            if pending_action is not None:
+                actions.append(pending_action)
     return actions

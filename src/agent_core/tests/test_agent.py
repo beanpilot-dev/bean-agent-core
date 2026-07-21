@@ -1,6 +1,7 @@
 """Tests for PersonalFinanceAgent response classification."""
 
 import asyncio
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -142,6 +143,27 @@ class CapturingGraph:
         self.captured_config = config
         return {
             "messages": graph_input["messages"] + [AIMessage(content="captured response")],
+        }
+
+
+class PendingActionGraph:
+    async def ainvoke(self, graph_input, config=None):
+        raw = json.dumps({
+            "status": "approval_required",
+            "pending_action": {
+                "status": "PENDING_ACTION",
+                "pending_action_id": "pa_1",
+                "action_type": "commit_transaction",
+            },
+        })
+        return {
+            "messages": graph_input["messages"] + [
+                ToolMessage(
+                    content=[{"type": "text", "text": raw}],
+                    tool_call_id="pending-action-1",
+                ),
+                AIMessage(content="The prepared change is ready for review."),
+            ],
         }
 
 
@@ -289,7 +311,10 @@ def test_requires_user_input_detects_gateway_approval_required_string_content():
     result = {
         "messages": [
             ToolMessage(
-                content='{"status": "approval_required", "pending_action": {}}',
+                content=(
+                    '{"status": "approval_required", '
+                    '"pending_action": {"status": "PENDING_ACTION", "pending_action_id": "pa_1"}}'
+                ),
                 tool_call_id="pending-action-1",
             )
         ]
@@ -311,6 +336,29 @@ def test_gateway_approval_required_streams_inner_pending_action() -> None:
         ]
     }
 
+    assert _pending_actions(result) == [{"status": "PENDING_ACTION", "pending_action_id": "pa_1"}]
+
+
+def test_gateway_approval_required_streams_inner_pending_action_from_text_block() -> None:
+    result = {
+        "messages": [
+            ToolMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"status": "approval_required", '
+                            '"pending_action": '
+                            '{"status": "PENDING_ACTION", "pending_action_id": "pa_1"}}'
+                        ),
+                    }
+                ],
+                tool_call_id="pending-action-1",
+            )
+        ]
+    }
+
+    assert PersonalFinanceAgent._requires_user_input(result) is True
     assert _pending_actions(result) == [{"status": "PENDING_ACTION", "pending_action_id": "pa_1"}]
 
 
@@ -341,14 +389,20 @@ def test_requires_user_input_ignores_legacy_preview_list_content(part):
     "part",
     [
         {"status": "PENDING_ACTION", "proposed": "transaction"},
-        {"status": "approval_required", "pending_action": {}},
+        {
+            "status": "approval_required",
+            "pending_action": {"status": "PENDING_ACTION", "pending_action_id": "pa_1"},
+        },
         {
             "type": "text",
             "text": '{"status": "PENDING_ACTION", "proposed": "transaction"}',
         },
         {
             "type": "text",
-            "text": '{"status": "approval_required", "pending_action": {}}',
+            "text": (
+                '{"status": "approval_required", '
+                '"pending_action": {"status": "PENDING_ACTION", "pending_action_id": "pa_1"}}'
+            ),
         },
     ],
 )
@@ -506,6 +560,29 @@ async def test_stream_records_meaningful_root_trace_input_and_output(monkeypatch
     assert tracing.trace_kwargs is not None
     assert tracing.trace_kwargs["input"] == "Summarize this ledger"
     assert tracing.root_output == "captured response"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_structured_approval_event_for_text_block_tool_result(monkeypatch):
+    agent = PersonalFinanceAgent()
+    agent.graph = PendingActionGraph()
+
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
+
+    chunks = [
+        chunk
+        async for chunk in agent.stream(
+            query="Prepare this ledger change",
+            prior=[],
+            api_key="key",
+            model="scripted",
+        )
+    ]
+
+    approval = next(chunk for chunk in chunks if chunk.get("type") == "approval_required")
+    assert approval["require_user_input"] is True
+    assert approval["pending_action"]["pending_action_id"] == "pa_1"
 
 
 @pytest.mark.asyncio
