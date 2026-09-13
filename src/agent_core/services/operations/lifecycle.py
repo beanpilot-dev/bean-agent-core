@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from ..beancount import Beancount
+from ..plugin_policy import RepositoryPluginRejectedError, enforce_plugin_policy
 from ..preflight import PreflightService, SetupRequiredError
 from ..types import LedgerConfig, PreflightResult
 from ..workspace import (
@@ -45,6 +46,10 @@ class WorkspaceGitError(RequestWorkspaceError):
         self.code = code
 
 
+class WorkspacePluginError(RequestWorkspaceError):
+    """The repository contains executable Beancount plugin configuration."""
+
+
 @dataclass(frozen=True)
 class PreparedWorkspace:
     """An isolated workspace plus any requested preflight result."""
@@ -81,6 +86,7 @@ class RequestWorkspaceLifecycle:
         token: str | None,
         user_id: str,
         prefix: str,
+        branch: str | None = None,
         preflight_mode: PreflightMode = PreflightMode.NONE,
         ledger_config: LedgerConfig | None = None,
         workspace_path: str | None = None,
@@ -91,7 +97,11 @@ class RequestWorkspaceLifecycle:
         try:
             try:
                 self._git_service.validate_request_credentials(repo_url, token)
-                cache_path = self._cache_manager.acquire(user_id, repo_url, token)
+                cache_path = (
+                    self._cache_manager.acquire(user_id, repo_url, token)
+                    if branch is None
+                    else self._cache_manager.acquire(user_id, repo_url, token, branch)
+                )
             except CacheLockTimeoutError as error:
                 raise WorkspaceCacheBusyError(str(error)) from error
             except GitServiceError as error:
@@ -100,6 +110,11 @@ class RequestWorkspaceLifecycle:
             if active_path is None:
                 active_path = self._workspace_factory(prefix)
             self._git_service.copy(cache_path, active_path)
+
+            try:
+                enforce_plugin_policy(active_path, ledger_config)
+            except RepositoryPluginRejectedError as error:
+                raise WorkspacePluginError(str(error)) from error
 
             yield self.preflight(
                 active_path,

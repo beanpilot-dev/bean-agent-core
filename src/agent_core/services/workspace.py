@@ -178,7 +178,13 @@ class GitService(ABC):
     # Public API
     # ------------------------------------------------------------------
 
-    def clone(self, workspace: str, repo_url: str, token: str | None = None) -> str:
+    def clone(
+        self,
+        workspace: str,
+        repo_url: str,
+        token: str | None = None,
+        branch: str | None = None,
+    ) -> str:
         """Clone repo_url into workspace.
 
         Returns a status string: "CLONED" or raises GitServiceError.
@@ -192,9 +198,11 @@ class GitService(ABC):
                 askpass = self._configure_git_askpass(workspace, effective_token)
 
             logger.info("Cloning repository into workspace")
-            rc, _, err = self._run_git(
-                ["git", "clone", effective_url, "."], cwd=workspace, askpass=askpass
-            )
+            clone_args = ["git", "clone"]
+            if branch:
+                clone_args.extend(["--branch", self._validate_branch(branch)])
+            clone_args.extend([effective_url, "."])
+            rc, _, err = self._run_git(clone_args, cwd=workspace, askpass=askpass)
             if rc != 0:
                 raise self._classify_clone_error(err)
 
@@ -237,7 +245,11 @@ class GitService(ABC):
             self._cleanup_askpass(askpass)
 
     def fetch_reset(
-        self, workspace: str, repo_url: str, token: str | None = None
+        self,
+        workspace: str,
+        repo_url: str,
+        token: str | None = None,
+        branch: str | None = None,
     ) -> str:
         """Fetch origin and reset hard to origin/HEAD. Fast cache refresh.
 
@@ -255,7 +267,11 @@ class GitService(ABC):
             if rc != 0:
                 raise self._classify_clone_error(err)
 
-            reset_target = self._remote_reset_target(workspace)
+            reset_target = (
+                f"origin/{self._validate_branch(branch)}"
+                if branch
+                else self._remote_reset_target(workspace)
+            )
             if reset_target is None:
                 if not self._has_commits(workspace):
                     return "REFRESHED_EMPTY"
@@ -386,6 +402,23 @@ class GitService(ABC):
         return tuple(validated)
 
     @staticmethod
+    def _validate_branch(branch: str) -> str:
+        """Accept one safe branch name and reject ref/path injection."""
+        if not isinstance(branch, str) or not branch or branch != branch.strip():
+            raise ValueError("branch must be a non-empty name")
+        if branch.startswith(("/", "-")) or ".." in branch or "\\" in branch:
+            raise ValueError("branch must be a repository branch name")
+        if any(char in branch for char in ("\x00", "\n", "\r", " ", "~", "^", ":", "?", "*", "[")):
+            raise ValueError("branch must be a repository branch name")
+        if branch.startswith("refs/"):
+            if not branch.startswith("refs/heads/"):
+                raise ValueError("branch must be a repository branch name")
+            branch = branch.removeprefix("refs/heads/")
+        if not branch or branch.startswith("heads/"):
+            raise ValueError("branch must be a repository branch name")
+        return branch
+
+    @staticmethod
     def destroy(workspace: str) -> None:
         """Remove workspace directory tree. Graceful — ignores missing paths."""
         shutil.rmtree(workspace, ignore_errors=True)
@@ -464,8 +497,8 @@ class CachedWorkspaceManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _cache_key(user_id: str, repo_url: str) -> str:
-        raw = f"{user_id}:{repo_url}"
+    def _cache_key(user_id: str, repo_url: str, branch: str | None = None) -> str:
+        raw = f"{user_id}:{repo_url}:{branch or 'default'}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _cache_path(self, key: str) -> str:
@@ -493,7 +526,13 @@ class CachedWorkspaceManager:
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text(str(time.time()))
 
-    def _refresh(self, cache_path: str, repo_url: str, token: str | None) -> None:
+    def _refresh(
+        self,
+        cache_path: str,
+        repo_url: str,
+        token: str | None,
+        branch: str | None = None,
+    ) -> None:
         """Pull latest, falling back to fetch+reset on fast-forward failure."""
         _, effective_token = self._git_service._resolve_credentials(repo_url, token)
         askpass = None
@@ -506,8 +545,13 @@ class CachedWorkspaceManager:
                 ["git", "pull", "--ff-only"], cwd=cache_path, askpass=askpass
             )
             if rc != 0:
-                logger.warning("git pull --ff-only failed, falling back to fetch+reset")
-                self._git_service.fetch_reset(cache_path, repo_url, token)
+                logger.warning(
+                    "git pull --ff-only failed, falling back to fetch+reset"
+                )
+                if branch is None:
+                    self._git_service.fetch_reset(cache_path, repo_url, token)
+                else:
+                    self._git_service.fetch_reset(cache_path, repo_url, token, branch)
         finally:
             self._git_service._cleanup_askpass(askpass)
 
@@ -516,7 +560,11 @@ class CachedWorkspaceManager:
     # ------------------------------------------------------------------
 
     def acquire(
-        self, user_id: str, repo_url: str, token: str | None = None
+        self,
+        user_id: str,
+        repo_url: str,
+        token: str | None = None,
+        branch: str | None = None,
     ) -> str:
         """Get a fresh cache workspace path for (user_id, repo_url).
 
@@ -530,7 +578,7 @@ class CachedWorkspaceManager:
         a per-request workspace first.
         """
         effective_repo_url = self._git_service.effective_repo_url(repo_url, token)
-        key = self._cache_key(user_id, effective_repo_url)
+        key = self._cache_key(user_id, effective_repo_url, branch)
         cache_path = self._cache_path(key)
         lock_path = f"{cache_path}.lock"
 
@@ -543,10 +591,10 @@ class CachedWorkspaceManager:
                     logger.info("Cache miss or expired for key=%s", key)
                     if os.path.exists(cache_path):
                         shutil.rmtree(cache_path, ignore_errors=True)
-                    self._git_service.clone(cache_path, repo_url, token)
+                    self._git_service.clone(cache_path, repo_url, token, branch)
                 else:
                     logger.info("Cache hit for key=%s, refreshing", key)
-                    self._refresh(cache_path, repo_url, token)
+                    self._refresh(cache_path, repo_url, token, branch)
                 self._touch(key)
         except TimeoutError:
             raise CacheLockTimeoutError(

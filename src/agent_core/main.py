@@ -12,6 +12,7 @@ executes ledger operations in an ephemeral workspace. No persistent state.
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -41,7 +42,13 @@ from agent_core.context import (
     agent_request_id,
     agent_user_id,
 )
+from agent_core.services.operations.lifecycle import RequestWorkspaceLifecycle
 from agent_core.services.orchestrator import AgentOrchestrator
+from agent_core.services.runtime import (
+    PrivateLedgerRuntime,
+    RuntimeExecuteRequest,
+    RuntimeProtocolError,
+)
 from agent_core.services.tool_ports import create_workflow_tool_dependencies
 from agent_core.services.types import LedgerConfig
 from agent_core.services.workspace import CachedWorkspaceManager, GitService
@@ -69,11 +76,37 @@ _git_service = GitService.from_environment(
     os.environ.get("AGENT_MODE", ""),
     os.environ.get("LOCAL_REPO_URL", ""),
 )
-_agent = PersonalFinanceAgent(
-    tool_dependencies_factory=create_workflow_tool_dependencies,
-)
 _cache_manager = CachedWorkspaceManager(_git_service, ttl_seconds=WORKSPACE_TTL_SECONDS)
-_orchestrator = AgentOrchestrator(_agent, _cache_manager, _git_service)
+
+
+class _LazyAgentOrchestrator:
+    """Keep model graph construction off the deterministic private runtime path."""
+
+    def __init__(self, cache_manager: CachedWorkspaceManager, git_service: GitService) -> None:
+        self._cache_manager = cache_manager
+        self._git_service = git_service
+        self._instance: AgentOrchestrator | None = None
+
+    def _ensure(self) -> AgentOrchestrator:
+        if self._instance is None:
+            agent = PersonalFinanceAgent(
+                tool_dependencies_factory=create_workflow_tool_dependencies,
+            )
+            self._instance = AgentOrchestrator(agent, self._cache_manager, self._git_service)
+        return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ensure(), name)
+
+
+_orchestrator = _LazyAgentOrchestrator(_cache_manager, _git_service)
+_runtime = PrivateLedgerRuntime(
+    RequestWorkspaceLifecycle(
+        _cache_manager,
+        _git_service,
+        workspace_factory=lambda prefix: f"/tmp/{prefix}{uuid.uuid4().hex[:12]}",
+    )
+)
 
 try:
     _cache_manager.cleanup_expired()
@@ -333,6 +366,39 @@ async def health():
         "version": "0.2.0",
         "beancount": "3.0.0",
     }
+
+
+@app.post("/ledger/v1/execute")
+async def ledger_runtime_execute(req: RuntimeExecuteRequest, request: Request):
+    """Execute one authenticated, deterministic private ledger command.
+
+    This endpoint is intentionally not an MCP endpoint.  The control plane
+    authenticates to it with a dedicated service secret and supplies resolved
+    repository coordinates; public clients never see this contract.
+    """
+    configured_secret = os.environ.get("LEDGER_RUNTIME_SECRET") or os.environ.get("AGENT_CORE_PRIVATE_SHARED_SECRET", "")
+    presented_secret = request.headers.get("x-agent-core-secret", "")
+    if not configured_secret:
+        return _error_envelope(
+            "PRIVATE_RUNTIME_UNAVAILABLE",
+            "Private ledger runtime is not configured",
+            503,
+        )
+    if not presented_secret or not hmac.compare_digest(presented_secret, configured_secret):
+        return _error_envelope("UNAUTHORIZED", "Private ledger runtime authentication failed", 401)
+    try:
+        result = await _runtime.execute(req)
+    except RuntimeProtocolError as error:
+        return _error_envelope(error.code, str(error), 400, error.details)
+    except Exception as error:
+        logger.error(
+            "ledger-runtime failed execution_id=%s operation=%s error_type=%s",
+            req.execution_id,
+            req.operation,
+            type(error).__name__,
+        )
+        return _error_envelope("INTERNAL_ERROR", "Private ledger runtime failed", 500)
+    return result
 
 
 # ---------------------------------------------------------------------------
