@@ -19,15 +19,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .approvals.contracts import PendingActionService
+from .approvals.contracts import PendingActionService, digest_payload
 from .beancount import Beancount
 from .ledger_paths import sidecar_target_file
 from .mutations.coordinator import MutationCoordinator
+from .mutations.executor import MutationExecutor
 from .mutations.handlers.contracts import PreparedMutation
 from .mutations.handlers.registry import MutationPreparationHandlerRegistry
 from .mutations.preparation import MutationPreparationService
-from .mutations.executor import MutationExecutor
-from .approvals.contracts import digest_payload
 from .mutations.validator import PlanValidation
 from .operations.lifecycle import (
     PreflightMode,
@@ -141,13 +140,22 @@ def _config(payload: RuntimeLedger) -> LedgerConfig:
         ) from exc
 
 
-def _argument_keys(arguments: dict[str, Any], allowed: set[str]) -> None:
+def _argument_keys(
+    arguments: dict[str, Any], allowed: set[str], *, path: str | None = None
+) -> None:
     unknown = sorted(set(arguments) - allowed)
     if unknown:
         raise RuntimeProtocolError(
             "INVALID_ARGUMENTS",
             "arguments contain unsupported fields",
-            details={"fields": unknown},
+            details={
+                "fields": unknown,
+                **({"path": path} if path else {}),
+                "remediation": (
+                    "Remove unsupported fields and use the canonical schema. "
+                    "Do not retry the unchanged payload or invent another shape."
+                ),
+            },
         )
 
 
@@ -194,59 +202,87 @@ def _bounded_limit(arguments: dict[str, Any], maximum: int = MAX_QUERY_LIMIT) ->
     return value
 
 
-def _render_units(value: object) -> str:
+def _invalid_argument(message: str, path: str) -> RuntimeProtocolError:
+    return RuntimeProtocolError(
+        "INVALID_ARGUMENTS",
+        message,
+        details={
+            "path": path,
+            "remediation": (
+                "Correct this field using the canonical operation schema. "
+                "Do not retry the unchanged payload or invent another shape."
+            ),
+        },
+    )
+
+
+def _render_units(value: object, path: str = "units") -> str:
     if not isinstance(value, dict) or set(value) != {"number", "currency"}:
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "units must contain number and currency")
+        raise _invalid_argument("units must contain number and currency", path)
     number = value.get("number")
     currency = value.get("currency")
     if not isinstance(number, str) or not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", number):
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "units.number must be a decimal string")
+        raise _invalid_argument("units.number must be a decimal string", f"{path}.number")
     if not isinstance(currency, str) or not re.fullmatch(r"[A-Z][A-Z0-9\-]{0,14}", currency):
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "units.currency is invalid")
+        raise _invalid_argument("units.currency is invalid", f"{path}.currency")
     try:
         Decimal(number)
     except InvalidOperation as exc:
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "units.number is invalid") from exc
+        raise _invalid_argument("units.number is invalid", f"{path}.number") from exc
     return f"{number} {currency}"
 
 
-def _render_transaction(value: object) -> str:
+def _render_transaction(value: object, path: str = "transaction") -> str:
     if not isinstance(value, dict):
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction must be an object")
+        raise _invalid_argument("transaction must be an object", path)
     allowed = {"date", "flag", "payee", "narration", "postings", "tags", "links", "meta"}
-    _argument_keys(value, allowed)
-    transaction_date = _iso_date(value.get("date"), "transaction.date")
+    _argument_keys(value, allowed, path=path)
+    try:
+        transaction_date = _iso_date(value.get("date"), f"{path}.date")
+    except RuntimeProtocolError as exc:
+        raise _invalid_argument(str(exc), f"{path}.date") from exc
     flag = value.get("flag", "*")
     if not isinstance(flag, str) or not re.fullmatch(r"[*!PQRSTUC]", flag):
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction.flag is invalid")
+        raise _invalid_argument("transaction.flag is invalid", f"{path}.flag")
     payee = value.get("payee")
     narration = value.get("narration")
     if payee is not None:
-        payee = _single_line(payee, "transaction.payee", 200)
+        try:
+            payee = _single_line(payee, f"{path}.payee", 200)
+        except RuntimeProtocolError as exc:
+            raise _invalid_argument(str(exc), f"{path}.payee") from exc
     if narration is not None:
-        narration = _single_line(narration, "transaction.narration", 500)
+        try:
+            narration = _single_line(narration, f"{path}.narration", 500)
+        except RuntimeProtocolError as exc:
+            raise _invalid_argument(str(exc), f"{path}.narration") from exc
     if payee is None and narration is None:
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction needs payee or narration")
+        raise _invalid_argument("transaction needs payee or narration", f"{path}.narration")
     postings = value.get("postings")
     if not isinstance(postings, list) or not 2 <= len(postings) <= 20:
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction.postings count is invalid")
+        raise _invalid_argument("transaction.postings count is invalid", f"{path}.postings")
     lines = [f'{transaction_date} {flag} "{(payee or narration).replace(chr(34), chr(39))}"']
     if payee is not None and narration is not None:
         lines[0] = (
             f'{transaction_date} {flag} "{payee.replace(chr(34), chr(39))}" "{narration.replace(chr(34), chr(39))}"'
         )
-    for posting in postings:
+    for posting_index, posting in enumerate(postings):
+        posting_path = f"{path}.postings[{posting_index}]"
         if not isinstance(posting, dict):
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "posting must be an object")
-        _argument_keys(posting, {"account", "units"})
+            raise _invalid_argument("posting must be an object", posting_path)
+        _argument_keys(posting, {"account", "units"}, path=posting_path)
         account = posting.get("account")
         if not isinstance(account, str) or not re.fullmatch(
             r"(?:Assets|Liabilities|Equity|Income|Expenses)(?::[A-Za-z][A-Za-z0-9\-]+)+", account
         ):
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "posting.account is invalid")
-        units = _render_units(posting.get("units")) if posting.get("units") is not None else ""
+            raise _invalid_argument("posting.account is invalid", f"{posting_path}.account")
+        units = (
+            _render_units(posting.get("units"), f"{posting_path}.units")
+            if posting.get("units") is not None
+            else ""
+        )
         if posting.get("units") is None:
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "posting.units is required")
+            raise _invalid_argument("posting.units is required", f"{posting_path}.units")
         lines.append(f"  {account}  {units}")
     tags = value.get("tags", [])
     links = value.get("links", [])
@@ -256,19 +292,21 @@ def _render_transaction(value: object) -> str:
         or len(tags) > 20
         or len(links) > 20
     ):
-        raise RuntimeProtocolError(
-            "INVALID_ARGUMENTS", "transaction tags and links are bounded arrays"
+        raise _invalid_argument(
+            "transaction tags and links are bounded arrays", f"{path}.tags"
         )
     for tag in tags:
         if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_\-/]{1,80}", tag):
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction tag is invalid")
+            raise _invalid_argument("transaction tag is invalid", f"{path}.tags")
         lines[0] += f" #{tag}"
     for link in links:
         if not isinstance(link, str) or not re.fullmatch(r"[A-Za-z0-9_\-/]{1,80}", link):
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction link is invalid")
+            raise _invalid_argument("transaction link is invalid", f"{path}.links")
         lines[0] += f" ^{link}"
     if value.get("meta") not in (None, {}):
-        raise RuntimeProtocolError("INVALID_ARGUMENTS", "transaction metadata is not supported yet")
+        raise _invalid_argument(
+            "transaction metadata is not supported yet", f"{path}.meta"
+        )
     return "\n".join(lines)
 
 
@@ -585,8 +623,16 @@ class PrivateLedgerRuntime:
         ):
             raise RuntimeProtocolError("INVALID_ARGUMENTS", "whitelist is invalid")
         prepared_items: list[PreparedMutation] = []
-        for operation in operations:
-            prepared_items.append(self._build_operation(operation, workspace, config, whitelist))
+        for operation_index, operation in enumerate(operations):
+            prepared_items.append(
+                self._build_operation(
+                    operation,
+                    workspace,
+                    config,
+                    whitelist,
+                    operation_index=operation_index,
+                )
+            )
         plan_operations = tuple(
             item for prepared in prepared_items for item in prepared.plan.operations
         )
@@ -605,7 +651,16 @@ class PrivateLedgerRuntime:
         )
         validation = self._preparation._validator.validate(workspace, plan, config)
         if isinstance(validation, PlanValidation) and validation.failure:
-            return {"status": "error", "error": asdict(validation.failure)}
+            failure = validation.failure
+            return _runtime_error(
+                "VALIDATION_FAILED",
+                "change set failed isolated ledger validation",
+                details={
+                    "path": "operations",
+                    "remediation": failure.remediation,
+                    "validation": asdict(validation.validation),
+                },
+            )
         if not isinstance(validation, PlanValidation):
             raise RuntimeProtocolError("PREPARATION_FAILED", "change set validation failed")
         sealed = MutationCoordinator.seal(workspace, plan, config).to_spec()
@@ -651,7 +706,13 @@ class PrivateLedgerRuntime:
         }
 
     def _build_operation(
-        self, operation: object, workspace: str, config: LedgerConfig, whitelist: list[str] | None
+        self,
+        operation: object,
+        workspace: str,
+        config: LedgerConfig,
+        whitelist: list[str] | None,
+        *,
+        operation_index: int = 0,
     ) -> PreparedMutation:
         if not isinstance(operation, dict) or set(operation) - {
             "kind",
@@ -675,18 +736,37 @@ class PrivateLedgerRuntime:
             "adjustment_account",
             "cutoff",
             "reason",
+            "account",
         }:
-            raise RuntimeProtocolError("INVALID_ARGUMENTS", "operation has unsupported fields")
+            raise _invalid_argument(
+                "operation has unsupported fields", f"operations[{operation_index}]"
+            )
         kind = operation.get("kind")
         if kind not in STRUCTURED_OPERATION_KEYS:
-            raise RuntimeProtocolError("UNSUPPORTED_CHANGE", "operation kind is not supported")
+            raise RuntimeProtocolError(
+                "UNSUPPORTED_CHANGE",
+                "operation kind is not supported",
+                details={
+                    "path": f"operations[{operation_index}].kind",
+                    "operation_index": operation_index,
+                    "supported_kinds": sorted(STRUCTURED_OPERATION_KEYS),
+                    "remediation": (
+                        "Use one published canonical kind. For a transaction use "
+                        "kind=create_transaction with nested transaction, postings, and units. "
+                        "Do not retry the unchanged payload or invent another shape."
+                    ),
+                },
+            )
         kwargs: dict[str, Any]
         handler_key: str
         if kind == "create_transaction":
             handler_key, kwargs = (
                 "commit_transaction",
                 {
-                    "transaction_text": _render_transaction(operation.get("transaction")),
+                    "transaction_text": _render_transaction(
+                        operation.get("transaction"),
+                        f"operations[{operation_index}].transaction",
+                    ),
                     "commit_message": "",
                     "whitelist": whitelist,
                 },
@@ -699,7 +779,10 @@ class PrivateLedgerRuntime:
                     "revision_fingerprint": _require_operation_text(
                         operation, "revision_fingerprint"
                     ),
-                    "new_transaction_text": _render_transaction(operation.get("transaction")),
+                    "new_transaction_text": _render_transaction(
+                        operation.get("transaction"),
+                        f"operations[{operation_index}].transaction",
+                    ),
                     "commit_message": "",
                     "whitelist": whitelist,
                 },
@@ -785,8 +868,19 @@ class PrivateLedgerRuntime:
                 )
         prepared = self._registry.get(handler_key).build(workspace, config, **kwargs)
         if isinstance(prepared, (InvariantViolation, ValidationFailed)):
+            code = prepared.invariant if isinstance(prepared, InvariantViolation) else prepared.status
             raise RuntimeProtocolError(
-                prepared.status, "structured operation failed deterministic policy"
+                code,
+                "structured operation failed deterministic policy",
+                details={
+                    "path": f"operations[{operation_index}]",
+                    "operation_index": operation_index,
+                    "remediation": (
+                        "Resolve the deterministic policy error using bounded ledger read "
+                        "tools, then prepare a corrected payload. Use only exact account "
+                        "names returned by account lookup; never guess an unresolved account."
+                    ),
+                },
             )
         if kind == "delete_transaction":
             from dataclasses import replace

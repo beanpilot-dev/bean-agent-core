@@ -48,6 +48,62 @@ def test_structured_transaction_renderer_rejects_raw_text_escape_hatches() -> No
         )
 
 
+def test_structured_transaction_renderer_identifies_malformed_units_path() -> None:
+    with pytest.raises(RuntimeProtocolError) as captured:
+        _render_transaction(
+            {
+                "date": "2026-09-13",
+                "narration": "Lunch",
+                "postings": [
+                    {
+                        "account": "Expenses:Food:Dining",
+                        "units": {"number": "not-decimal", "currency": "CNY"},
+                    },
+                    {
+                        "account": "Assets:Cash",
+                        "units": {"number": "-12.50", "currency": "CNY"},
+                    },
+                ],
+            },
+            "operations[2].transaction",
+        )
+
+    assert captured.value.code == "INVALID_ARGUMENTS"
+    assert (
+        captured.value.details["path"]
+        == "operations[2].transaction.postings[0].units.number"
+    )
+    assert "Do not retry the unchanged payload" in captured.value.details["remediation"]
+
+
+def test_unsupported_structured_operation_has_stable_actionable_error(
+    ledger_workspace: Path,
+) -> None:
+    runtime = PrivateLedgerRuntime(object())
+    with pytest.raises(RuntimeProtocolError) as captured:
+        runtime._build_operation(
+            {"op": "add_transaction", "date": "2026-09-13", "postings": []},
+            str(ledger_workspace),
+            LedgerConfig(),
+            None,
+        )
+
+    assert captured.value.code == "INVALID_ARGUMENTS"
+    assert captured.value.details["path"] == "operations[0]"
+
+    with pytest.raises(RuntimeProtocolError) as unsupported:
+        runtime._build_operation(
+            {"kind": "add_transaction"},
+            str(ledger_workspace),
+            LedgerConfig(),
+            None,
+        )
+
+    assert unsupported.value.code == "UNSUPPORTED_CHANGE"
+    assert unsupported.value.details["path"] == "operations[0].kind"
+    assert "kind=create_transaction" in unsupported.value.details["remediation"]
+
+
 def test_structured_transaction_renderer_outputs_bounded_beancount() -> None:
     rendered = _render_transaction(
         {

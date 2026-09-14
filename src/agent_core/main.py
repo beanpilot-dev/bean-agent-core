@@ -376,7 +376,9 @@ async def ledger_runtime_execute(req: RuntimeExecuteRequest, request: Request):
     authenticates to it with a dedicated service secret and supplies resolved
     repository coordinates; public clients never see this contract.
     """
-    configured_secret = os.environ.get("LEDGER_RUNTIME_SECRET") or os.environ.get("AGENT_CORE_PRIVATE_SHARED_SECRET", "")
+    configured_secret = os.environ.get("LEDGER_RUNTIME_SECRET") or os.environ.get(
+        "AGENT_CORE_PRIVATE_SHARED_SECRET", ""
+    )
     presented_secret = request.headers.get("x-agent-core-secret", "")
     if not configured_secret:
         return _error_envelope(
