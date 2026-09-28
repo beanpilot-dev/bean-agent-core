@@ -9,7 +9,7 @@ from agent_core.services.transaction_index import (
 )
 
 
-def _add_transaction(workspace: Path, text: str, filename: str = "2026-07.beancount") -> None:
+def _add_transaction(workspace: Path, text: str, filename: str) -> None:
     path = workspace / "data" / "agent_inc" / filename
     with path.open("a", encoding="utf-8") as handle:
         handle.write("\n" + text)
@@ -18,14 +18,16 @@ def _add_transaction(workspace: Path, text: str, filename: str = "2026-07.beanco
 def test_search_and_detail_use_exact_parser_directive_and_fingerprint(
     ledger_workspace: Path,
 ) -> None:
+    main_file = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month = main_file.read_text().split("include")[1].split('"')[1].strip().rsplit(".", 1)[0]
     directive = (
-        '2026-07-01 * "餐厅" "午餐" #meal ^receipt\n'
+        f'{month}-01 * "餐厅" "午餐" #meal ^receipt\n'
         '  merchant: "店铺"\n'
         "  ; a comment inside the directive\n"
         "  Expenses:Food:Dining  25 CNY\n"
         "  Assets:Cash          -25 CNY\n"
     )
-    _add_transaction(ledger_workspace, directive)
+    _add_transaction(ledger_workspace, directive, filename=month + ".beancount")
 
     found = LedgerQueryService.find_transactions(
         str(ledger_workspace), narration_contains="午餐"
@@ -42,7 +44,7 @@ def test_search_and_detail_use_exact_parser_directive_and_fingerprint(
     assert detail.status == "SUCCESS"
     assert detail.transaction is not None
     assert detail.transaction["directive"] == directive
-    assert detail.transaction["source_path"] == "data/agent_inc/2026-07.beancount"
+    assert detail.transaction["source_path"] == f"data/agent_inc/{month}.beancount"
     assert detail.transaction["source_start_line"] > 0
     assert detail.transaction["source_end_line"] == detail.transaction["source_start_line"] + 4
     assert detail.transaction["metadata"] == {"merchant": "店铺"}
@@ -86,12 +88,14 @@ def test_identical_directives_get_distinct_references_and_concise_rows(
 def test_reference_is_stable_for_formatting_but_fails_closed_when_moved(
     ledger_workspace: Path,
 ) -> None:
+    main_file = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month = main_file.read_text().split("include")[1].split('"')[1].strip().rsplit(".", 1)[0]
+    source = ledger_workspace / "data" / "agent_inc" / (month + ".beancount")
     found = LedgerQueryService.find_transactions(str(ledger_workspace), narration_contains="Lunch")
     reference = found.rows[0]["transaction_ref"]
     before = LedgerQueryService.get_transaction(str(ledger_workspace), reference)
     assert before.status == "SUCCESS"
 
-    source = ledger_workspace / "data" / "agent_inc" / "2026-07.beancount"
     source.write_text(
         source.read_text().replace("Dining  85", "Dining    85"), encoding="utf-8"
     )
@@ -106,12 +110,14 @@ def test_reference_is_stable_for_formatting_but_fails_closed_when_moved(
 
 
 def test_reference_parser_and_missing_errors_are_deterministic(ledger_workspace: Path) -> None:
+    main_file = ledger_workspace / "data" / "agent_inc" / "main.beancount"
+    month = main_file.read_text().split("include")[1].split('"')[1].strip().rsplit(".", 1)[0]
     found = LedgerQueryService.find_transactions(str(ledger_workspace), narration_contains="Lunch")
     reference = found.rows[0]["transaction_ref"]
     payload = parse_transaction_ref(reference)
     assert payload is not None
     assert payload["version"] == 1
-    assert payload["path"] == "data/agent_inc/2026-07.beancount"
+    assert payload["path"] == f"data/agent_inc/{month}.beancount"
 
     malformed = LedgerQueryService.get_transaction(str(ledger_workspace), "txn_v1_not-a-ref")
     missing = LedgerQueryService.get_transaction(
