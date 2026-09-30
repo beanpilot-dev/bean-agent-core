@@ -55,22 +55,19 @@ class BulkCommitPreparationHandler:
                 for account in accounts
             )
         )
-        transaction_lines = [
-            line
+        transaction_count = sum(
+            1
             for line in transactions_text.splitlines()
             if re.match(r"^\d{4}-\d{2}-\d{2}\s+[*!]", line)
-        ]
-        transaction_count = len(transaction_lines)
-        sample = "\n".join(transaction_lines[:5])
-        if transaction_count > 5:
-            sample += f"\n... ({transaction_count - 5} more)"
+        )
+        preview = transactions_text
         return PreparedMutation(
             handler_key=self.handler_key,
             action_type="bulk_commit",
             plan=plan,
             preview_fields={
                 "transaction_count": transaction_count,
-                "sample": sample,
+                "sample": preview,
                 "commit_message": commit_message,
             },
             execution_spec={
@@ -80,7 +77,7 @@ class BulkCommitPreparationHandler:
             display_fields={
                 "kind": "bulk_import_preview",
                 "summary": "Record multiple transactions",
-                "diff": sample,
+                "diff": preview,
             },
             validation_fields={"transaction_count": transaction_count},
             validation_preview_fields=("target_file",),

@@ -24,6 +24,14 @@ BULK = (
     "  Expenses:Food:Dining  100 CNY\n"
     "  Assets:Cash          -100 CNY"
 )
+MULTI_BULK = (
+    '2026-06-15 * "Dinner"\n'
+    "  Expenses:Food:Dining  100 CNY\n"
+    "  Assets:Cash          -100 CNY\n\n"
+    '2026-06-16 * "Breakfast"\n'
+    "  Expenses:Food:Dining  25 CNY\n"
+    "  Assets:Cash          -25 CNY"
+)
 
 
 def _custom_workspace(tmp_path: Path) -> tuple[Path, LedgerConfig]:
@@ -304,7 +312,7 @@ def test_bulk_handler_resolves_staging_once_and_preserves_payload(
     assert isinstance(pending, PendingAction)
     assert prepared.preview_fields == {
         "transaction_count": 1,
-        "sample": '2026-06-15 * "Dinner"',
+        "sample": BULK,
         "commit_message": "bulk",
     }
     assert prepared.plan.operations[0].text == BULK
@@ -313,10 +321,25 @@ def test_bulk_handler_resolves_staging_once_and_preserves_payload(
         "Expenses:Food:Dining",
     }
     assert pending.execution_spec["transactions_text"] == BULK
-    assert pending.display["diff"] == '2026-06-15 * "Dinner"'
+    assert pending.display["diff"] == BULK
     assert pending.validation["transaction_count"] == 1
     assert pending.validation["target_file"].startswith("data/agent_inc/")
     assert staging.exists()
+
+
+def test_bulk_preview_contains_complete_multi_transaction_payload(
+    ledger_workspace: Path,
+) -> None:
+    pending = LedgerService().prepare_bulk(str(ledger_workspace), MULTI_BULK, "bulk")
+
+    assert isinstance(pending, PendingAction)
+    assert pending.display["diff"] == MULTI_BULK
+    assert pending.display["diff"].count(' * "') == 2
+    assert "Expenses:Food:Dining  100 CNY" in pending.display["diff"]
+    assert "Assets:Cash          -100 CNY" in pending.display["diff"]
+    assert "Expenses:Food:Dining  25 CNY" in pending.display["diff"]
+    assert pending.execution_spec["transactions_text"] == pending.display["diff"]
+    assert pending.validation["transaction_count"] == 2
 
 
 def test_bulk_handler_uses_custom_ledger_layout_and_reports_input_errors(

@@ -34,6 +34,8 @@ def test_core_planners_preserve_operation_and_remediation_contracts() -> None:
     assert bulk.operations == (MutationOperation(kind="append", text="transactions"),)
     assert "replacement" in updated.remediation
     assert "batch" in bulk.remediation
+    assert bulk.remediation.startswith("If bean-check fails")
+    assert not bulk.remediation.startswith("bean-check failed")
 
 
 def test_change_set_and_reconciliation_plans_preserve_order_and_default_messages() -> None:

@@ -1,6 +1,8 @@
 """Integration tests across API, orchestrator, workflow tools, and services."""
 
+import base64
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -23,8 +25,81 @@ from agent_core.services.workspace import (
 from agent_core.workflow.tools import tool_account_balance
 
 
+@pytest.mark.asyncio
+async def test_chat_attachments_are_request_scoped_and_cleanup_after_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_core import main
+
+    captured: dict[str, str] = {}
+
+    class CapturingOrchestrator:
+        async def run(self, **kwargs):
+            available = kwargs["conversation_meta"]["uploaded_files"]
+            alias, path = next(iter(available.items()))
+            captured["path"] = path
+            captured["alias"] = alias
+            assert Path(path).read_bytes() == b"date,amount\n2026-09-01,10.00\n"
+            assert alias in kwargs["query"]
+            assert path not in kwargs["query"]
+            yield {
+                "type": "history_snapshot",
+                "messages": [{"role": "assistant", "content": "Done"}],
+            }
+
+    monkeypatch.setattr(main, "_orchestrator", CapturingOrchestrator())
+    response = await main.agent_chat(
+        main.ChatRequest(
+            repo=main.RepoInfo(url="ignored", token="ignored"),
+            user_id="user",
+            request_id="request",
+            api_key="key",
+            model="scripted",
+            query="Read the attached synthetic CSV.",
+            conversation=main.ChatConversationMeta(),
+            uploaded_files=[{
+                "filename": "generated-upload.csv",
+                "content_base64": base64.b64encode(
+                    b"date,amount\n2026-09-01,10.00\n"
+                ).decode(),
+            }],
+        )
+    )
+    chunks = [
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
+    ]
+    body = "".join(chunks)
+
+    assert response.status_code == 200
+    assert captured["alias"] == "attachment-0.csv"
+    assert captured["path"] not in body
+    assert not os.path.exists(captured["path"])
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_invalid_attachment_before_streaming() -> None:
+    from agent_core import main
+
+    response = await main.agent_chat(
+        main.ChatRequest(
+            repo=main.RepoInfo(url="ignored", token="ignored"),
+            user_id="user",
+            request_id="request",
+            api_key="key",
+            model="scripted",
+            query="Read the attached file.",
+            uploaded_files=[{"filename": "bad.csv", "content_base64": "***"}],
+        )
+    )
+
+    assert response.status_code == 400
+    assert b"Uploaded file could not be processed" in response.body
+
+
 @pytest.fixture(autouse=True)
 def safe_main_import_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     monkeypatch.setenv("LOCAL_REPO_URL", str(tmp_path))
 
 

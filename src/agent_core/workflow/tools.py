@@ -15,6 +15,14 @@ def _dependencies(config: RunnableConfig) -> WorkflowToolDependencies:
     return dependencies
 
 
+def _resolve_uploaded_file(config: RunnableConfig, label: str) -> str | None:
+    uploaded_files = config.get("configurable", {}).get("uploaded_files", {})
+    if not isinstance(uploaded_files, dict):
+        return None
+    path = uploaded_files.get(label)
+    return path if isinstance(path, str) else None
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -167,10 +175,18 @@ def tool_ingest_file(
     """Read an uploaded UTF-8 text file up to 2 MB.
 
     Args:
-        file_path: Container-local upload path.
+        file_path: Exact uploaded-file label shown in the user message.
     """
-    result = _dependencies(config).ingestion.read_file(file_path)
-    return _json_mod.dumps(dataclasses.asdict(result))
+    resolved_path = _resolve_uploaded_file(config, file_path)
+    if not resolved_path:
+        return _json_mod.dumps({
+            "status": "ERROR",
+            "error": "Uploaded file is not available for this request.",
+        })
+    result = _dependencies(config).ingestion.read_file(resolved_path)
+    payload = dataclasses.asdict(result)
+    payload["file_path"] = file_path
+    return _json_mod.dumps(payload)
 
 
 @tool("ledger_run_python")
@@ -193,11 +209,22 @@ def tool_run_python(
 
     Args:
         code: Python source code to execute.
-        input_files: Absolute paths copied into the sandbox.
+        input_files: Uploaded-file labels from the current user message.
         stage: Store stdout in a staging file instead of returning it inline.
         stage_label: Short staging filename label.
     """
-    result = _dependencies(config).ingestion.run_python(code, input_files, stage, stage_label)
+    resolved_files: list[str] = []
+    for label in input_files or []:
+        resolved_path = _resolve_uploaded_file(config, label)
+        if not resolved_path:
+            return _json_mod.dumps({
+                "status": "ERROR",
+                "error": "Uploaded file is not available for this request.",
+            })
+        resolved_files.append(resolved_path)
+    result = _dependencies(config).ingestion.run_python(
+        code, resolved_files, stage, stage_label
+    )
     return _json_mod.dumps(dataclasses.asdict(result))
 
 

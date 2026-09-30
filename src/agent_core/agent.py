@@ -37,14 +37,22 @@ _PROMPT_FILE = os.path.join(os.path.dirname(__file__), "ledger", "prompt.md")
 SYSTEM_PROMPT = open(_PROMPT_FILE).read()
 
 
-def _serialize_history(messages) -> list[dict]:
+def _serialize_history(
+    messages, *, omit_attachment_tool_output: bool = False
+) -> list[dict]:
     role_map = {"human": "user", "ai": "assistant", "system": "system"}
+    omitted_tools = {"ledger_ingest_file", "ledger_run_python"}
     return [
         {
             "role": role_map.get(getattr(m, "type", "user"), "user"),
             "content": getattr(m, "content", ""),
         }
         for m in messages
+        if not (
+            omit_attachment_tool_output
+            and isinstance(m, ToolMessage)
+            and getattr(m, "name", None) in omitted_tools
+        )
     ]
 
 
@@ -484,7 +492,10 @@ class PersonalFinanceAgent:
                 )
                 content_stream_queue: asyncio.Queue[str] = asyncio.Queue()
                 callbacks = []
-                if tracing.enabled:
+                has_uploaded_files = bool(
+                    conversation_meta and conversation_meta.get("uploaded_files")
+                )
+                if tracing.enabled and not has_uploaded_files:
                     callbacks.append(handler)
                 if activity_emitter and activity_queue:
                     callbacks.append(ActivityCallbackHandler(activity_emitter, activity_queue))
@@ -494,6 +505,11 @@ class PersonalFinanceAgent:
                         "single_loop_llm": base_llm.bind_tools(MODEL_TOOLS),
                         "router_system_prompt": SYSTEM_PROMPT,
                         "conversation_context": conv_ctx,
+                        "uploaded_files": (
+                            conversation_meta.get("uploaded_files", {})
+                            if conversation_meta
+                            else {}
+                        ),
                         "workspace": workspace,
                         "repo_url": repo_url,
                         "token": token,
@@ -560,7 +576,8 @@ class PersonalFinanceAgent:
                         yield activity_queue.get_nowait()
 
                 response = result["messages"][-1].content
-                tracing.update_root_observation(output=response)
+                if not has_uploaded_files:
+                    tracing.update_root_observation(output=response)
 
             require_input = self._requires_user_input(result)
             tool_names = _tool_names(result)
@@ -604,7 +621,10 @@ class PersonalFinanceAgent:
                         display_args={"tool_count": len(tool_names)},
                     )
 
-            updated_history = _serialize_history(result["messages"][1:])
+            updated_history = _serialize_history(
+                result["messages"][1:],
+                omit_attachment_tool_output=has_uploaded_files,
+            )
 
             trace_id = tracing.get_trace_id()
             trace_url = tracing.get_trace_url()
@@ -664,7 +684,12 @@ class PersonalFinanceAgent:
                 "messages": (
                     prior
                     if prior and all(isinstance(m, dict) for m in prior)
-                    else _serialize_history(prior)
+                    else _serialize_history(
+                        prior,
+                        omit_attachment_tool_output=bool(
+                            conversation_meta and conversation_meta.get("uploaded_files")
+                        ),
+                    )
                 ),
                 "trace_id": tracing.get_trace_id() if tracing else None,
                 "trace_url": tracing.get_trace_url() if tracing else None,

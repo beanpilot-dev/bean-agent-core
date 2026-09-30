@@ -21,6 +21,7 @@ from agent_core.agent import (
     _build_single_loop_prompt,
     _format_ledger_context,
     _pending_actions,
+    _serialize_history,
     _single_agent_node,
     message_token_count,
     normalize_conversation_title,
@@ -31,6 +32,30 @@ from agent_core.workflow.language import (
     detect_preferred_language,
     response_language_instruction,
 )
+
+
+def test_uploaded_file_tool_output_is_not_persisted_in_conversation_history() -> None:
+    messages = [
+        HumanMessage(content="Review the uploaded synthetic CSV."),
+        ToolMessage(
+            content='{"content":"synthetic,private,financial,data","file_path":"/tmp/beanpilot_uploads_x/attachment-0.csv"}',
+            name="ledger_ingest_file",
+            tool_call_id="call-upload",
+        ),
+        ToolMessage(
+            content='{"result":"parsed synthetic,private,financial,data"}',
+            name="ledger_run_python",
+            tool_call_id="call-python",
+        ),
+        AIMessage(content="I prepared the requested review."),
+    ]
+
+    serialized = _serialize_history(messages, omit_attachment_tool_output=True)
+    persisted = json.dumps(serialized)
+
+    assert len(serialized) == 2
+    assert "synthetic,private,financial,data" not in persisted
+    assert "/tmp/beanpilot_uploads_" not in persisted
 
 
 @pytest.mark.parametrize(

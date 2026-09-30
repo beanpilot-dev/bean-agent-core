@@ -98,7 +98,9 @@ class MutationPlanner:
         return MutationPlan.from_operations(
             [MutationOperation(kind="append", text=transactions_text)],
             commit_message=commit_message,
-            remediation="bean-check failed. Revise the transaction batch and prepare it again.",
+            remediation=(
+                "If bean-check fails, revise the transaction batch and prepare it again."
+            ),
         )
 
     @staticmethod

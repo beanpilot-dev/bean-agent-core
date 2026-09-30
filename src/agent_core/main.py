@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_core.agent import (
     PersonalFinanceAgent,
@@ -51,6 +51,11 @@ from agent_core.services.runtime import (
 )
 from agent_core.services.tool_ports import create_workflow_tool_dependencies
 from agent_core.services.types import LedgerConfig
+from agent_core.services.uploaded_files import (
+    UploadedFile,
+    decode_uploaded_files,
+    materialize_uploaded_files,
+)
 from agent_core.services.workspace import CachedWorkspaceManager, GitService
 
 # Load environment from project root (agent-core/).  .env.local overrides .env.
@@ -259,6 +264,7 @@ class ChatRequest(BaseModel):
     conversation: ChatConversationMeta = ChatConversationMeta()
     messages: list[dict] = []
     ledger: LedgerPayload | None = None
+    uploaded_files: list[dict[str, str]] = Field(default_factory=list)
 
 
 class StatsRequest(BaseModel):
@@ -413,6 +419,12 @@ async def agent_chat(req: ChatRequest):
     start_time = time.monotonic()
     workspace_path = f"/tmp/bean_workspace_{uuid.uuid4().hex[:12]}"
     try:
+        uploaded_files: list[UploadedFile] = decode_uploaded_files(req.uploaded_files)
+    except ValueError:
+        return _error_envelope(
+            "INVALID_ATTACHMENT", "Uploaded file could not be processed", 400
+        )
+    try:
         ledger_config = _ledger_config(req.ledger)
     except ValueError:
         return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
@@ -446,35 +458,41 @@ async def agent_chat(req: ChatRequest):
         history_snapshot_seen = False
 
         try:
-            async for chunk in _orchestrator.run(
-                workspace_path=workspace_path,
-                repo_url=req.repo.url,
-                token=req.repo.token,
-                agent_run_id=req.agent_run_id,
-                user_id=req.user_id,
-                request_id=req.request_id,
-                api_key=req.api_key,
-                model=req.model,
-                query=req.query,
-                conversation_meta={
-                    "id": req.conversation.id,
-                    "name": "agent-chat",
-                    "tag": req.conversation.tag,
-                    "account_whitelist": req.conversation.account_whitelist,
-                },
-                messages=req.messages,
-                ledger_config=ledger_config,
-            ):
-                chunk_count += 1
-                if chunk.get("type") == "history_snapshot":
-                    history_snapshot_seen = True
-                if chunk.get("type") == "fatal":
-                    terminal_status = "failed"
-                    terminal_code = str(chunk.get("code") or "INTERNAL_ERROR")
-                if chunk.get("type") == "history_snapshot":
-                    yield f"data: {json.dumps(chunk, default=str)}\n\n"
-                else:
-                    yield f"data: {json.dumps(chunk)}\n\n"
+            with materialize_uploaded_files(uploaded_files) as available_files:
+                query = req.query
+                if available_files:
+                    labels = ", ".join(available_files)
+                    query = f"{query}\n\n[Uploaded files available: {labels}]"
+                async for chunk in _orchestrator.run(
+                    workspace_path=workspace_path,
+                    repo_url=req.repo.url,
+                    token=req.repo.token,
+                    agent_run_id=req.agent_run_id,
+                    user_id=req.user_id,
+                    request_id=req.request_id,
+                    api_key=req.api_key,
+                    model=req.model,
+                    query=query,
+                    conversation_meta={
+                        "id": req.conversation.id,
+                        "name": "agent-chat",
+                        "tag": req.conversation.tag,
+                        "account_whitelist": req.conversation.account_whitelist,
+                        "uploaded_files": available_files,
+                    },
+                    messages=req.messages,
+                    ledger_config=ledger_config,
+                ):
+                    chunk_count += 1
+                    if chunk.get("type") == "history_snapshot":
+                        history_snapshot_seen = True
+                    if chunk.get("type") == "fatal":
+                        terminal_status = "failed"
+                        terminal_code = str(chunk.get("code") or "INTERNAL_ERROR")
+                    if chunk.get("type") == "history_snapshot":
+                        yield f"data: {json.dumps(chunk, default=str)}\n\n"
+                    else:
+                        yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error("agent-chat error error_type=%s", type(e).__name__)
