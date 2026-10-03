@@ -344,6 +344,22 @@ def _current_fact(
     return None
 
 
+def capture_semantic_read_set(
+    workspace: str,
+    facts: tuple[SemanticFact, ...],
+    ledger_config: LedgerConfig | None = None,
+) -> tuple[SemanticFact, ...]:
+    """Capture declared policy inputs against the original composite workspace."""
+    captured: list[SemanticFact] = []
+    for fact in facts:
+        current = _current_fact(workspace, fact, ledger_config)
+        if current is None:
+            raise ValueError("Composite semantic read set cannot be captured")
+        if current not in captured:
+            captured.append(current)
+    return tuple(captured)
+
+
 def semantic_facts_hold(
     workspace: str,
     facts: tuple[SemanticFact, ...],

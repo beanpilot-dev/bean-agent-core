@@ -69,10 +69,7 @@ def test_structured_transaction_renderer_identifies_malformed_units_path() -> No
         )
 
     assert captured.value.code == "INVALID_ARGUMENTS"
-    assert (
-        captured.value.details["path"]
-        == "operations[2].transaction.postings[0].units.number"
-    )
+    assert captured.value.details["path"] == "operations[2].transaction.postings[0].units.number"
     assert "Do not retry the unchanged payload" in captured.value.details["remediation"]
 
 
@@ -225,3 +222,169 @@ def test_prepare_change_set_returns_sealed_action_without_writing(ledger_workspa
     assert result["action"]["execution_spec"]["mutation_plan"]["preconditions"]
     assert result["review"]["validation"]["status"] == "validated"
     assert month_file.read_text() == before
+
+
+def _dependent_operations() -> list[dict]:
+    return [
+        {
+            "kind": "open_account",
+            "account_name": "Expenses:Audit",
+            "currency": "CNY",
+            "open_date": "2026-05-13",
+        },
+        {
+            "kind": "create_transaction",
+            "transaction": {
+                "date": "2026-05-13",
+                "narration": "Dependency test",
+                "postings": [
+                    {"account": "Expenses:Audit", "units": {"number": "10", "currency": "CNY"}},
+                    {"account": "Assets:Cash", "units": {"number": "-10", "currency": "CNY"}},
+                ],
+            },
+        },
+    ]
+
+
+def _initialize_runtime_repo(workspace: Path) -> None:
+    _git(["init"], workspace)
+    _git(["config", "user.email", "test@example.com"], workspace)
+    _git(["config", "user.name", "Test"], workspace)
+    _git(["add", "data"], workspace)
+    _git(["commit", "-m", "seed"], workspace)
+
+
+def test_ordered_account_dependency_seals_original_state_and_replays(
+    ledger_workspace: Path,
+) -> None:
+    from agent_core.services.beancount import Beancount
+    from agent_core.services.mutations.applier import MutationApplier
+    from agent_core.services.mutations.coordinator import MutationCoordinator
+    from agent_core.services.mutations.plans import MutationPlan
+
+    _initialize_runtime_repo(ledger_workspace)
+    before = {p: p.read_bytes() for p in (ledger_workspace / "data").rglob("*.beancount")}
+    result = PrivateLedgerRuntime(object())._prepare(
+        {"operations": _dependent_operations()},
+        str(ledger_workspace),
+        LedgerConfig(),
+    )
+    assert result["status"] == "approval_required"
+    assert {p: p.read_bytes() for p in before} == before
+    plan = MutationPlan.from_spec(result["action"]["execution_spec"]["mutation_plan"])
+    assert MutationCoordinator._preconditions_hold(str(ledger_workspace), plan, LedgerConfig())
+    MutationApplier().apply(str(ledger_workspace), plan, LedgerConfig())
+    assert Beancount.bean_check(str(ledger_workspace), LedgerConfig())[0]
+
+
+@pytest.mark.parametrize("restriction", ["reversed", "whitelist", "closed"])
+def test_ordered_dependency_preserves_policy_and_source_isolation(
+    ledger_workspace: Path, restriction: str
+) -> None:
+    _initialize_runtime_repo(ledger_workspace)
+    operations = _dependent_operations()
+    args: dict = {"operations": operations}
+    if restriction == "reversed":
+        operations.reverse()
+        expected = "ACCOUNT_WHITELIST"
+    elif restriction == "whitelist":
+        args["whitelist"] = ["Assets:Cash"]
+        expected = "CONVERSATION_SCOPE"
+    else:
+        operations.insert(
+            1,
+            {"kind": "close_account", "account_name": "Expenses:Audit", "close_date": "2026-05-13"},
+        )
+        expected = None  # Beancount must reject a posting after close.
+        operations[2]["transaction"]["date"] = "2026-05-14"
+    before = {p: p.read_bytes() for p in (ledger_workspace / "data").rglob("*.beancount")}
+    if expected:
+        with pytest.raises(RuntimeProtocolError) as captured:
+            PrivateLedgerRuntime(object())._prepare(args, str(ledger_workspace), LedgerConfig())
+        assert captured.value.code == expected
+    else:
+        result = PrivateLedgerRuntime(object())._prepare(
+            args, str(ledger_workspace), LedgerConfig()
+        )
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "VALIDATION_FAILED"
+    assert {p: p.read_bytes() for p in before} == before
+    assert set((ledger_workspace / "data").rglob("*.beancount")) == set(before)
+
+
+@pytest.mark.parametrize("earlier", ["delete", "duplicate_delete", "update", "create"])
+def test_original_transaction_bindings_survive_internal_replay(
+    ledger_workspace: Path, earlier: str
+) -> None:
+    from agent_core.services.beancount import Beancount
+    from agent_core.services.mutations.applier import MutationApplier
+    from agent_core.services.mutations.coordinator import MutationCoordinator
+    from agent_core.services.mutations.plans import MutationPlan
+    from agent_core.services.transaction_index import TransactionIndex
+
+    month = next((ledger_workspace / "data" / "agent_inc").glob("20*.beancount"))
+    first_text = month.read_text()
+    second_text = (
+        first_text
+        if earlier == "duplicate_delete"
+        else first_text.replace("2026-05-12", "2026-05-13").replace('"Lunch"', '"Second lunch"')
+    )
+    month.write_text(first_text + "\n" + second_text)
+    _initialize_runtime_repo(ledger_workspace)
+    index = TransactionIndex.build(str(ledger_workspace), LedgerConfig())
+    targets = [item for item in index.transactions if item.relative_path.endswith(month.name)]
+    first, second = targets
+    delete_second = {
+        "kind": "delete_transaction",
+        "transaction_ref": second.transaction_ref,
+        "revision_fingerprint": second.revision_fingerprint,
+        "reason": "Synthetic regression",
+    }
+    if earlier in {"delete", "duplicate_delete"}:
+        initial = {
+            **delete_second,
+            "transaction_ref": first.transaction_ref,
+            "revision_fingerprint": first.revision_fingerprint,
+        }
+    else:
+        transaction = {
+            "date": "2026-05-11",
+            "payee": "Regression",
+            "narration": "Earlier",
+            "postings": [
+                {"account": "Expenses:Food:Dining", "units": {"number": "85", "currency": "CNY"}},
+                {"account": "Assets:Cash", "units": {"number": "-85", "currency": "CNY"}},
+            ],
+        }
+        if earlier == "update":
+            transaction["tags"] = ["regression"]
+            transaction["postings"].extend(
+                [
+                    {
+                        "account": "Equity:Opening-Balances",
+                        "units": {"number": "0", "currency": "CNY"},
+                    },
+                    {"account": "Income:Salary", "units": {"number": "0", "currency": "CNY"}},
+                ]
+            )
+            initial = {
+                "kind": "update_transaction",
+                "transaction_ref": first.transaction_ref,
+                "revision_fingerprint": first.revision_fingerprint,
+                "transaction": transaction,
+            }
+        else:
+            initial = {"kind": "create_transaction", "transaction": transaction}
+    before = month.read_bytes()
+    result = PrivateLedgerRuntime(object())._prepare(
+        {"operations": [initial, delete_second]}, str(ledger_workspace), LedgerConfig()
+    )
+    assert result["status"] == "approval_required"
+    assert month.read_bytes() == before
+    plan = MutationPlan.from_spec(result["action"]["execution_spec"]["mutation_plan"])
+    assert MutationCoordinator._preconditions_hold(str(ledger_workspace), plan, LedgerConfig())
+    MutationApplier().apply(str(ledger_workspace), plan, LedgerConfig())
+    assert Beancount.bean_check(str(ledger_workspace), LedgerConfig())[0]
+    after = TransactionIndex.build(str(ledger_workspace), LedgerConfig())
+    remaining = [item for item in after.transactions if item.relative_path.endswith(month.name)]
+    assert len(remaining) == (0 if "delete" in earlier else 1 if earlier == "update" else 2)

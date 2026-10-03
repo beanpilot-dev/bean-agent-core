@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -22,11 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from .approvals.contracts import PendingActionService, digest_payload
 from .beancount import Beancount
 from .ledger_paths import sidecar_target_file
+from .mutations.applier import MutationApplier
 from .mutations.coordinator import MutationCoordinator
 from .mutations.executor import MutationExecutor
+from .mutations.facts import capture_semantic_read_set
 from .mutations.handlers.contracts import PreparedMutation
 from .mutations.handlers.registry import MutationPreparationHandlerRegistry
 from .mutations.preparation import MutationPreparationService
+from .mutations.sidecar import FilesystemSidecarMutationStore
 from .mutations.validator import PlanValidation
 from .operations.lifecycle import (
     PreflightMode,
@@ -37,6 +42,7 @@ from .operations.lifecycle import (
     WorkspaceSetupRequiredError,
 )
 from .queries import LedgerQueryService
+from .runtime_references import RuntimeReferenceError, RuntimeTransactionBindings
 from .types import InvariantViolation, LedgerConfig, ValidationFailed
 from .workspace import GitService
 
@@ -292,9 +298,7 @@ def _render_transaction(value: object, path: str = "transaction") -> str:
         or len(tags) > 20
         or len(links) > 20
     ):
-        raise _invalid_argument(
-            "transaction tags and links are bounded arrays", f"{path}.tags"
-        )
+        raise _invalid_argument("transaction tags and links are bounded arrays", f"{path}.tags")
     for tag in tags:
         if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_\-/]{1,80}", tag):
             raise _invalid_argument("transaction tag is invalid", f"{path}.tags")
@@ -304,9 +308,7 @@ def _render_transaction(value: object, path: str = "transaction") -> str:
             raise _invalid_argument("transaction link is invalid", f"{path}.links")
         lines[0] += f" ^{link}"
     if value.get("meta") not in (None, {}):
-        raise _invalid_argument(
-            "transaction metadata is not supported yet", f"{path}.meta"
-        )
+        raise _invalid_argument("transaction metadata is not supported yet", f"{path}.meta")
     return "\n".join(lines)
 
 
@@ -331,7 +333,9 @@ class PrivateLedgerRuntime:
             except WorkspaceSetupRequiredError:
                 return _runtime_error("LEDGER_SETUP_REQUIRED", "ledger sidecar setup is incomplete")
             except WorkspaceCacheBusyError:
-                return _runtime_error("RUNTIME_BUSY", "ledger runtime workspace is busy", retryable=True)
+                return _runtime_error(
+                    "RUNTIME_BUSY", "ledger runtime workspace is busy", retryable=True
+                )
             except WorkspaceGitError as exc:
                 return _runtime_error(exc.code, "repository is unavailable", retryable=True)
         try:
@@ -476,36 +480,59 @@ class PrivateLedgerRuntime:
         if not isinstance(canonical, dict):
             raise RuntimeProtocolError("INVALID_SEALED_ACTION", "sealed action payload is invalid")
         if envelope.get("owner_user_id") != request.user_id or envelope.get("branch") != branch:
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action binding does not match request")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH", "sealed action binding does not match request"
+            )
         base_head = envelope.get("base_head_sha")
         if not isinstance(base_head, str) or request.expected_head_sha != base_head:
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action base revision does not match request")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH", "sealed action base revision does not match request"
+            )
         payload_digest = envelope.get("payload_digest")
-        if not isinstance(payload_digest, str) or payload_digest != "sha256:" + digest_payload(canonical):
-            raise RuntimeProtocolError("PROPOSAL_INTEGRITY_FAILED", "sealed action digest does not match")
+        if not isinstance(payload_digest, str) or payload_digest != "sha256:" + digest_payload(
+            canonical
+        ):
+            raise RuntimeProtocolError(
+                "PROPOSAL_INTEGRITY_FAILED", "sealed action digest does not match"
+            )
         from .approvals.contracts import PendingActionService
 
         integrity = PendingActionService.verify_pending_action(canonical)
         if integrity is not None:
-            raise RuntimeProtocolError("PROPOSAL_INTEGRITY_FAILED", "sealed action approval contract is invalid")
+            raise RuntimeProtocolError(
+                "PROPOSAL_INTEGRITY_FAILED", "sealed action approval contract is invalid"
+            )
         execution_spec = canonical.get("execution_spec")
-        if not isinstance(execution_spec, dict) or not isinstance(execution_spec.get("mutation_plan"), dict):
+        if not isinstance(execution_spec, dict) or not isinstance(
+            execution_spec.get("mutation_plan"), dict
+        ):
             raise RuntimeProtocolError("INVALID_SEALED_ACTION", "sealed mutation plan is missing")
         binding = execution_spec.get("runtime_binding")
         if not isinstance(binding, dict):
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action runtime binding is missing")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH", "sealed action runtime binding is missing"
+            )
         if binding.get("owner") != request.user_id:
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action owner does not match request")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH", "sealed action owner does not match request"
+            )
         if binding.get("branch") != branch or binding.get("base_head_sha") != base_head:
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action target does not match request")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH", "sealed action target does not match request"
+            )
         if binding.get("ledger") != asdict(config):
-            raise RuntimeProtocolError("PROPOSAL_BINDING_MISMATCH", "sealed action ledger configuration does not match request")
+            raise RuntimeProtocolError(
+                "PROPOSAL_BINDING_MISMATCH",
+                "sealed action ledger configuration does not match request",
+            )
         try:
             from .mutations.plans import MutationPlan
 
             plan = MutationPlan.from_spec(execution_spec["mutation_plan"])
         except (TypeError, ValueError) as exc:
-            raise RuntimeProtocolError("INVALID_SEALED_ACTION", "sealed mutation plan is invalid") from exc
+            raise RuntimeProtocolError(
+                "INVALID_SEALED_ACTION", "sealed mutation plan is invalid"
+            ) from exc
         with self._lifecycle.open(
             repo_url=request.repo.url,
             token=request.repo.token,
@@ -517,7 +544,11 @@ class PrivateLedgerRuntime:
         ) as prepared:
             current_head = _head_sha(prepared.path)
             if current_head != base_head:
-                return _runtime_error("CONCURRENT_REVISION", "repository branch changed since approval", retryable=False)
+                return _runtime_error(
+                    "CONCURRENT_REVISION",
+                    "repository branch changed since approval",
+                    retryable=False,
+                )
             touched, publication, validation_error = MutationExecutor().apply_and_publish(
                 prepared.path,
                 plan,
@@ -528,11 +559,21 @@ class PrivateLedgerRuntime:
             )
             if validation_error:
                 return _runtime_error("LEDGER_INVALID", "approved mutation failed final validation")
-            if not publication.get("ok") or str(publication.get("push") or "").startswith("PUSH_FAILED"):
-                return _runtime_error("PUBLICATION_CONFLICT", "approved mutation could not be published", retryable=True)
+            if not publication.get("ok") or str(publication.get("push") or "").startswith(
+                "PUSH_FAILED"
+            ):
+                return _runtime_error(
+                    "PUBLICATION_CONFLICT",
+                    "approved mutation could not be published",
+                    retryable=True,
+                )
             commit_sha = publication.get("commit_sha")
             if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
-                return _runtime_error("PUBLICATION_UNCONFIRMED", "publication did not return a commit receipt", retryable=True)
+                return _runtime_error(
+                    "PUBLICATION_UNCONFIRMED",
+                    "publication did not return a commit receipt",
+                    retryable=True,
+                )
             return {
                 "status": "ok",
                 "receipt": {
@@ -623,23 +664,65 @@ class PrivateLedgerRuntime:
         ):
             raise RuntimeProtocolError("INVALID_ARGUMENTS", "whitelist is invalid")
         prepared_items: list[PreparedMutation] = []
-        for operation_index, operation in enumerate(operations):
-            prepared_items.append(
-                self._build_operation(
-                    operation,
-                    workspace,
-                    config,
-                    whitelist,
-                    operation_index=operation_index,
-                )
+        store = FilesystemSidecarMutationStore()
+        applier = MutationApplier(store)
+        bindings = (
+            RuntimeTransactionBindings(workspace, config)
+            if any(
+                isinstance(item, dict)
+                and item.get("kind") in {"update_transaction", "delete_transaction"}
+                for item in operations
             )
+            else None
+        )
+        with tempfile.TemporaryDirectory(prefix="beanpilot-runtime-plan-") as tmp:
+            draft_workspace = os.path.join(tmp, "workspace")
+            store.copy_workspace(workspace, draft_workspace)
+            try:
+                for operation_index, operation in enumerate(operations):
+                    if (
+                        bindings
+                        and isinstance(operation, dict)
+                        and operation.get("kind") in {"update_transaction", "delete_transaction"}
+                    ):
+                        try:
+                            operation = bindings.rebase(operation, draft_workspace)
+                        except RuntimeReferenceError as exc:
+                            raise RuntimeProtocolError(
+                                exc.code,
+                                "structured transaction binding is no longer valid",
+                                details={
+                                    "path": f"operations[{operation_index}]",
+                                    "operation_index": operation_index,
+                                },
+                            ) from exc
+                    prepared = self._build_operation(
+                        operation,
+                        draft_workspace,
+                        config,
+                        whitelist,
+                        operation_index=operation_index,
+                    )
+                    prepared_items.append(prepared)
+                    if bindings:
+                        from dataclasses import replace
+
+                        prepared_items[-1] = replace(
+                            prepared, plan=bindings.original_facts(prepared.plan)
+                        )
+                        bindings.replay(draft_workspace, prepared.plan, applier)
+                    else:
+                        applier.apply(draft_workspace, prepared.plan, config)
+                    Beancount.invalidate_workspace(draft_workspace)
+            finally:
+                Beancount.invalidate_workspace(draft_workspace)
         plan_operations = tuple(
             item for prepared in prepared_items for item in prepared.plan.operations
         )
-        semantic_facts = tuple(
-            dict.fromkeys(
-                fact for prepared in prepared_items for fact in prepared.plan.semantic_facts
-            )
+        semantic_facts = capture_semantic_read_set(
+            workspace,
+            tuple(fact for prepared in prepared_items for fact in prepared.plan.semantic_facts),
+            config,
         )
         from .mutations.plans import MutationPlan
 
@@ -868,7 +951,9 @@ class PrivateLedgerRuntime:
                 )
         prepared = self._registry.get(handler_key).build(workspace, config, **kwargs)
         if isinstance(prepared, (InvariantViolation, ValidationFailed)):
-            code = prepared.invariant if isinstance(prepared, InvariantViolation) else prepared.status
+            code = (
+                prepared.invariant if isinstance(prepared, InvariantViolation) else prepared.status
+            )
             raise RuntimeProtocolError(
                 code,
                 "structured operation failed deterministic policy",
