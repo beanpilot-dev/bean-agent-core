@@ -38,14 +38,21 @@ SYSTEM_PROMPT = open(_PROMPT_FILE).read()
 
 
 def _serialize_history(
-    messages, *, omit_attachment_tool_output: bool = False
+    messages,
+    *,
+    omit_attachment_tool_output: bool = False,
+    transient_message=None,
+    visible_query: str = "",
 ) -> list[dict]:
     role_map = {"human": "user", "ai": "assistant", "system": "system"}
     omitted_tools = {"ledger_ingest_file", "ledger_run_python"}
     return [
         {
             "role": role_map.get(getattr(m, "type", "user"), "user"),
-            "content": getattr(m, "content", ""),
+            "content": visible_query
+            if transient_message is not None
+            and (m is transient_message or getattr(m, "id", None) == transient_message.id)
+            else getattr(m, "content", ""),
         }
         for m in messages
         if not (
@@ -97,9 +104,7 @@ def supports_stream_usage(base_url: str | None) -> bool:
     if not base_url:
         return True
     hostname = urlparse(base_url).hostname
-    return hostname == "api.deepseek.com" or bool(
-        hostname and hostname.endswith(".deepseek.com")
-    )
+    return hostname == "api.deepseek.com" or bool(hostname and hostname.endswith(".deepseek.com"))
 
 
 def message_token_count(message: Any) -> int:
@@ -231,8 +236,7 @@ def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
             grouped_accounts = [
                 account
                 for account in grouped_accounts
-                if isinstance(account, str)
-                and account.split(":", 1)[0] in {"Income", "Expenses"}
+                if isinstance(account, str) and account.split(":", 1)[0] in {"Income", "Expenses"}
             ]
         if not grouped_accounts and ledger_context.get("accounts_complete") is False:
             grouped_accounts = None
@@ -245,9 +249,11 @@ def _format_ledger_context(ledger_context: dict[str, Any] | None) -> str:
 
     if not compact_context:
         return ""
-    return "\nLEDGER CONTEXT:\n" + json.dumps(
-        compact_context, ensure_ascii=False, separators=(",", ":")
-    ) + "\n"
+    return (
+        "\nLEDGER CONTEXT:\n"
+        + json.dumps(compact_context, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
 
 
 def _build_single_loop_prompt(
@@ -471,7 +477,12 @@ class PersonalFinanceAgent:
                     preferred_language=preferred_language,
                 )
             )
-            messages = [system] + prior + [HumanMessage(content=query)]
+            blocks = conversation_meta.get("attachment_blocks", []) if conversation_meta else []
+            user_message = HumanMessage(
+                content=[{"type": "text", "text": query}, *blocks] if blocks else query,
+                id="current-attachment-input",
+            )
+            messages = [system] + prior + [user_message]
 
             if activity_emitter:
                 yield activity_emitter.emit(
@@ -485,7 +496,7 @@ class PersonalFinanceAgent:
                 )
 
             with tracing.trace(
-                task="agent-turn", input=query, **trace_metadata
+                task="agent-turn", input=None if blocks else query, **trace_metadata
             ) as handler:
                 activity_queue: asyncio.Queue[dict[str, Any]] | None = (
                     asyncio.Queue() if activity_emitter else None
@@ -493,7 +504,7 @@ class PersonalFinanceAgent:
                 content_stream_queue: asyncio.Queue[str] = asyncio.Queue()
                 callbacks = []
                 has_uploaded_files = bool(
-                    conversation_meta and conversation_meta.get("uploaded_files")
+                    conversation_meta and conversation_meta.get("attachment_blocks")
                 )
                 if tracing.enabled and not has_uploaded_files:
                     callbacks.append(handler)
@@ -505,11 +516,6 @@ class PersonalFinanceAgent:
                         "single_loop_llm": base_llm.bind_tools(MODEL_TOOLS),
                         "router_system_prompt": SYSTEM_PROMPT,
                         "conversation_context": conv_ctx,
-                        "uploaded_files": (
-                            conversation_meta.get("uploaded_files", {})
-                            if conversation_meta
-                            else {}
-                        ),
                         "workspace": workspace,
                         "repo_url": repo_url,
                         "token": token,
@@ -624,6 +630,8 @@ class PersonalFinanceAgent:
             updated_history = _serialize_history(
                 result["messages"][1:],
                 omit_attachment_tool_output=has_uploaded_files,
+                transient_message=user_message,
+                visible_query=query,
             )
 
             trace_id = tracing.get_trace_id()
@@ -657,11 +665,12 @@ class PersonalFinanceAgent:
             }
         except Exception as e:
             duration_ms = int((time.monotonic() - start_time) * 1000)
-            logger.exception(
-                "Agent error conversation_id=%s model=%s duration_ms=%d",
+            logger.error(
+                "Agent error conversation_id=%s model=%s duration_ms=%d error_type=%s",
                 conversation_id,
                 model,
                 duration_ms,
+                type(e).__name__,
             )
             if activity_emitter:
                 yield activity_emitter.emit(
@@ -687,7 +696,7 @@ class PersonalFinanceAgent:
                     else _serialize_history(
                         prior,
                         omit_attachment_tool_output=bool(
-                            conversation_meta and conversation_meta.get("uploaded_files")
+                            conversation_meta and conversation_meta.get("attachment_blocks")
                         ),
                     )
                 ),

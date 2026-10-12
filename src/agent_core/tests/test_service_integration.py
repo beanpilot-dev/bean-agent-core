@@ -2,7 +2,6 @@
 
 import base64
 import json
-import os
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -35,13 +34,11 @@ async def test_chat_attachments_are_request_scoped_and_cleanup_after_stream(
 
     class CapturingOrchestrator:
         async def run(self, **kwargs):
-            available = kwargs["conversation_meta"]["uploaded_files"]
-            alias, path = next(iter(available.items()))
-            captured["path"] = path
-            captured["alias"] = alias
-            assert Path(path).read_bytes() == b"date,amount\n2026-09-01,10.00\n"
-            assert alias in kwargs["query"]
-            assert path not in kwargs["query"]
+            blocks = kwargs["conversation_meta"]["attachment_blocks"]
+            assert blocks[0]["type"] == "text"
+            assert "date,amount\n2026-09-01,10.00\n" in blocks[0]["text"]
+            assert kwargs["query"] == "Read the attached synthetic text."
+            captured["alias"] = "attachment-0.txt"
             yield {
                 "type": "history_snapshot",
                 "messages": [{"role": "assistant", "content": "Done"}],
@@ -55,10 +52,10 @@ async def test_chat_attachments_are_request_scoped_and_cleanup_after_stream(
             request_id="request",
             api_key="key",
             model="scripted",
-            query="Read the attached synthetic CSV.",
+            query="Read the attached synthetic text.",
             conversation=main.ChatConversationMeta(),
             uploaded_files=[{
-                "filename": "generated-upload.csv",
+                "filename": "generated-upload.txt",
                 "content_base64": base64.b64encode(
                     b"date,amount\n2026-09-01,10.00\n"
                 ).decode(),
@@ -72,9 +69,8 @@ async def test_chat_attachments_are_request_scoped_and_cleanup_after_stream(
     body = "".join(chunks)
 
     assert response.status_code == 200
-    assert captured["alias"] == "attachment-0.csv"
-    assert captured["path"] not in body
-    assert not os.path.exists(captured["path"])
+    assert captured["alias"] == "attachment-0.txt"
+    assert "date,amount" not in body
 
 
 @pytest.mark.asyncio

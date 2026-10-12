@@ -9,17 +9,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from .approvals.gateway import ToolExecutionGateway
-from .ingestion import IngestionService
 from .ledger import LedgerService
 from .prices import PriceService
 from .queries import LedgerQueryService
 from .types import (
     AccountSearchResult,
-    FileReadResult,
     LedgerConfig,
     PriceResult,
     QueryResult,
-    SandboxResult,
     ServiceResult,
 )
 
@@ -70,20 +67,6 @@ class QueryToolPort(Protocol):
         bql: str,
         ledger_config: LedgerConfig | None = None,
     ) -> QueryResult: ...
-
-
-class IngestionToolPort(Protocol):
-    """Uploaded-file and sandbox operations exposed to workflow tools."""
-
-    def read_file(self, file_path: str) -> FileReadResult: ...
-
-    def run_python(
-        self,
-        code: str,
-        input_files: list[str] | None = None,
-        stage: bool = False,
-        stage_label: str = "import",
-    ) -> SandboxResult: ...
 
 
 class PriceToolPort(Protocol):
@@ -207,7 +190,6 @@ class WorkflowToolDependencies:
     """Request-scoped workflow dependency bundle."""
 
     queries: QueryToolPort
-    ingestion: IngestionToolPort
     prices: PriceToolPort
     mutations: MutationToolPort
 
@@ -287,7 +269,6 @@ def create_workflow_tool_dependencies() -> WorkflowToolDependencies:
     ledger = LedgerService()
     return WorkflowToolDependencies(
         queries=ServiceQueryToolAdapter(),
-        ingestion=IngestionService(),
         prices=PriceService(),
         mutations=ToolExecutionGateway(ledger),
     )

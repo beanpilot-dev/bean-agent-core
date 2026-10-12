@@ -515,29 +515,23 @@ def bulk_commit_transactions(
     confirmed=False: validates all accounts, returns PREVIEW with count + first 5 transactions.
     confirmed=True:  appends all, bean-checks (auto-reverts on failure), commits, pushes.
 
-    Supply the transaction content via exactly one of:
-      transactions_text  — the raw beancount text (for small batches)
-      transactions_file  — path to a /tmp staging file from ledger_run_python(stage=True)
+    Supply inline transactions_text. Legacy file inputs are rejected without I/O.
 
     Returns a JSON string.
     """
-    # Resolve content: file takes priority when both supplied; require one of the two
     if transactions_file:
-        try:
-            with open(transactions_file, encoding="utf-8") as f:
-                transactions_text = f.read()
-        except OSError as e:
-            return json.dumps({
-                "status": "DEPENDENCY_UNAVAILABLE",
-                "error": f"Cannot read staging file {transactions_file}: {e}",
-                "retryable": False,
-            })
-    elif not transactions_text:
+        return json.dumps({
+            "status": "INVARIANT_VIOLATION",
+            "invariant": "UNSUPPORTED_FILE_INPUT",
+            "severity": "HARD",
+            "remediation": "Provide inline transactions_text.",
+        })
+    if not transactions_text:
         return json.dumps({
             "status": "INVARIANT_VIOLATION",
             "invariant": "MISSING_INPUT",
             "severity": "HARD",
-            "remediation": "Provide either transactions_text or transactions_file.",
+            "remediation": "Provide transactions_text.",
         })
 
     target = get_agent_target_file(workspace)
@@ -614,13 +608,6 @@ def bulk_commit_transactions(
     git = ws.commit_and_push(workspace, commit_message, token=github_token)
     if not git["ok"]:
         return _git_error_response(git)
-
-    # Clean up staging file if one was used
-    if transactions_file and os.path.exists(transactions_file):
-        try:
-            os.remove(transactions_file)
-        except OSError:
-            pass  # non-fatal; /tmp will be cleaned by the OS eventually
 
     return json.dumps({
         "status": "SUCCESS",

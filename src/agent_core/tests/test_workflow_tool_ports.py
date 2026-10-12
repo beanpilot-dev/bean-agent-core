@@ -5,10 +5,8 @@ from pathlib import Path
 from agent_core.services import WorkflowToolDependencies
 from agent_core.services.types import (
     AccountSearchResult,
-    FileReadResult,
     PriceResult,
     QueryResult,
-    SandboxResult,
     ToolCompleted,
 )
 from agent_core.workflow.tools import (
@@ -17,7 +15,6 @@ from agent_core.workflow.tools import (
     tool_find_accounts,
     tool_find_transactions,
     tool_get_transaction,
-    tool_ingest_file,
     tool_ledger_calculate_balance_adjustment,
     tool_ledger_import_transactions,
     tool_ledger_open_account,
@@ -28,7 +25,6 @@ from agent_core.workflow.tools import (
     tool_ledger_prepare_transaction_update,
     tool_market_fetch_price,
     tool_query,
-    tool_run_python,
 )
 
 
@@ -79,18 +75,6 @@ class FakeQueries:
 
     def query_bql(self, workspace, bql, ledger_config=None):
         return QueryResult(status="SUCCESS", bql=bql)
-
-
-class FakeIngestion:
-    def __init__(self):
-        self.last_input_files = None
-
-    def read_file(self, file_path):
-        return FileReadResult(status="SUCCESS", file_path=file_path, content="date,amount")
-
-    def run_python(self, code, input_files=None, stage=False, stage_label="import"):
-        self.last_input_files = input_files
-        return SandboxResult(status="SUCCESS", stdout=f"ran:{stage_label}", exit_code=0)
 
 
 class FakePrices:
@@ -236,10 +220,8 @@ def _config() -> dict:
     return {
         "configurable": {
             "workspace": "/isolated/request",
-            "uploaded_files": {"attachment-0.csv": "/tmp/upload.csv"},
             "tool_dependencies": WorkflowToolDependencies(
                 queries=FakeQueries(),
-                ingestion=FakeIngestion(),
                 prices=FakePrices(),
                 mutations=FakeMutations(),
             ),
@@ -253,13 +235,6 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     balance = json.loads(tool_account_balance.func("Assets:Cash", config=config))
     accounts = json.loads(tool_find_accounts.func("cash", config=config))
     price = json.loads(tool_market_fetch_price.func("USD/CNY", config=config))
-    file_result = json.loads(tool_ingest_file.func("attachment-0.csv", config=config))
-    unavailable_file = json.loads(tool_ingest_file.func("/etc/passwd", config=config))
-    sandbox = json.loads(tool_run_python.func("print('ok')", config=config))
-    ingestion = config["configurable"]["tool_dependencies"].ingestion
-    uploaded_sandbox = json.loads(
-        tool_run_python.func("print('ok')", ["attachment-0.csv"], config=config)
-    )
     mutation = json.loads(
         tool_ledger_prepare_change_set.func(
             [{"type": "commit_transaction", "transaction_text": "txn"}],
@@ -283,13 +258,6 @@ def test_workflow_tools_use_injected_fake_ports() -> None:
     assert balance["balance"] == "42 CNY"
     assert accounts["candidates"][0]["account_name"] == "Assets:Cash"
     assert price["price"] == 123
-    assert file_result["content"] == "date,amount"
-    assert file_result["file_path"] == "attachment-0.csv"
-    assert unavailable_file["status"] == "ERROR"
-    assert "not available" in unavailable_file["error"]
-    assert sandbox["stdout"] == "ran:import"
-    assert uploaded_sandbox["stdout"] == "ran:import"
-    assert ingestion.last_input_files == ["/tmp/upload.csv"]
     assert mutation["result"]["operation_count"] == 1
     assert prepared_price["tool_name"] == "ledger_prepare_price"
 
@@ -319,7 +287,7 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
         ),
         json.loads(
             tool_ledger_import_transactions.func(
-                "", "bulk", "/tmp/staged.beancount", config=config
+                "inline transactions", "bulk", config=config
             )
         ),
         json.loads(
@@ -361,12 +329,12 @@ def test_every_migrated_tool_is_wired_to_its_port() -> None:
     assert all(result["status"] in {"SUCCESS", "completed"} for result in results)
     assert results[0]["rows"] == [{"account": "Assets:Cash"}]
     assert results[3]["result"]["transaction_ref"] == "txn_v1_ref"
-    assert results[5]["result"]["transactions_file"] == "/tmp/staged.beancount"
+    assert results[5]["result"]["transactions_file"] is None
     assert results[7]["result"]["operation_count"] == 1
 
 
 def test_injected_dependencies_are_hidden_from_model_schemas() -> None:
-    for workflow_tool in [tool_market_fetch_price, tool_ingest_file, tool_run_python]:
+    for workflow_tool in [tool_market_fetch_price, tool_ledger_import_transactions]:
         assert "config" not in workflow_tool.args_schema.model_json_schema()["properties"]
 
 

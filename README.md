@@ -132,7 +132,7 @@ graph TB
 | **Planner** | Task decomposer | Structured-output LLM → `PlannerOutput` | None (classification only) |
 | **Clerk** | Data entry specialist | Clerk LLM + transaction tools | `ledger_commit_transaction`, `ledger_prepare_transaction_update`, `ledger_prepare_transaction_delete`, `ledger_open_account`, `ledger_import_transactions` |
 | **Analyst** | Financial analyst | Analyst LLM + ledger read and market-data tools | `ledger_find_accounts`, `ledger_account_balance`, `ledger_find_transactions`, `ledger_get_transaction`, `ledger_query`, `market_fetch_price` |
-| **Engineer** | Data pipeline engineer | Engineer LLM + ingestion tools | `ledger_ingest_file`, `ledger_run_python`, `preview_bulk`, `confirm_bulk` |
+| **Attachment inputs** | Text/image understanding | Direct multimodal model input | Inline `ledger_import_transactions`; explicit approval required |
 | **QA** | Onboarding assistant | QA LLM | None (chitchat only) |
 | **Merge** | Control-flow router | Deterministic (no LLM) | Pops next sub-task or routes to synthesizer |
 | **Synthesizer** | Response composer | Synthesizer LLM | None (weaves pillar outputs into one reply) |

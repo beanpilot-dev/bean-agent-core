@@ -25,23 +25,19 @@ class BulkCommitPreparationHandler:
         whitelist = kwargs.get("whitelist")
         if whitelist is not None and not isinstance(whitelist, list):
             whitelist = None
-        if isinstance(transactions_file, str) and transactions_file:
-            try:
-                with open(transactions_file, encoding="utf-8") as handle:
-                    transactions_text = handle.read()
-            except OSError as exc:
-                return InvariantViolation(
-                    invariant="STAGING_ERROR",
-                    severity="HARD",
-                    provided=transactions_file,
-                    remediation=f"Cannot read staging file: {exc}",
-                )
-        elif not transactions_text:
+        if transactions_file:
+            return InvariantViolation(
+                invariant="UNSUPPORTED_FILE_INPUT",
+                severity="HARD",
+                provided=None,
+                remediation="Provide inline transactions_text.",
+            )
+        if not transactions_text:
             return InvariantViolation(
                 invariant="MISSING_INPUT",
                 severity="HARD",
                 provided=None,
-                remediation="Provide transactions_text or transactions_file.",
+                remediation="Provide transactions_text.",
             )
         violation = validate_posting_accounts(
             workspace, transactions_text, whitelist, ledger_config

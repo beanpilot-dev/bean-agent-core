@@ -350,29 +350,3 @@ class PriceResult(ServiceResult):
     exchange: str | None = None
     error_code: str | None = None
     error_message: str | None = None
-
-
-# ── Ingestion ─────────────────────────────────────────────────────────────────
-
-@dataclass
-class FileReadResult(ServiceResult):
-    """File read result."""
-    status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
-    file_path: str = ""
-    size_bytes: int = 0
-    lines: int = 0
-    content: str = ""
-    error: str | None = None
-
-
-@dataclass
-class SandboxResult(ServiceResult):
-    """Python sandbox execution result."""
-    status: Literal["SUCCESS", "ERROR"] = "SUCCESS"
-    exit_code: int = 0
-    stdout: str = ""
-    stderr: str = ""
-    staging_file: str | None = None
-    transaction_count: int = 0
-    sample: str = ""
-    error: str | None = None

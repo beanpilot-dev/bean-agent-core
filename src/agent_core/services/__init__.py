@@ -4,7 +4,6 @@ The service layer contains all operations that do not require an LLM:
   - Git clone/pull/push (GitService)
   - Beancount read/write business logic (LedgerService)
   - Preflight validation (PreflightService)
-  - File ingestion and sandboxed Python (IngestionService)
   - External price fetching (PriceService)
   - LLM orchestration and streaming (AgentOrchestrator)
   - Typed return values (Preview, CommitResult, InvariantViolation, etc.)
@@ -18,14 +17,12 @@ The tool layer (agent.py) wraps services for LLM consumption.
 
 from .approvals.contracts import PendingActionService, digest_payload
 from .approvals.gateway import ToolExecutionGateway
-from .ingestion import IngestionService
 from .ledger import LedgerService
 from .orchestrator import AgentOrchestrator
 from .preflight import PreflightService
 from .prices import PriceService
 from .queries import LedgerQueryService
 from .tool_ports import (
-    IngestionToolPort,
     MutationToolPort,
     PriceToolPort,
     QueryToolPort,
@@ -47,7 +44,6 @@ from .types import (
     ApprovalRequired,
     CommitResult,
     DependencyUnavailable,
-    FileReadResult,
     IntegrityFailed,
     InvariantViolation,
     LedgerConfig,
@@ -56,7 +52,6 @@ from .types import (
     Preview,
     PriceResult,
     QueryResult,
-    SandboxResult,
     ServiceResult,
     ToolApprovalRequired,
     ToolCompleted,
@@ -69,7 +64,6 @@ __all__ = [
     # Services
     "AgentOrchestrator",
     "GitService",
-    "IngestionService",
     "LedgerService",
     "LedgerQueryService",
     "IndexedTransaction",
@@ -80,7 +74,6 @@ __all__ = [
     "PreflightService",
     "PriceService",
     "ToolExecutionGateway",
-    "IngestionToolPort",
     "MutationToolPort",
     "PriceToolPort",
     "QueryToolPort",
@@ -95,7 +88,6 @@ __all__ = [
     "CommitResult",
     "DependencyUnavailable",
     "DEFAULT_LEDGER_CONFIG",
-    "FileReadResult",
     "IntegrityFailed",
     "InvariantViolation",
     "LedgerConfig",
@@ -104,7 +96,6 @@ __all__ = [
     "Preview",
     "PriceResult",
     "QueryResult",
-    "SandboxResult",
     "ServiceResult",
     "ToolApprovalRequired",
     "ToolCompleted",

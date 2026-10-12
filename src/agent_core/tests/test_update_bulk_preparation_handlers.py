@@ -14,16 +14,8 @@ from agent_core.services.queries import LedgerQueryService
 from agent_core.services.transaction_index import mint_transaction_ref
 from agent_core.services.types import InvariantViolation, LedgerConfig, PendingAction, Preview
 
-REPLACEMENT = (
-    '2026-05-12 * "Lunch"\n'
-    "  Expenses:Food:Dining  95 CNY\n"
-    "  Assets:Cash          -95 CNY"
-)
-BULK = (
-    '2026-06-15 * "Dinner"\n'
-    "  Expenses:Food:Dining  100 CNY\n"
-    "  Assets:Cash          -100 CNY"
-)
+REPLACEMENT = '2026-05-12 * "Lunch"\n  Expenses:Food:Dining  95 CNY\n  Assets:Cash          -95 CNY'
+BULK = '2026-06-15 * "Dinner"\n  Expenses:Food:Dining  100 CNY\n  Assets:Cash          -100 CNY'
 MULTI_BULK = (
     '2026-06-15 * "Dinner"\n'
     "  Expenses:Food:Dining  100 CNY\n"
@@ -44,8 +36,7 @@ def _custom_workspace(tmp_path: Path) -> tuple[Path, LedgerConfig]:
         sidecar_write_dir="books/agent_sidecar",
     )
     (tmp_path / "books" / "root.beancount").write_text(
-        'option "operating_currency" "CNY"\n'
-        'include "agent_sidecar/main.beancount"\n'
+        'option "operating_currency" "CNY"\ninclude "agent_sidecar/main.beancount"\n'
     )
     (sidecar / "main.beancount").write_text(
         "2020-01-01 open Assets:Cash CNY\n"
@@ -53,9 +44,7 @@ def _custom_workspace(tmp_path: Path) -> tuple[Path, LedgerConfig]:
         f'include "{month}.beancount"\n'
     )
     (sidecar / f"{month}.beancount").write_text(
-        '2026-05-12 * "Lunch"\n'
-        "  Expenses:Food:Dining  85 CNY\n"
-        "  Assets:Cash          -85 CNY\n"
+        '2026-05-12 * "Lunch"\n  Expenses:Food:Dining  85 CNY\n  Assets:Cash          -85 CNY\n'
     )
     return tmp_path, config
 
@@ -64,9 +53,12 @@ def _detail(ledger_workspace: Path, narration: str = "Lunch") -> dict:
     found = LedgerQueryService.find_transactions(
         str(ledger_workspace), narration_contains=narration
     )
-    return LedgerQueryService.get_transaction(
-        str(ledger_workspace), found.rows[0]["transaction_ref"]
-    ).transaction or {}
+    return (
+        LedgerQueryService.get_transaction(
+            str(ledger_workspace), found.rows[0]["transaction_ref"]
+        ).transaction
+        or {}
+    )
 
 
 def test_registry_exposes_all_preparation_keys() -> None:
@@ -89,10 +81,7 @@ def test_registry_exposes_all_preparation_keys() -> None:
 def test_update_handler_owns_lookup_policy_plan_and_presentation(
     ledger_workspace: Path,
 ) -> None:
-    before = {
-        path: path.read_text()
-        for path in (ledger_workspace / "data").rglob("*.beancount")
-    }
+    before = {path: path.read_text() for path in (ledger_workspace / "data").rglob("*.beancount")}
 
     detail = _detail(ledger_workspace)
     prepared = TransactionUpdatePreparationHandler().build(
@@ -130,8 +119,7 @@ def test_update_handler_owns_lookup_policy_plan_and_presentation(
         "Expenses:Food:Dining",
     }
     assert {
-        path: path.read_text()
-        for path in (ledger_workspace / "data").rglob("*.beancount")
+        path: path.read_text() for path in (ledger_workspace / "data").rglob("*.beancount")
     } == before
 
 
@@ -205,9 +193,12 @@ def test_duplicate_narrations_are_selected_by_reference(
     matches = LedgerQueryService.find_transactions(
         str(ledger_workspace), narration_contains="Lunch"
     )
-    detail = LedgerQueryService.get_transaction(
-        str(ledger_workspace), matches.rows[0]["transaction_ref"]
-    ).transaction or {}
+    detail = (
+        LedgerQueryService.get_transaction(
+            str(ledger_workspace), matches.rows[0]["transaction_ref"]
+        ).transaction
+        or {}
+    )
     result = TransactionUpdatePreparationHandler().build(
         str(ledger_workspace),
         transaction_ref=detail["transaction_ref"],
@@ -291,21 +282,19 @@ def test_update_handler_rejects_user_authored_transaction_target(
     assert result.provided == {"file": "data/legacy.beancount"}
 
 
-def test_bulk_handler_resolves_staging_once_and_preserves_payload(
-    ledger_workspace: Path, tmp_path: Path
-) -> None:
+def test_bulk_handler_preserves_inline_payload(ledger_workspace: Path, tmp_path: Path) -> None:
     staging = tmp_path / "staged.beancount"
     staging.write_text(BULK)
 
     prepared = BulkCommitPreparationHandler().build(
         str(ledger_workspace),
-        transactions_file=str(staging),
+        transactions_text=BULK,
         commit_message="bulk",
     )
     pending = LedgerService().prepare_bulk(
         str(ledger_workspace),
         commit_message="bulk",
-        transactions_file=str(staging),
+        transactions_text=BULK,
     )
 
     assert isinstance(prepared, PreparedMutation)
@@ -359,4 +348,4 @@ def test_bulk_handler_uses_custom_ledger_layout_and_reports_input_errors(
     assert isinstance(missing, InvariantViolation)
     assert missing.invariant == "MISSING_INPUT"
     assert isinstance(staging_error, InvariantViolation)
-    assert staging_error.invariant == "STAGING_ERROR"
+    assert staging_error.invariant == "UNSUPPORTED_FILE_INPUT"

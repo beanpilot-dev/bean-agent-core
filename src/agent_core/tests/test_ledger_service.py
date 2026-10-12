@@ -37,12 +37,13 @@ DEPENDENT_TXN = (
 
 
 def _transaction_detail(workspace: Path, narration: str = "Lunch") -> dict[str, object]:
-    found = LedgerQueryService.find_transactions(
-        str(workspace), narration_contains=narration
+    found = LedgerQueryService.find_transactions(str(workspace), narration_contains=narration)
+    return (
+        LedgerQueryService.get_transaction(
+            str(workspace), found.rows[0]["transaction_ref"]
+        ).transaction
+        or {}
     )
-    return LedgerQueryService.get_transaction(
-        str(workspace), found.rows[0]["transaction_ref"]
-    ).transaction or {}
 
 
 @pytest.fixture
@@ -992,54 +993,17 @@ def test_apply_normal_reconciliation_rejects_checkpoint_added_after_preview(
     git_service.commit_and_push.assert_not_called()
 
 
-def test_bulk_supports_staging_file(
-    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_bulk_rejects_legacy_file_without_modifying_it(
+    ledger_workspace: Path, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
-    staging = tmp_path / "staged.beancount"
-    staging.write_text(TXN)
-
-    service = LedgerService()
-    pending = service.prepare_bulk(
-        str(ledger_workspace),
-        commit_message="bulk",
-        transactions_file=str(staging),
+    source = tmp_path / "staged.beancount"
+    source.write_text(TXN)
+    result = LedgerService().prepare_bulk(
+        str(ledger_workspace), commit_message="bulk", transactions_file=str(source)
     )
-    assert isinstance(pending, PendingAction)
-    result = service.apply_pending_action(
-        str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
-    )
-
-    assert isinstance(result, ApplyReceipt)
-    assert staging.exists()
-    target = ledger_workspace / pending.validation["target_file"]
-    assert "Dinner" in target.read_text()
-
-
-def test_staged_bulk_commits_the_content_that_was_validated(
-    ledger_workspace: Path, git_service: Mock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(Beancount, "bean_format", lambda *_args: None)
-    staging = tmp_path / "staged.beancount"
-    staging.write_text(TXN)
-    service = LedgerService()
-    pending = service.prepare_bulk(
-        str(ledger_workspace),
-        commit_message="bulk",
-        transactions_file=str(staging),
-    )
-    assert isinstance(pending, PendingAction)
-    staging.write_text(
-        '2026-06-15 * "Unvalidated"\n  Expenses:Unknown  100 CNY\n  Assets:Cash      -100 CNY'
-    )
-    result = service.apply_pending_action(
-        str(ledger_workspace), pending.__dict__.copy(), "repo", git_service
-    )
-
-    assert isinstance(result, ApplyReceipt)
-    target = ledger_workspace / pending.validation["target_file"]
-    assert "Dinner" in target.read_text()
-    assert "Unvalidated" not in target.read_text()
+    assert isinstance(result, InvariantViolation)
+    assert result.invariant == "UNSUPPORTED_FILE_INPUT"
+    assert source.read_text() == TXN
 
 
 def test_preflight_uses_configured_entry_path(

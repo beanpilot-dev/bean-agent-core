@@ -173,16 +173,19 @@ class CapturingGraph:
 
 class PendingActionGraph:
     async def ainvoke(self, graph_input, config=None):
-        raw = json.dumps({
-            "status": "approval_required",
-            "pending_action": {
-                "status": "PENDING_ACTION",
-                "pending_action_id": "pa_1",
-                "action_type": "commit_transaction",
-            },
-        })
+        raw = json.dumps(
+            {
+                "status": "approval_required",
+                "pending_action": {
+                    "status": "PENDING_ACTION",
+                    "pending_action_id": "pa_1",
+                    "action_type": "commit_transaction",
+                },
+            }
+        )
         return {
-            "messages": graph_input["messages"] + [
+            "messages": graph_input["messages"]
+            + [
                 ToolMessage(
                     content=[{"type": "text", "text": raw}],
                     tool_call_id="pending-action-1",
@@ -211,7 +214,8 @@ class StreamingUsageLLM:
 class UsageGraph:
     async def ainvoke(self, graph_input, config=None):
         return {
-            "messages": graph_input["messages"] + [
+            "messages": graph_input["messages"]
+            + [
                 AIMessage(
                     content="usage response",
                     usage_metadata={
@@ -564,6 +568,43 @@ async def test_stream_sets_preferred_language_before_graph_invocation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_delivers_multimodal_attachments_without_history_or_trace_payload(monkeypatch):
+    graph = CapturingGraph()
+    tracing = CapturingTracingManager()
+    agent = PersonalFinanceAgent()
+    agent.graph = graph
+    monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
+    monkeypatch.setattr("agent_core.agent.get_tracing_manager", lambda: tracing)
+    blocks = [
+        {"type": "text", "text": "private attachment content"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,cHJpdmF0ZQ=="}},
+    ]
+    chunks = [
+        chunk
+        async for chunk in agent.stream(
+            query="Read attachments",
+            prior=[],
+            api_key="key",
+            model="scripted",
+            conversation_meta={"attachment_blocks": blocks},
+        )
+    ]
+    assert graph.captured_input["messages"][-1].content == [
+        {"type": "text", "text": "Read attachments"},
+        *blocks,
+    ]
+    history = next(chunk for chunk in chunks if chunk.get("type") == "history_snapshot")
+    assert history["messages"][0] == {"role": "user", "content": "Read attachments"}
+    assert "private attachment content" not in json.dumps(history)
+    assert "data:image" not in json.dumps(history)
+    assert tracing.trace_kwargs["input"] is None
+    assert tracing.root_output is None
+    assert "ledger_run_python" not in CapturingLLM.bound_tool_names
+    assert "ledger_ingest_file" not in CapturingLLM.bound_tool_names
+
+
+@pytest.mark.asyncio
 async def test_stream_records_meaningful_root_trace_input_and_output(monkeypatch):
     graph = CapturingGraph()
     tracing = CapturingTracingManager()
@@ -656,7 +697,7 @@ async def test_stream_requests_usage_for_deepseek_custom_endpoint(monkeypatch):
     monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
     monkeypatch.setattr(
         "agent_core.agent.ChatOpenAI",
-        lambda **kwargs: (captured_kwargs.update(kwargs) or CapturingLLM()),
+        lambda **kwargs: captured_kwargs.update(kwargs) or CapturingLLM(),
     )
 
     async for _chunk in agent.stream(
@@ -680,7 +721,7 @@ async def test_stream_omits_usage_request_for_unsupported_custom_endpoint(monkey
     monkeypatch.setattr("agent_core.agent.validate_model_name", lambda model: model)
     monkeypatch.setattr(
         "agent_core.agent.ChatOpenAI",
-        lambda **kwargs: (captured_kwargs.update(kwargs) or CapturingLLM()),
+        lambda **kwargs: captured_kwargs.update(kwargs) or CapturingLLM(),
     )
 
     async for _chunk in agent.stream(

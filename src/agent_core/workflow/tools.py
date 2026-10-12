@@ -15,14 +15,6 @@ def _dependencies(config: RunnableConfig) -> WorkflowToolDependencies:
     return dependencies
 
 
-def _resolve_uploaded_file(config: RunnableConfig, label: str) -> str | None:
-    uploaded_files = config.get("configurable", {}).get("uploaded_files", {})
-    if not isinstance(uploaded_files, dict):
-        return None
-    path = uploaded_files.get(label)
-    return path if isinstance(path, str) else None
-
-
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -167,67 +159,6 @@ def tool_market_fetch_price(
     return _json_mod.dumps(dataclasses.asdict(result))
 
 
-@tool("ledger_ingest_file")
-def tool_ingest_file(
-    file_path: str,
-    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
-) -> str:
-    """Read an uploaded UTF-8 text file up to 2 MB.
-
-    Args:
-        file_path: Exact uploaded-file label shown in the user message.
-    """
-    resolved_path = _resolve_uploaded_file(config, file_path)
-    if not resolved_path:
-        return _json_mod.dumps({
-            "status": "ERROR",
-            "error": "Uploaded file is not available for this request.",
-        })
-    result = _dependencies(config).ingestion.read_file(resolved_path)
-    payload = dataclasses.asdict(result)
-    payload["file_path"] = file_path
-    return _json_mod.dumps(payload)
-
-
-@tool("ledger_run_python")
-def tool_run_python(
-    code: str,
-    input_files: list[str] | None = None,
-    stage: bool = False,
-    stage_label: str = "import",
-    config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
-) -> str:
-    """Run Python in a sandbox, commonly to parse uploaded transaction files.
-
-    Sandbox constraints:
-    - Fresh temporary directory; no ledger or git access.
-    - Input files are copied by basename.
-    - Standard library and pandas are available; timeout is 60 seconds.
-    - stage=False returns stdout inline, capped at 200 KB.
-    - stage=True returns a staging_file for ledger_import_transactions plus a
-      transaction count and sample, avoiding large output in model context.
-
-    Args:
-        code: Python source code to execute.
-        input_files: Uploaded-file labels from the current user message.
-        stage: Store stdout in a staging file instead of returning it inline.
-        stage_label: Short staging filename label.
-    """
-    resolved_files: list[str] = []
-    for label in input_files or []:
-        resolved_path = _resolve_uploaded_file(config, label)
-        if not resolved_path:
-            return _json_mod.dumps({
-                "status": "ERROR",
-                "error": "Uploaded file is not available for this request.",
-            })
-        resolved_files.append(resolved_path)
-    result = _dependencies(config).ingestion.run_python(
-        code, resolved_files, stage, stage_label
-    )
-    return _json_mod.dumps(dataclasses.asdict(result))
-
-
 # ---------------------------------------------------------------------------
 # Model-visible mutation tools
 # ---------------------------------------------------------------------------
@@ -321,16 +252,13 @@ def tool_ledger_prepare_price(
 def tool_ledger_import_transactions(
     transactions_text: str = "",
     commit_message: str = "",
-    transactions_file: str = "",
     config: Annotated[RunnableConfig, InjectedToolArg] = None,  # pyright: ignore[reportArgumentType]
 ) -> str:
-    """Validate and prepare a batch import from text or a staged file.
+    """Validate and prepare a batch import from inline transaction text.
 
     Args:
         transactions_text: Raw Beancount transaction blocks separated by blank lines.
         commit_message: Git commit message used if later approved.
-        transactions_file: Staging file from ledger_run_python(stage=True); use
-            instead of transactions_text for large batches.
     """
     c = config.get("configurable", {})
     ws: str = c.get("workspace", "")
@@ -340,7 +268,7 @@ def tool_ledger_import_transactions(
         ws,
         transactions_text,
         commit_message,
-        transactions_file or None,
+        None,
         whitelist,
         ledger_config,
     )
@@ -537,8 +465,6 @@ ANALYTICS_TOOLS = [
 ]
 
 INGESTION_TOOLS = [
-    tool_ingest_file,
-    tool_run_python,
     tool_ledger_import_transactions,
 ]
 
@@ -546,7 +472,5 @@ CHITCHAT_TOOLS = []
 
 MODEL_TOOLS = [
     *ANALYTICS_TOOLS,
-    tool_ingest_file,
-    tool_run_python,
     *TRANSACTION_TOOLS,
 ]
