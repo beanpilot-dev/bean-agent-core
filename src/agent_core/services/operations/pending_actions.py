@@ -5,6 +5,7 @@ import time
 from ..ledger import LedgerService
 from ..types import IntegrityFailed, InvariantViolation, LedgerConfig, ValidationFailed
 from ..workspace import GitService
+from .blocking import run_blocking
 from .lifecycle import PreflightMode, RequestWorkspaceLifecycle, WorkspaceGitError
 
 
@@ -19,7 +20,10 @@ class PendingActionOperationHandler:
         self._lifecycle = lifecycle
         self._git_service = git_service
 
-    async def run(
+    async def run(self, **kwargs) -> dict:
+        return await run_blocking(self._run_sync, **kwargs)
+
+    def _run_sync(
         self,
         *,
         repo_url: str,

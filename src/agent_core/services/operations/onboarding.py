@@ -4,6 +4,7 @@ import logging
 
 from ..onboarding import OnboardingService, SetupOperation
 from ..workspace import GitService
+from .blocking import run_blocking
 from .cache import safe_git_message
 from .lifecycle import (
     RequestWorkspaceLifecycle,
@@ -25,7 +26,10 @@ class OnboardingOperationHandler:
         self._lifecycle = lifecycle
         self._git_service = git_service
 
-    async def run_discovery(
+    async def run_discovery(self, **kwargs) -> dict:
+        return await run_blocking(self._run_discovery_sync, **kwargs)
+
+    def _run_discovery_sync(
         self,
         *,
         repo_url: str,
@@ -76,7 +80,10 @@ class OnboardingOperationHandler:
                 },
             }
 
-    async def run_setup_preview(
+    async def run_setup_preview(self, **kwargs) -> dict:
+        return await run_blocking(self._run_setup_preview_sync, **kwargs)
+
+    def _run_setup_preview_sync(
         self,
         *,
         repo_url: str,
@@ -113,7 +120,10 @@ class OnboardingOperationHandler:
                 "message": safe_git_message(error.code),
             }
 
-    async def run_setup_confirm(
+    async def run_setup_confirm(self, **kwargs) -> dict:
+        return await run_blocking(self._run_setup_confirm_sync, **kwargs)
+
+    def _run_setup_confirm_sync(
         self,
         *,
         repo_url: str,

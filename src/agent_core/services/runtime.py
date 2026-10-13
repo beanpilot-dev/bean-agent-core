@@ -33,6 +33,7 @@ from .mutations.handlers.registry import MutationPreparationHandlerRegistry
 from .mutations.preparation import MutationPreparationService
 from .mutations.sidecar import FilesystemSidecarMutationStore
 from .mutations.validator import PlanValidation
+from .operations.blocking import run_blocking
 from .operations.lifecycle import (
     PreflightMode,
     RequestWorkspaceLifecycle,
@@ -321,6 +322,9 @@ class PrivateLedgerRuntime:
         self._registry = MutationPreparationHandlerRegistry()
 
     async def execute(self, request: RuntimeExecuteRequest) -> dict[str, Any]:
+        return await run_blocking(self._execute_sync, request)
+
+    def _execute_sync(self, request: RuntimeExecuteRequest) -> dict[str, Any]:
         if len(json.dumps(request.arguments, ensure_ascii=False, default=str)) > MAX_ARGUMENT_BYTES:
             raise RuntimeProtocolError("INPUT_TOO_LARGE", "arguments exceed the request limit")
         branch = _safe_branch(request.branch)

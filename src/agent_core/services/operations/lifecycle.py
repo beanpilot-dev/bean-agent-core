@@ -1,7 +1,9 @@
 """Shared request-workspace lifecycle for agent-core operations."""
 
+import asyncio
+import sys
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
@@ -16,6 +18,7 @@ from ..workspace import (
     GitServiceError,
     RepoAuthFailedError,
 )
+from .blocking import run_blocking
 
 
 class PreflightMode(str, Enum):
@@ -97,19 +100,32 @@ class RequestWorkspaceLifecycle:
         try:
             try:
                 self._git_service.validate_request_credentials(repo_url, token)
-                cache_path = (
-                    self._cache_manager.acquire(user_id, repo_url, token)
-                    if branch is None
-                    else self._cache_manager.acquire(user_id, repo_url, token, branch)
-                )
+                if active_path is None:
+                    active_path = self._workspace_factory(prefix)
+                snapshot = getattr(type(self._cache_manager), "acquire_and_copy", None)
+                if snapshot is not None:
+                    snapshot(
+                        self._cache_manager,
+                        user_id,
+                        repo_url,
+                        token,
+                        active_path,
+                        branch,
+                    )
+                    cache_path = None
+                else:
+                    cache_path = (
+                        self._cache_manager.acquire(user_id, repo_url, token)
+                        if branch is None
+                        else self._cache_manager.acquire(user_id, repo_url, token, branch)
+                    )
             except CacheLockTimeoutError as error:
                 raise WorkspaceCacheBusyError(str(error)) from error
             except GitServiceError as error:
                 raise WorkspaceGitError(git_error_code(error), str(error)) from error
 
-            if active_path is None:
-                active_path = self._workspace_factory(prefix)
-            self._git_service.copy(cache_path, active_path)
+            if cache_path is not None:
+                self._git_service.copy(cache_path, active_path)
 
             try:
                 enforce_plugin_policy(active_path, ledger_config)
@@ -125,6 +141,35 @@ class RequestWorkspaceLifecycle:
             if active_path:
                 Beancount.invalidate_workspace(active_path)
                 self._git_service.destroy(active_path)
+
+    @asynccontextmanager
+    async def open_async(self, **kwargs):
+        """Open a workspace off-loop and retain ownership through async use."""
+
+        manager = self.open(**kwargs)
+        entering = asyncio.create_task(run_blocking(manager.__enter__))
+        cancelled = False
+        while not entering.done():
+            try:
+                await asyncio.wait({entering})
+            except asyncio.CancelledError:
+                cancelled = True
+        if entering.cancelled() or entering.exception() is not None:
+            if cancelled:
+                # __enter__ already closed its generator and cleaned up.
+                raise asyncio.CancelledError
+            entering.result()
+        prepared = entering.result()
+        if cancelled:
+            await _finish_workspace(manager, (None, None, None))
+            raise asyncio.CancelledError
+        try:
+            yield prepared
+        except BaseException:
+            await _finish_workspace(manager, sys.exc_info())
+            raise
+        else:
+            await _finish_workspace(manager, (None, None, None))
 
     @staticmethod
     def preflight(
@@ -149,3 +194,23 @@ class RequestWorkspaceLifecycle:
             preflight=preflight,
             setup_ready=setup_ready,
         )
+
+
+async def _finish_workspace(manager, exc_info: tuple) -> None:
+    """Run lifecycle exit to completion even when cancellation arrives queued."""
+
+    finalizer = asyncio.create_task(run_blocking(manager.__exit__, *exc_info))
+    cancelled = False
+    while not finalizer.done():
+        try:
+            await asyncio.wait({finalizer})
+        except asyncio.CancelledError:
+            cancelled = True
+    # Retrieve a worker exception before preserving cancellation.
+    try:
+        finalizer.result()
+    except Exception:
+        if not cancelled:
+            raise
+    if cancelled:
+        raise asyncio.CancelledError

@@ -8,6 +8,7 @@ from typing import AsyncGenerator
 from ..activity import ActivityEmitter
 from ..types import LedgerConfig
 from ..workspace import GitService
+from .blocking import run_blocking
 from .lifecycle import (
     PreflightMode,
     RequestWorkspaceLifecycle,
@@ -113,7 +114,7 @@ class ChatOperationHandler:
                 label="Syncing your ledger",
             )
 
-            with self._lifecycle.open(
+            async with self._lifecycle.open_async(
                 repo_url=repo_url,
                 token=token,
                 user_id=user_id,
@@ -145,7 +146,8 @@ class ChatOperationHandler:
                     run_id=run_id,
                     label="Checking ledger health",
                 )
-                prepared = self._lifecycle.preflight(
+                prepared = await run_blocking(
+                    self._lifecycle.preflight,
                     prepared.path,
                     mode=PreflightMode.VALIDATE,
                     ledger_config=ledger_config,

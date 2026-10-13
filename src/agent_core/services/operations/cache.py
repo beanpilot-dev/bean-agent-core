@@ -4,6 +4,7 @@ import logging
 import time
 
 from ..types import LedgerConfig
+from .blocking import run_blocking
 from .lifecycle import (
     PreflightMode,
     RequestWorkspaceLifecycle,
@@ -29,7 +30,10 @@ class CacheWarmupOperationHandler:
     def __init__(self, lifecycle: RequestWorkspaceLifecycle) -> None:
         self._lifecycle = lifecycle
 
-    async def run(
+    async def run(self, **kwargs) -> dict:
+        return await run_blocking(self._run_sync, **kwargs)
+
+    def _run_sync(
         self,
         *,
         repo_url: str,

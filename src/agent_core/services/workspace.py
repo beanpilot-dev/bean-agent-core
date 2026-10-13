@@ -587,21 +587,59 @@ class CachedWorkspaceManager:
         lock = FileLock(lock_path, timeout=30)
         try:
             with lock:
-                if not self._is_valid(key):
-                    logger.info("Cache miss or expired for key=%s", key)
-                    if os.path.exists(cache_path):
-                        shutil.rmtree(cache_path, ignore_errors=True)
-                    self._git_service.clone(cache_path, repo_url, token, branch)
-                else:
-                    logger.info("Cache hit for key=%s, refreshing", key)
-                    self._refresh(cache_path, repo_url, token, branch)
-                self._touch(key)
+                self._acquire_locked(key, cache_path, repo_url, token, branch)
         except TimeoutError:
             raise CacheLockTimeoutError(
                 f"Timed out waiting for cache lock on key={key} (cache_path={cache_path})"
             )
 
         return cache_path
+
+    def acquire_and_copy(
+        self,
+        user_id: str,
+        repo_url: str,
+        token: str | None,
+        destination: str,
+        branch: str | None = None,
+    ) -> str:
+        """Refresh and snapshot a cache entry under one per-key lock.
+
+        The lock remains held while copying, so another request cannot reset a
+        same-key repository halfway through a request snapshot.
+        """
+
+        effective_repo_url = self._git_service.effective_repo_url(repo_url, token)
+        key = self._cache_key(user_id, effective_repo_url, branch)
+        cache_path = self._cache_path(key)
+        os.makedirs(self.CACHE_ROOT, exist_ok=True)
+        try:
+            with FileLock(f"{cache_path}.lock", timeout=30):
+                self._acquire_locked(key, cache_path, repo_url, token, branch)
+                self._git_service.copy(cache_path, destination)
+        except TimeoutError as error:
+            raise CacheLockTimeoutError(
+                f"Timed out waiting for cache lock on key={key} (cache_path={cache_path})"
+            ) from error
+        return destination
+
+    def _acquire_locked(
+        self,
+        key: str,
+        cache_path: str,
+        repo_url: str,
+        token: str | None,
+        branch: str | None,
+    ) -> None:
+        if not self._is_valid(key):
+            logger.info("Cache miss or expired for key=%s", key)
+            if os.path.exists(cache_path):
+                shutil.rmtree(cache_path, ignore_errors=True)
+            self._git_service.clone(cache_path, repo_url, token, branch)
+        else:
+            logger.info("Cache hit for key=%s, refreshing", key)
+            self._refresh(cache_path, repo_url, token, branch)
+        self._touch(key)
 
     def cleanup_expired(self) -> None:
         """Remove all expired cache entries from /tmp/bean_cache/.

@@ -6,6 +6,7 @@ import time
 from ..beancount import Beancount
 from ..preflight import PreflightService
 from ..types import LedgerConfig
+from .blocking import run_blocking
 from .lifecycle import (
     PreflightMode,
     RequestWorkspaceLifecycle,
@@ -22,7 +23,10 @@ class LedgerReadOperationHandler:
     def __init__(self, lifecycle: RequestWorkspaceLifecycle) -> None:
         self._lifecycle = lifecycle
 
-    async def run_stats(
+    async def run_stats(self, **kwargs) -> dict:
+        return await run_blocking(self._run_stats_sync, **kwargs)
+
+    def _run_stats_sync(
         self,
         *,
         repo_url: str,
@@ -94,7 +98,10 @@ class LedgerReadOperationHandler:
                 "error": {"code": error.code, "message": str(error)},
             }
 
-    async def run_accounts(
+    async def run_accounts(self, **kwargs) -> dict:
+        return await run_blocking(self._run_accounts_sync, **kwargs)
+
+    def _run_accounts_sync(
         self,
         *,
         repo_url: str,
