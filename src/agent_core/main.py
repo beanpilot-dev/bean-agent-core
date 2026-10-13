@@ -311,6 +311,11 @@ class ConversationTitleRequest(BaseModel):
     query: str
 
 
+class CheckPendingActionBatchRequest(BaseModel):
+    pending_actions: list[dict[str, Any]]
+    ledger: LedgerPayload | None = None
+
+
 class OnboardingDiscoveryRequest(BaseModel):
     repo: RepoInfo
     user_id: str
@@ -529,6 +534,23 @@ async def agent_chat(req: ChatRequest):
 # ---------------------------------------------------------------------------
 
 
+@app.post("/agent/actions/check-batch")
+async def agent_check_pending_action_batch(req: CheckPendingActionBatchRequest):
+    from .services.mutations.batches import check_independent_batch
+
+    try:
+        config = _ledger_config(req.ledger)
+    except ValueError:
+        return _error_envelope("INVALID_LEDGER_CONFIG", "Invalid ledger config", 400)
+    code = check_independent_batch(req.pending_actions, config)
+    return {
+        "status": "error" if code else "ok",
+        "publication_outcome": "not_published",
+        **({"error": {"code": code, "message": "Prepare and review a new change set."}}
+           if code else {}),
+    }
+
+
 @app.post("/agent/actions/apply")
 async def agent_apply_pending_action(req: ApplyPendingActionRequest):
     start_time = time.monotonic()
@@ -548,7 +570,12 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
         return _error_envelope("INVALID_PENDING_ACTION", "pending action payload is required", 400)
     apply_integrity_error = _verify_apply_request(req, pending_action)
     if apply_integrity_error:
-        return apply_integrity_error
+        return JSONResponse(
+            content={
+                **json.loads(apply_integrity_error.body), "publication_outcome": "not_published"
+            },
+            status_code=apply_integrity_error.status_code,
+        )
     result = await _orchestrator.run_apply_pending_action(
         repo_url=req.repo.url,
         token=req.repo.token,
@@ -570,10 +597,9 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
         result.get("usage", {}).get("duration_ms"),
     )
     if result.get("error"):
-        code = result["error"].get("code")
         return JSONResponse(
             content=result,
-            status_code=409 if code in {"INTEGRITY_FAILED", "VALIDATION_FAILED"} else 500,
+            status_code=409 if result.get("publication_outcome") == "not_published" else 500,
         )
     return result
 

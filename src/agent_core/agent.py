@@ -20,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
+from agent_core.services.mutations.batches import coordinate_prepared_actions
 from agent_core.services.tool_ports import (
     WorkflowToolDependenciesFactory,
     create_workflow_tool_dependencies,
@@ -587,7 +588,9 @@ class PersonalFinanceAgent:
 
             require_input = self._requires_user_input(result)
             tool_names = _tool_names(result)
-            pending_actions = _pending_actions(result)
+            pending_actions = coordinate_prepared_actions(
+                workspace, _pending_actions(result), ledger_config
+            )
             if activity_emitter:
                 yield activity_emitter.emit(
                     category="workflow",

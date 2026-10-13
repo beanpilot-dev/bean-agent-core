@@ -157,6 +157,7 @@ class OnboardingSetupService:
                 repo_url,
                 git_service,
                 token,
+                [change["path"] for change in preview["changes"]],
             )
             if not commit["ok"]:
                 return {
@@ -281,11 +282,23 @@ class OnboardingSetupService:
 
     @staticmethod
     def commit_and_push_setup(
-        workspace: str, message: str, repo_url: str, git_service: GitService, token: str | None
+        workspace: str,
+        message: str,
+        repo_url: str,
+        git_service: GitService,
+        token: str | None,
+        changed_paths: list[str],
     ) -> dict[str, Any]:
-        subprocess.run(["git", "add", "-A"], cwd=workspace, capture_output=True, text=True)
+        staged = subprocess.run(
+            ["git", "add", "--", *changed_paths], cwd=workspace, capture_output=True, text=True
+        )
+        if staged.returncode != 0:
+            return {"ok": False, "error": "stage_failed", "push": None}
         result = subprocess.run(
-            ["git", "commit", "-m", message], cwd=workspace, capture_output=True, text=True
+            ["git", "commit", "-m", message, "--", *changed_paths],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return {"ok": False, "error": "commit_failed", "push": None}

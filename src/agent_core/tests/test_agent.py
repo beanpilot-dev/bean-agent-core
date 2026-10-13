@@ -652,6 +652,49 @@ async def test_stream_emits_structured_approval_event_for_text_block_tool_result
 
 
 @pytest.mark.asyncio
+async def test_stream_combines_two_prepared_openings_before_review(monkeypatch, ledger_workspace):
+    from dataclasses import asdict
+
+    from agent_core.services.ledger import LedgerService
+    from agent_core.services.pending_actions import PendingActionService
+
+    actions = [
+        asdict(LedgerService().prepare_open(str(ledger_workspace), name, "CNY", "2020-01-01"))
+        for name in ["Assets:Test:One", "Assets:Test:Two"]
+    ]
+
+    class Graph:
+        async def ainvoke(self, graph_input, config):
+            return {
+                "messages": [
+                    *graph_input["messages"],
+                    *[
+                        ToolMessage(content=json.dumps(action), tool_call_id=f"call-{index}")
+                        for index, action in enumerate(actions)
+                    ],
+                    AIMessage(content="Review both openings."),
+                ]
+            }
+
+    agent = PersonalFinanceAgent()
+    agent.graph = Graph()
+    monkeypatch.setattr("agent_core.agent.ChatOpenAI", lambda **_kwargs: CapturingLLM())
+    chunks = [
+        chunk
+        async for chunk in agent.stream(
+            query="Open two accounts", prior=[], model="scripted", workspace=str(ledger_workspace)
+        )
+    ]
+    approvals = [
+        chunk["pending_action"] for chunk in chunks if chunk.get("type") == "approval_required"
+    ]
+    assert len(approvals) == 1
+    assert approvals[0]["action_type"] == "change_set"
+    assert len(approvals[0]["display"]["items"]) == 2
+    assert PendingActionService.verify_pending_action(approvals[0]) is None
+
+
+@pytest.mark.asyncio
 async def test_single_agent_node_preserves_streamed_token_usage():
     result = await _single_agent_node(
         {

@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from agent_core.services.onboarding import OnboardingService
 from agent_core.services.onboarding.discovery import OnboardingDiscoveryService
 from agent_core.services.onboarding.paths import SafePathService
@@ -15,12 +17,12 @@ def test_discover_clean_repo(tmp_path: Path) -> None:
     assert result["candidates"] == []
 
 
-def test_discover_no_candidate_for_non_clean_repo(tmp_path: Path) -> None:
+def test_discover_readme_repo_is_initializable(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("not a ledger")
 
     result = OnboardingService.discover(str(tmp_path))
 
-    assert result["discovery_status"] == "no_candidate"
+    assert result["discovery_status"] == "clean_repo"
 
 
 def test_discover_multiple_candidates(tmp_path: Path) -> None:
@@ -263,7 +265,7 @@ def test_install_sidecar_preview_does_not_include_clean_ledger_metadata(
 
 def test_initialize_rejects_non_clean_repo(tmp_path: Path) -> None:
     init_repo(tmp_path)
-    (tmp_path / "README.md").write_text("existing content")
+    (tmp_path / "notes.txt").write_text("existing content")
 
     result = OnboardingService.preview_setup(
         str(tmp_path),
@@ -271,6 +273,90 @@ def test_initialize_rejects_non_clean_repo(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
+    assert result["code"] == "REPO_NOT_CLEAN"
+
+
+@pytest.mark.parametrize("name", ["README", "README.md", "LICENSE", "COPYING.txt", ".gitignore"])
+def test_documentation_only_setup_preserves_committed_files(tmp_path: Path, name: str) -> None:
+    init_repo(tmp_path)
+    content = b"# Documentation\n"
+    (tmp_path / name).write_bytes(content)
+    subprocess.run(["git", "add", name], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+    head = OnboardingService.current_head(str(tmp_path))
+    assert head
+    discovery = OnboardingService.discover(str(tmp_path))
+    preview = OnboardingService.preview_setup(str(tmp_path), operation="initialize_ledger")
+    assert discovery["discovery_status"] == "clean_repo"
+    assert preview["head_sha"] == head
+    assert OnboardingService.current_head(str(tmp_path)) == head
+    result = OnboardingService.confirm_setup(
+        str(tmp_path),
+        operation="initialize_ledger",
+        expected_head_sha=head,
+        repo_url="ignored",
+        git_service=FakeGit(),
+        token=None,
+    )
+    assert result["status"] == "success"
+    assert (tmp_path / name).read_bytes() == content
+    changed = subprocess.check_output(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"], cwd=tmp_path, text=True
+    ).splitlines()
+    assert set(changed) == {"data/main.beancount", "data/agent_inc/main.beancount"}
+    assert OnboardingService.discover(str(tmp_path))["sidecar"]["status"] == "configured"
+
+
+@pytest.mark.parametrize(
+    "fixture", ["invalid_ledger", "directory", "target", "symlink", "readme_ledger"]
+)
+def test_initialization_rejects_existing_or_unsafe_content(tmp_path: Path, fixture: str) -> None:
+    if fixture == "invalid_ledger":
+        (tmp_path / "broken.beancount").write_text("invalid ledger")
+    elif fixture == "directory":
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs/README.md").write_text("docs")
+    elif fixture == "target":
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data/main.beancount").write_text("existing")
+    elif fixture == "symlink":
+        (tmp_path / "README.md").symlink_to(tmp_path / "missing")
+    else:
+        (tmp_path / "README.beancount").write_text("invalid ledger")
+    result = OnboardingService.preview_setup(str(tmp_path), operation="initialize_ledger")
+    assert result["status"] == "error"
+
+
+def test_documentation_setup_rechecks_head_and_content(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+    readme = tmp_path / "README.md"
+    readme.write_text("first")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+    preview = OnboardingService.preview_setup(str(tmp_path), operation="initialize_ledger")
+    readme.write_text("second")
+    subprocess.run(
+        ["git", "commit", "-am", "changed"], cwd=tmp_path, check=True, capture_output=True
+    )
+    result = OnboardingService.confirm_setup(
+        str(tmp_path),
+        operation="initialize_ledger",
+        expected_head_sha=preview["head_sha"],
+        repo_url="ignored",
+        git_service=FakeGit(),
+        token=None,
+    )
+    assert result["code"] == "STALE_REPOSITORY"
+    assert not (tmp_path / "data").exists()
+    (tmp_path / "other.txt").write_text("untracked")
+    result = OnboardingService.confirm_setup(
+        str(tmp_path),
+        operation="initialize_ledger",
+        expected_head_sha=OnboardingService.current_head(str(tmp_path)),
+        repo_url="ignored",
+        git_service=FakeGit(),
+        token=None,
+    )
     assert result["code"] == "REPO_NOT_CLEAN"
 
 

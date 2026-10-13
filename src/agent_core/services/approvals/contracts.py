@@ -31,9 +31,7 @@ def _pending_action_digest_input(action: dict[str, object]) -> dict[str, object]
     }
 
 
-def _classify_action_risk(
-    action_type: str, validation: dict[str, object]
-) -> dict[str, object]:
+def _classify_action_risk(action_type: str, validation: dict[str, object]) -> dict[str, object]:
     reasons: list[str] = []
     risk = "normal"
     txn_count = validation.get("transaction_count")
@@ -53,7 +51,11 @@ def _classify_action_risk(
     if action_type == "delete_transaction":
         risk = "high"
         reasons.append("transaction_deletion")
-    if action_type == "close_account":
+    if action_type == "close_account" or (
+        action_type == "change_set"
+        and isinstance(validation.get("account_closure_count"), int)
+        and validation["account_closure_count"] > 0
+    ):
         risk = "high"
         reasons.append("account_closure")
     return {
@@ -131,6 +133,9 @@ class PendingActionService:
         execution_spec: dict[str, object],
         display: dict[str, object],
         validation: dict[str, object],
+        continue_after_approval: bool = False,
+        continuation_reason: str = "",
+        next_intent_summary: str = "",
     ) -> PendingAction:
         mutation = LedgerMutationAction(
             action_type=action_type,
@@ -143,11 +148,13 @@ class PendingActionService:
         expires_at = (
             datetime.now(timezone.utc) + timedelta(minutes=_PENDING_ACTION_TTL_MINUTES)
         ).isoformat()
-        idempotency_key = digest_payload({
-            "action_type": mutation.action_type,
-            "execution_spec": mutation.execution_spec,
-            "validation": mutation.validation,
-        })
+        idempotency_key = digest_payload(
+            {
+                "action_type": mutation.action_type,
+                "execution_spec": mutation.execution_spec,
+                "validation": mutation.validation,
+            }
+        )
         payload = {
             "pending_action_id": pending_action_id,
             "action_type": mutation.action_type,
@@ -162,9 +169,9 @@ class PendingActionService:
             },
             "expires_at": expires_at,
             "idempotency_key": idempotency_key,
-            "continue_after_approval": False,
-            "continuation_reason": "",
-            "next_intent_summary": "",
+            "continue_after_approval": continue_after_approval,
+            "continuation_reason": continuation_reason,
+            "next_intent_summary": next_intent_summary,
         }
         digest = digest_payload(payload)
         return PendingAction(
@@ -177,9 +184,9 @@ class PendingActionService:
             policy=payload["policy"],
             expires_at=expires_at,
             idempotency_key=idempotency_key,
-            continue_after_approval=False,
-            continuation_reason="",
-            next_intent_summary="",
+            continue_after_approval=continue_after_approval,
+            continuation_reason=continuation_reason,
+            next_intent_summary=next_intent_summary,
             digest=digest,
             signature=f"sha256:{digest}",
             message="Prepared action is awaiting explicit user approval.",

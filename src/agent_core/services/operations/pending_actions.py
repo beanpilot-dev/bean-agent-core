@@ -3,7 +3,7 @@
 import time
 
 from ..ledger import LedgerService
-from ..types import LedgerConfig
+from ..types import IntegrityFailed, InvariantViolation, LedgerConfig, ValidationFailed
 from ..workspace import GitService
 from .lifecycle import PreflightMode, RequestWorkspaceLifecycle, WorkspaceGitError
 
@@ -52,20 +52,24 @@ class PendingActionOperationHandler:
                 payload = {
                     "status": result.status,
                     "result": getattr(result, "__dict__", {}),
-                    "usage": {
-                        "duration_ms": int((time.monotonic() - start_time) * 1000)
-                    },
+                    "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
                 }
                 if result.status in {"APPLIED", "SUCCESS"}:
                     return payload
                 return {
                     **payload,
+                    **(
+                        {"publication_outcome": "not_published"}
+                        if isinstance(
+                            result, (IntegrityFailed, InvariantViolation, ValidationFailed)
+                        )
+                        else {}
+                    ),
                     "error": {
-                        "code": result.status,
-                        "message": getattr(
-                            result,
-                            "error",
-                            "Pending action apply failed",
+                        "code": getattr(result, "invariant", result.status),
+                        "message": (
+                            "The prepared change could not be applied. "
+                            "Prepare and review a new action."
                         ),
                     },
                 }
@@ -73,7 +77,5 @@ class PendingActionOperationHandler:
             return {
                 "status": "error",
                 "error": {"code": error.code, "message": str(error)},
-                "usage": {
-                    "duration_ms": int((time.monotonic() - start_time) * 1000)
-                },
+                "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
             }

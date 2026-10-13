@@ -17,6 +17,7 @@ from ..types import (
 from ..workspace import GitService
 from .executor import MutationExecutor
 from .plans import MutationPlan
+from .sidecar import FilesystemSidecarMutationStore
 from .targets import sealed_write_set_matches
 from .validator import validation_failure
 
@@ -89,6 +90,16 @@ class PendingActionApplicationService:
                 ),
             )
         try:
+            # Check isolation before the executor receives publishing capability.
+            FilesystemSidecarMutationStore().snapshot(
+                workspace, [condition.path for condition in plan.preconditions], ledger_config
+            )
+        except ValueError:
+            return IntegrityFailed(
+                pending_action_id=pending_action_id,
+                error="Pending action mutation plan violates sidecar write isolation.",
+            )
+        try:
             _touched, git, output = self._executor.apply_and_publish(
                 workspace,
                 plan,
@@ -98,9 +109,10 @@ class PendingActionApplicationService:
                 ledger_config,
             )
         except ValueError:
-            return IntegrityFailed(
-                pending_action_id=pending_action_id,
-                error="Pending action mutation plan violates sidecar write isolation.",
+            # An adapter exception may occur after publication started. Do not
+            # advertise a definite no-publication outcome from this catch.
+            return DependencyUnavailable(
+                error="Pending action execution failed; publication requires reconciliation.",
             )
         except OSError as exc:
             raise LedgerServiceError("Ledger mutation apply workspace unavailable") from exc

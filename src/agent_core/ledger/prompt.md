@@ -90,6 +90,9 @@ When the request clearly requires multiple related mutations and the required fa
 
 Prefer one change set when operations are mechanically dependent or must validate in order.
 
+Use one `ledger_prepare_change_set` for multiple account openings, even when the
+accounts are unrelated: they write the same sidecar and must be approved together.
+
 For related but mechanically independent mutations, prepare them in the same run when they can be safely reviewed together.
 
 If a later mutation cannot safely be prepared until an earlier action is approved, make the dependency explicit through the tool’s continuation mechanism. The continuation summary must describe only the next intent and must not contain secrets, raw ledger contents, or unsupported ledger facts.

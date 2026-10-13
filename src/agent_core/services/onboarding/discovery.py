@@ -249,7 +249,22 @@ class OnboardingDiscoveryService:
         for child in Path(workspace).iterdir():
             if child.name == ".git":
                 continue
-            if child.is_dir() and not any(child.rglob("*")):
+            if child.is_symlink():
+                return False
+            if child.is_dir() and not any(child.iterdir()):
+                continue
+            name = child.name.lower()
+            if (
+                child.is_file()
+                and (
+                    name == ".gitignore"
+                    or any(
+                        name == stem or name.startswith(f"{stem}.")
+                        for stem in ("readme", "license", "copying")
+                    )
+                )
+                and child.suffix.lower() not in {".beancount", ".bean"}
+            ):
                 continue
             return False
         return True
