@@ -8,6 +8,8 @@ from threading import Lock
 from typing import TypeVar
 from weakref import WeakKeyDictionary
 
+from ..timing import stage_timer
+
 T = TypeVar("T")
 
 # Keep both active workers and submitted work bounded. Callers wait on the
@@ -15,9 +17,7 @@ T = TypeVar("T")
 # queue of ledger operations.
 _WORKER_LIMIT = 4
 _executor = ThreadPoolExecutor(max_workers=_WORKER_LIMIT, thread_name_prefix="agent-ledger")
-_capacities: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    WeakKeyDictionary()
-)
+_capacities: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 _capacity_lock = Lock()
 
 
@@ -32,7 +32,8 @@ async def run_blocking(function, /, *args, **kwargs) -> T:
     loop = asyncio.get_running_loop()
     with _capacity_lock:
         capacity = _capacities.setdefault(loop, asyncio.Semaphore(_WORKER_LIMIT))
-    await capacity.acquire()
+    with stage_timer("worker_wait"):
+        await capacity.acquire()
     context = copy_context()
     call = partial(function, *args, **kwargs)
     future = loop.run_in_executor(_executor, context.run, call)

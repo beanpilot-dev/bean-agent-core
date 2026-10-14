@@ -2,6 +2,7 @@
 
 import time
 
+from ...context import agent_request_id
 from ..ledger import LedgerService
 from ..types import IntegrityFailed, InvariantViolation, LedgerConfig, ValidationFailed
 from ..workspace import GitService
@@ -21,7 +22,11 @@ class PendingActionOperationHandler:
         self._git_service = git_service
 
     async def run(self, **kwargs) -> dict:
-        return await run_blocking(self._run_sync, **kwargs)
+        rid_token = agent_request_id.set(kwargs.get("request_id"))
+        try:
+            return await run_blocking(self._run_sync, **kwargs)
+        finally:
+            agent_request_id.reset(rid_token)
 
     def _run_sync(
         self,

@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from enum import Enum
 from ..beancount import Beancount
 from ..plugin_policy import RepositoryPluginRejectedError, enforce_plugin_policy
 from ..preflight import PreflightService, SetupRequiredError
+from ..timing import stage_timer
 from ..types import LedgerConfig, PreflightResult
 from ..workspace import (
     CachedWorkspaceManager,
@@ -93,10 +95,16 @@ class RequestWorkspaceLifecycle:
         preflight_mode: PreflightMode = PreflightMode.NONE,
         ledger_config: LedgerConfig | None = None,
         workspace_path: str | None = None,
+        read_recent: bool = False,
+        admitted_at: float | None = None,
     ) -> Iterator[PreparedWorkspace]:
         """Yield an isolated copy of the latest cached repository state."""
 
         active_path = workspace_path
+        writing = prefix.startswith(("bean_apply_", "bean_onboarding_confirm_"))
+        invalidate = getattr(type(self._cache_manager), "invalidate", None)
+        if writing and invalidate is not None:
+            invalidate(self._cache_manager, user_id, repo_url, token, branch)
         try:
             try:
                 self._git_service.validate_request_credentials(repo_url, token)
@@ -104,14 +112,19 @@ class RequestWorkspaceLifecycle:
                     active_path = self._workspace_factory(prefix)
                 snapshot = getattr(type(self._cache_manager), "acquire_and_copy", None)
                 if snapshot is not None:
-                    snapshot(
-                        self._cache_manager,
-                        user_id,
-                        repo_url,
-                        token,
-                        active_path,
-                        branch,
+                    snapshot_options = (
+                        {"read_recent": True, "admitted_at": admitted_at} if read_recent else {}
                     )
+                    with stage_timer("workspace_acquisition"):
+                        snapshot(
+                            self._cache_manager,
+                            user_id,
+                            repo_url,
+                            token,
+                            active_path,
+                            branch,
+                            **snapshot_options,
+                        )
                     cache_path = None
                 else:
                     cache_path = (
@@ -125,7 +138,8 @@ class RequestWorkspaceLifecycle:
                 raise WorkspaceGitError(git_error_code(error), str(error)) from error
 
             if cache_path is not None:
-                self._git_service.copy(cache_path, active_path)
+                with stage_timer("workspace_copy"):
+                    self._git_service.copy(cache_path, active_path)
 
             try:
                 enforce_plugin_policy(active_path, ledger_config)
@@ -138,14 +152,19 @@ class RequestWorkspaceLifecycle:
                 ledger_config=ledger_config,
             )
         finally:
-            if active_path:
-                Beancount.invalidate_workspace(active_path)
-                self._git_service.destroy(active_path)
+            try:
+                if writing and invalidate is not None:
+                    invalidate(self._cache_manager, user_id, repo_url, token, branch)
+            finally:
+                if active_path:
+                    Beancount.invalidate_workspace(active_path)
+                    self._git_service.destroy(active_path)
 
     @asynccontextmanager
     async def open_async(self, **kwargs):
         """Open a workspace off-loop and retain ownership through async use."""
 
+        kwargs.setdefault("admitted_at", time.time())
         manager = self.open(**kwargs)
         entering = asyncio.create_task(run_blocking(manager.__enter__))
         cancelled = False
@@ -186,7 +205,8 @@ class RequestWorkspaceLifecycle:
             if mode is PreflightMode.CHECK_SETUP:
                 setup_ready = PreflightService.check_setup(workspace_path, ledger_config)
             elif mode is PreflightMode.VALIDATE:
-                preflight = PreflightService.validate(workspace_path, ledger_config)
+                with stage_timer("preflight"):
+                    preflight = PreflightService.validate(workspace_path, ledger_config)
         except SetupRequiredError as error:
             raise WorkspaceSetupRequiredError(str(error)) from error
         return PreparedWorkspace(

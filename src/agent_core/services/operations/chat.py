@@ -119,6 +119,7 @@ class ChatOperationHandler:
                 token=token,
                 user_id=user_id,
                 prefix="bean_workspace_",
+                read_recent=True,
                 preflight_mode=PreflightMode.NONE,
                 ledger_config=ledger_config,
                 workspace_path=workspace_path,
@@ -214,9 +215,7 @@ class ChatOperationHandler:
                         if last_requires_user_input
                         else "Agent run completed"
                     ),
-                    display_args={
-                        "duration_ms": int((time.monotonic() - start_time) * 1000)
-                    },
+                    display_args={"duration_ms": int((time.monotonic() - start_time) * 1000)},
                 )
                 if pending_history_snapshot:
                     yield pending_history_snapshot

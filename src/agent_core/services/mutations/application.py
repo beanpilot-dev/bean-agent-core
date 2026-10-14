@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from ..approvals.contracts import PendingActionService, verify_approval_proof
 from ..beancount import LedgerServiceError
+from ..timing import stage_timer
 from ..types import (
     ApplyReceipt,
     ApprovalProof,
@@ -54,12 +55,14 @@ class PendingActionApplicationService:
         ledger_config: LedgerConfig | None = None,
         approval_proof: ApprovalProof | dict[str, object] | None = None,
     ):
-        integrity = PendingActionService.verify_pending_action(action)
+        with stage_timer("proposal_integrity"):
+            integrity = PendingActionService.verify_pending_action(action)
         if integrity:
             return integrity
         pending_action_id = str(action.get("pending_action_id") or "")
         action_type = str(action.get("action_type") or "")
-        approval_integrity = verify_approval_proof(action, approval_proof)
+        with stage_timer("approval_proof"):
+            approval_integrity = verify_approval_proof(action, approval_proof)
         if approval_integrity:
             return approval_integrity
         spec = action.get("execution_spec")
@@ -154,9 +157,7 @@ class PendingActionApplicationService:
                     },
                     push_status=git["push"],
                     commit_sha=(
-                        git.get("commit_sha")
-                        if isinstance(git.get("commit_sha"), str)
-                        else None
+                        git.get("commit_sha") if isinstance(git.get("commit_sha"), str) else None
                     ),
                 )
             ),

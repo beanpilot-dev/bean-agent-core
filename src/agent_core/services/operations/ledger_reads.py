@@ -24,7 +24,7 @@ class LedgerReadOperationHandler:
         self._lifecycle = lifecycle
 
     async def run_stats(self, **kwargs) -> dict:
-        return await run_blocking(self._run_stats_sync, **kwargs)
+        return await run_blocking(self._run_stats_sync, admitted_at=time.time(), **kwargs)
 
     def _run_stats_sync(
         self,
@@ -35,6 +35,7 @@ class LedgerReadOperationHandler:
         request_id: str | None,
         tag: str,
         ledger_config: LedgerConfig | None = None,
+        admitted_at: float | None = None,
     ) -> dict:
         start_time = time.monotonic()
 
@@ -43,6 +44,8 @@ class LedgerReadOperationHandler:
                 repo_url=repo_url,
                 token=token,
                 user_id=user_id,
+                read_recent=True,
+                admitted_at=admitted_at,
                 prefix="bean_stats_",
             ) as prepared:
                 tag_clean = tag.lstrip("#")
@@ -76,9 +79,7 @@ class LedgerReadOperationHandler:
                     "status": "ok",
                     "tag": tag,
                     "rows": rows,
-                    "usage": {
-                        "duration_ms": int((time.monotonic() - start_time) * 1000)
-                    },
+                    "usage": {"duration_ms": int((time.monotonic() - start_time) * 1000)},
                 }
 
         except WorkspaceCacheBusyError as error:
@@ -99,7 +100,7 @@ class LedgerReadOperationHandler:
             }
 
     async def run_accounts(self, **kwargs) -> dict:
-        return await run_blocking(self._run_accounts_sync, **kwargs)
+        return await run_blocking(self._run_accounts_sync, admitted_at=time.time(), **kwargs)
 
     def _run_accounts_sync(
         self,
@@ -109,6 +110,7 @@ class LedgerReadOperationHandler:
         user_id: str,
         request_id: str | None,
         ledger_config: LedgerConfig | None = None,
+        admitted_at: float | None = None,
     ) -> dict:
         start_time = time.monotonic()
 
@@ -117,6 +119,8 @@ class LedgerReadOperationHandler:
                 repo_url=repo_url,
                 token=token,
                 user_id=user_id,
+                read_recent=True,
+                admitted_at=admitted_at,
                 prefix="bean_accounts_",
                 preflight_mode=PreflightMode.CHECK_SETUP,
                 ledger_config=ledger_config,

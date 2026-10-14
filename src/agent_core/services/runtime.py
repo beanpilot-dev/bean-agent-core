@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -21,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..context import agent_request_id
 from .approvals.contracts import PendingActionService, digest_payload
 from .beancount import Beancount
 from .ledger_paths import sidecar_target_file
@@ -322,9 +324,15 @@ class PrivateLedgerRuntime:
         self._registry = MutationPreparationHandlerRegistry()
 
     async def execute(self, request: RuntimeExecuteRequest) -> dict[str, Any]:
-        return await run_blocking(self._execute_sync, request)
+        rid_token = agent_request_id.set(request.request_id or request.execution_id)
+        try:
+            return await run_blocking(self._execute_sync, request, time.time())
+        finally:
+            agent_request_id.reset(rid_token)
 
-    def _execute_sync(self, request: RuntimeExecuteRequest) -> dict[str, Any]:
+    def _execute_sync(
+        self, request: RuntimeExecuteRequest, admitted_at: float | None = None
+    ) -> dict[str, Any]:
         if len(json.dumps(request.arguments, ensure_ascii=False, default=str)) > MAX_ARGUMENT_BYTES:
             raise RuntimeProtocolError("INPUT_TOO_LARGE", "arguments exceed the request limit")
         branch = _safe_branch(request.branch)
@@ -349,6 +357,8 @@ class PrivateLedgerRuntime:
                 user_id=request.user_id,
                 branch=branch,
                 prefix="bean_runtime_",
+                read_recent=request.operation != "preflight",
+                admitted_at=admitted_at,
                 preflight_mode=PreflightMode.VALIDATE,
                 ledger_config=config,
             ) as prepared:

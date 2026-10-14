@@ -13,7 +13,8 @@ try:
     WORKSPACE_TTL_SECONDS = int(_raw)
 except ValueError:
     logger.warning(
-        "WORKSPACE_TTL_SECONDS=%r is not an integer, falling back to 900", _raw,
+        "WORKSPACE_TTL_SECONDS=%r is not an integer, falling back to 900",
+        _raw,
     )
     WORKSPACE_TTL_SECONDS = 900
 """TTL in seconds for cached workspace clones in /tmp/bean_cache/.
@@ -23,3 +24,10 @@ except ValueError:
 - 0: always fresh clone, no caching
 - -1: infinite TTL, caches never expire (self-hosted only)
 """
+
+try:
+    WORKSPACE_READ_FRESHNESS_SECONDS = max(
+        0, int(os.environ.get("WORKSPACE_READ_FRESHNESS_SECONDS", "30"))
+    )
+except ValueError:
+    WORKSPACE_READ_FRESHNESS_SECONDS = 30

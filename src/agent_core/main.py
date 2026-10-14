@@ -34,7 +34,7 @@ from agent_core.agent import (
     generate_conversation_title,
     validate_model_name,
 )
-from agent_core.config import WORKSPACE_TTL_SECONDS
+from agent_core.config import WORKSPACE_READ_FRESHNESS_SECONDS, WORKSPACE_TTL_SECONDS
 from agent_core.context import (
     agent_api_key,
     agent_model,
@@ -42,6 +42,7 @@ from agent_core.context import (
     agent_request_id,
     agent_user_id,
 )
+from agent_core.services.operations.blocking import run_blocking
 from agent_core.services.operations.lifecycle import RequestWorkspaceLifecycle
 from agent_core.services.orchestrator import AgentOrchestrator
 from agent_core.services.runtime import (
@@ -81,7 +82,11 @@ _git_service = GitService.from_environment(
     os.environ.get("AGENT_MODE", ""),
     os.environ.get("LOCAL_REPO_URL", ""),
 )
-_cache_manager = CachedWorkspaceManager(_git_service, ttl_seconds=WORKSPACE_TTL_SECONDS)
+_cache_manager = CachedWorkspaceManager(
+    _git_service,
+    ttl_seconds=WORKSPACE_TTL_SECONDS,
+    read_freshness_seconds=WORKSPACE_READ_FRESHNESS_SECONDS,
+)
 
 
 class _LazyAgentOrchestrator:
@@ -546,8 +551,11 @@ async def agent_check_pending_action_batch(req: CheckPendingActionBatchRequest):
     return {
         "status": "error" if code else "ok",
         "publication_outcome": "not_published",
-        **({"error": {"code": code, "message": "Prepare and review a new change set."}}
-           if code else {}),
+        **(
+            {"error": {"code": code, "message": "Prepare and review a new change set."}}
+            if code
+            else {}
+        ),
     }
 
 
@@ -572,7 +580,8 @@ async def agent_apply_pending_action(req: ApplyPendingActionRequest):
     if apply_integrity_error:
         return JSONResponse(
             content={
-                **json.loads(apply_integrity_error.body), "publication_outcome": "not_published"
+                **json.loads(apply_integrity_error.body),
+                "publication_outcome": "not_published",
             },
             status_code=apply_integrity_error.status_code,
         )
@@ -1003,6 +1012,11 @@ async def agent_run(req: AgentRunRequest):
 def main(host: str, port: int):
     logger.info(f"Starting agent-core at http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)
+
+
+@app.on_event("shutdown")
+async def close_workspace_background_refresh() -> None:
+    await run_blocking(_cache_manager.close)
 
 
 if __name__ == "__main__":

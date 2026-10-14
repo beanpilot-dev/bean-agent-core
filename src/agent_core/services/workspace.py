@@ -5,6 +5,7 @@ configured via GIT_ASKPASS to prevent credential leaks into .git/config.
 """
 
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -12,11 +13,16 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
+from threading import BoundedSemaphore
 
 from filelock import FileLock
+
+from .timing import stage_timer
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +64,8 @@ class GitService(ABC):
                 raise ValueError(f"LOCAL_REPO_URL does not exist: {repo_path}")
             if not (
                 (repo_path / ".git").is_dir()
-                or (repo_path / "HEAD").is_file() and (repo_path / "objects").is_dir()
+                or (repo_path / "HEAD").is_file()
+                and (repo_path / "objects").is_dir()
             ):
                 raise ValueError(f"LOCAL_REPO_URL is not a Git repository: {repo_path}")
             return LocalGitService(str(repo_path))
@@ -69,9 +76,7 @@ class GitService(ABC):
         """Validate request credentials before orchestration starts."""
 
     @abstractmethod
-    def _resolve_credentials(
-        self, repo_url: str, token: str | None
-    ) -> tuple[str, str | None]:
+    def _resolve_credentials(self, repo_url: str, token: str | None) -> tuple[str, str | None]:
         """Return the repository URL and token used by Git operations."""
 
     def effective_repo_url(self, repo_url: str, token: str | None) -> str:
@@ -84,14 +89,27 @@ class GitService(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _run_git(
-        args: list[str], cwd: str, askpass: Path | None = None
-    ) -> tuple[int, str, str]:
+    def _run_git(args: list[str], cwd: str, askpass: Path | None = None) -> tuple[int, str, str]:
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         if askpass:
             env["GIT_ASKPASS"] = str(askpass)
-        result = subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, env=env
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                args, cwd=cwd, capture_output=True, text=True, env=env, timeout=60
+            )
+        except subprocess.TimeoutExpired:
+            raise RepoUnreachableError("Repository operation timed out") from None
+        action = (
+            args[1]
+            if len(args) > 1 and args[1] in {"clone", "pull", "fetch", "reset", "push"}
+            else "local"
+        )
+        logger.info(
+            "git_operation completed operation=%s duration_ms=%s status_code=%s",
+            action,
+            int((time.monotonic() - started) * 1000),
+            result.returncode,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
 
@@ -116,11 +134,13 @@ class GitService(ABC):
     def _configure_git_identity(workspace: str) -> None:
         subprocess.run(
             ["git", "config", "user.email", "agent@local"],
-            cwd=workspace, capture_output=True,
+            cwd=workspace,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Finance Agent"],
-            cwd=workspace, capture_output=True,
+            cwd=workspace,
+            capture_output=True,
         )
 
     @staticmethod
@@ -212,9 +232,7 @@ class GitService(ABC):
         finally:
             self._cleanup_askpass(askpass)
 
-    def ensure_workspace(
-        self, workspace: str, repo_url: str, token: str | None = None
-    ) -> str:
+    def ensure_workspace(self, workspace: str, repo_url: str, token: str | None = None) -> str:
         """Ensure workspace is a valid git repo and up to date.
 
         - If no .git: clone from repo_url.
@@ -261,9 +279,7 @@ class GitService(ABC):
             if effective_token:
                 askpass = self._configure_git_askpass(workspace, effective_token)
 
-            rc, _, err = self._run_git(
-                ["git", "fetch", "origin"], cwd=workspace, askpass=askpass
-            )
+            rc, _, err = self._run_git(["git", "fetch", "origin"], cwd=workspace, askpass=askpass)
             if rc != 0:
                 raise self._classify_clone_error(err)
 
@@ -277,9 +293,7 @@ class GitService(ABC):
                     return "REFRESHED_EMPTY"
                 raise GitServiceError("git reset failed: remote has no refs")
 
-            rc2, _, err2 = self._run_git(
-                ["git", "reset", "--hard", reset_target], cwd=workspace
-            )
+            rc2, _, err2 = self._run_git(["git", "reset", "--hard", reset_target], cwd=workspace)
             if rc2 != 0:
                 raise GitServiceError(f"git reset failed: {err2}")
 
@@ -294,9 +308,7 @@ class GitService(ABC):
         try:
             if effective_token:
                 askpass = self._configure_git_askpass(workspace, effective_token)
-            rc, out, err = self._run_git(
-                ["git", "push"], cwd=workspace, askpass=askpass
-            )
+            rc, out, err = self._run_git(["git", "push"], cwd=workspace, askpass=askpass)
             if rc != 0:
                 raise PushRejectedError(f"Push failed: {err}")
             status = out or "ok"
@@ -335,11 +347,15 @@ class GitService(ABC):
         if stage.returncode != 0:
             logger.error("git add failed")
             return {"ok": False, "error": stage.stderr.strip(), "push": None}
+        started = time.monotonic()
         result = subprocess.run(
             ["git", "commit", "-m", message],
             cwd=workspace,
             capture_output=True,
             text=True,
+        )
+        logger.info(
+            "git_local_commit completed duration_ms=%s", int((time.monotonic() - started) * 1000)
         )
         if result.returncode != 0:
             logger.error("git commit failed")
@@ -353,11 +369,7 @@ class GitService(ABC):
             text=True,
             check=False,
         )
-        commit_sha = (
-            commit_sha_result.stdout.strip()
-            if commit_sha_result.returncode == 0
-            else None
-        )
+        commit_sha = commit_sha_result.stdout.strip() if commit_sha_result.returncode == 0 else None
         try:
             push_status = self.push(workspace, repo_url, token)
         except PushRejectedError as e:
@@ -442,9 +454,7 @@ class CloudGitService(GitService):
         if not token or not token.strip():
             raise RepoAuthFailedError("Cloud repository OAuth token is required")
 
-    def _resolve_credentials(
-        self, repo_url: str, token: str | None
-    ) -> tuple[str, str | None]:
+    def _resolve_credentials(self, repo_url: str, token: str | None) -> tuple[str, str | None]:
         self.validate_request_credentials(repo_url, token)
         return repo_url, token
 
@@ -458,9 +468,7 @@ class LocalGitService(GitService):
     def validate_request_credentials(self, repo_url: str, token: str | None) -> None:
         return None
 
-    def _resolve_credentials(
-        self, repo_url: str, token: str | None
-    ) -> tuple[str, str | None]:
+    def _resolve_credentials(self, repo_url: str, token: str | None) -> tuple[str, str | None]:
         return self._local_repo_url, None
 
 
@@ -488,9 +496,14 @@ class CachedWorkspaceManager:
 
     CACHE_ROOT = "/tmp/bean_cache"
 
-    def __init__(self, git_service: GitService, ttl_seconds: int):
+    def __init__(self, git_service: GitService, ttl_seconds: int, read_freshness_seconds: int = 0):
         self._git_service = git_service
         self._ttl_seconds = ttl_seconds
+        self._read_freshness_seconds = max(0, read_freshness_seconds)
+        # One separate worker, no queued submissions: foreground ledger capacity stays available.
+        self._background_capacity = BoundedSemaphore(1)
+        self._background = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-refresh")
+        self._closed = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -526,6 +539,96 @@ class CachedWorkspaceManager:
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text(str(time.time()))
 
+    def _state(self, key: str) -> dict:
+        try:
+            state = json.loads(Path(f"{self._meta_path(key)}.state").read_text())
+            return state if isinstance(state, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, key: str, observed_at: float | None = None) -> None:
+        Path(f"{self._meta_path(key)}.state").write_text(
+            json.dumps(
+                {
+                    "generation": uuid.uuid4().hex,
+                    "observed_at": observed_at,
+                }
+            )
+        )
+
+    def _recent(self, key: str) -> bool:
+        observed = self._state(key).get("observed_at")
+        return (
+            self._read_freshness_seconds > 0
+            and self._is_valid(key)
+            and isinstance(observed, (int, float))
+            and 0 <= time.time() - observed < self._read_freshness_seconds
+        )
+
+    def invalidate(
+        self, user_id: str, repo_url: str, token: str | None = None, branch: str | None = None
+    ) -> None:
+        key = self._cache_key(
+            user_id, self._git_service.effective_repo_url(repo_url, token), branch
+        )
+        os.makedirs(self.CACHE_ROOT, exist_ok=True)
+        with FileLock(f"{self._cache_path(key)}.lock", timeout=30):
+            self._save_state(key)
+
+    def close(self) -> None:
+        self._closed = True
+        self._background.shutdown(wait=True)
+
+    def _schedule_refresh(
+        self, key: str, repo_url: str, token: str | None, branch: str | None
+    ) -> None:
+        if self._closed or not self._background_capacity.acquire(blocking=False):
+            return
+        try:
+            self._background.submit(self._refresh_candidate, key, repo_url, token, branch)
+        except RuntimeError:
+            self._background_capacity.release()
+
+    def _refresh_candidate(
+        self, key: str, repo_url: str, token: str | None, branch: str | None
+    ) -> None:
+        state = {}
+        candidate = None
+        started = time.monotonic()
+        try:
+            candidate = tempfile.mkdtemp(prefix="bean_cache_refresh_")
+            lock = FileLock(f"{self._cache_path(key)}.lock", timeout=30)
+            with lock:
+                state = self._state(key)
+                if not self._is_valid(key) or not state.get("generation"):
+                    return
+                self._git_service.copy(self._cache_path(key), candidate)
+            observed = time.time()
+            self._refresh(candidate, repo_url, token, branch)
+            with lock:
+                if self._state(key).get("generation") != state["generation"]:
+                    return
+                shutil.rmtree(self._cache_path(key))
+                os.replace(candidate, self._cache_path(key))
+                self._touch(key)
+                self._save_state(key, observed)
+            logger.info(
+                "workspace_background_refresh completed duration_ms=%s",
+                int((time.monotonic() - started) * 1000),
+            )
+        except RepoAuthFailedError:
+            with FileLock(f"{self._cache_path(key)}.lock", timeout=30):
+                # Do not invalidate a newer authorized generation.
+                if self._state(key).get("generation") == state.get("generation"):
+                    self._save_state(key)
+            logger.warning("workspace_background_refresh failed reason=repository_authorization")
+        except Exception:
+            logger.warning("workspace_background_refresh failed reason=refresh_unavailable")
+        finally:
+            if candidate is not None:
+                shutil.rmtree(candidate, ignore_errors=True)
+            self._background_capacity.release()
+
     def _refresh(
         self,
         cache_path: str,
@@ -538,16 +641,12 @@ class CachedWorkspaceManager:
         askpass = None
         try:
             if effective_token:
-                askpass = self._git_service._configure_git_askpass(
-                    cache_path, effective_token
-                )
+                askpass = self._git_service._configure_git_askpass(cache_path, effective_token)
             rc, _, err = self._git_service._run_git(
                 ["git", "pull", "--ff-only"], cwd=cache_path, askpass=askpass
             )
             if rc != 0:
-                logger.warning(
-                    "git pull --ff-only failed, falling back to fetch+reset"
-                )
+                logger.warning("git pull --ff-only failed, falling back to fetch+reset")
                 if branch is None:
                     self._git_service.fetch_reset(cache_path, repo_url, token)
                 else:
@@ -602,6 +701,9 @@ class CachedWorkspaceManager:
         token: str | None,
         destination: str,
         branch: str | None = None,
+        *,
+        read_recent: bool = False,
+        admitted_at: float | None = None,
     ) -> str:
         """Refresh and snapshot a cache entry under one per-key lock.
 
@@ -614,13 +716,31 @@ class CachedWorkspaceManager:
         cache_path = self._cache_path(key)
         os.makedirs(self.CACHE_ROOT, exist_ok=True)
         try:
-            with FileLock(f"{cache_path}.lock", timeout=30):
-                self._acquire_locked(key, cache_path, repo_url, token, branch)
-                self._git_service.copy(cache_path, destination)
+            snapshot_lock = FileLock(f"{cache_path}.lock", timeout=30)
+            with stage_timer("cache_lock_wait"):
+                held_lock = snapshot_lock.acquire()
+            with held_lock:
+                recent = read_recent and self._recent(key)
+                observed = self._state(key).get("observed_at")
+                overlapping = (
+                    read_recent
+                    and self._read_freshness_seconds > 0
+                    and admitted_at is not None
+                    and self._is_valid(key)
+                    and isinstance(observed, (int, float))
+                    and observed >= admitted_at
+                )
+                if not (recent or overlapping):
+                    self._acquire_locked(key, cache_path, repo_url, token, branch)
+                with stage_timer("workspace_copy"):
+                    self._git_service.copy(cache_path, destination)
         except TimeoutError as error:
             raise CacheLockTimeoutError(
                 f"Timed out waiting for cache lock on key={key} (cache_path={cache_path})"
             ) from error
+        logger.info("workspace_snapshot ready reused=%s", bool(recent or overlapping))
+        if self._read_freshness_seconds > 0 and read_recent and (recent or overlapping):
+            self._schedule_refresh(key, repo_url, token, branch)
         return destination
 
     def _acquire_locked(
@@ -631,6 +751,9 @@ class CachedWorkspaceManager:
         token: str | None,
         branch: str | None,
     ) -> None:
+        observed = time.time()
+        # Any required refresh invalidates older candidates/readiness before I/O.
+        self._save_state(key)
         if not self._is_valid(key):
             logger.info("Cache miss or expired for key=%s", key)
             if os.path.exists(cache_path):
@@ -640,6 +763,7 @@ class CachedWorkspaceManager:
             logger.info("Cache hit for key=%s, refreshing", key)
             self._refresh(cache_path, repo_url, token, branch)
         self._touch(key)
+        self._save_state(key, observed)
 
     def cleanup_expired(self) -> None:
         """Remove all expired cache entries from /tmp/bean_cache/.
@@ -657,7 +781,11 @@ class CachedWorkspaceManager:
             for entry in cache_root.iterdir():
                 if entry.is_dir():
                     shutil.rmtree(str(entry), ignore_errors=True)
-                elif entry.name.endswith(".meta") or entry.name.endswith(".lock"):
+                elif (
+                    entry.name.endswith(".meta")
+                    or entry.name.endswith(".lock")
+                    or entry.name.endswith(".state")
+                ):
                     entry.unlink(missing_ok=True)
             return
 
@@ -677,7 +805,9 @@ class CachedWorkspaceManager:
             if now - meta.stat().st_mtime >= self._ttl_seconds:
                 logger.info(
                     "Removing expired cache dir %s (age=%.0fs)",
-                    key, now - meta.stat().st_mtime,
+                    key,
+                    now - meta.stat().st_mtime,
                 )
                 shutil.rmtree(str(entry), ignore_errors=True)
                 meta.unlink(missing_ok=True)
+                Path(f"{self._meta_path(key)}.state").unlink(missing_ok=True)

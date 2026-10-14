@@ -31,7 +31,7 @@ class CacheWarmupOperationHandler:
         self._lifecycle = lifecycle
 
     async def run(self, **kwargs) -> dict:
-        return await run_blocking(self._run_sync, **kwargs)
+        return await run_blocking(self._run_sync, admitted_at=time.time(), **kwargs)
 
     def _run_sync(
         self,
@@ -41,6 +41,7 @@ class CacheWarmupOperationHandler:
         user_id: str,
         request_id: str | None,
         ledger_config: LedgerConfig | None = None,
+        admitted_at: float | None = None,
     ) -> dict:
         start_time = time.monotonic()
 
@@ -49,6 +50,8 @@ class CacheWarmupOperationHandler:
                 repo_url=repo_url,
                 token=token,
                 user_id=user_id,
+                read_recent=True,
+                admitted_at=admitted_at,
                 prefix="bean_warmup_",
                 preflight_mode=PreflightMode.VALIDATE,
                 ledger_config=ledger_config,

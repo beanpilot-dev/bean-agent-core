@@ -4,6 +4,7 @@ import subprocess
 from typing import Protocol
 
 from ..beancount import Beancount, _cfg, _repo_path
+from ..timing import stage_timer
 from ..types import LedgerConfig
 from .applier import MutationApplier
 from .facts import semantic_facts_hold
@@ -64,14 +65,16 @@ class MutationExecutor:
         if plan.preconditions and not sealed_write_set_matches(plan, resolved):
             return (), {}, "MUTATION_PLAN_WRITE_SET_MISMATCH"
         write_targets = potential_write_targets(plan, resolved)
-        originals = self._store.snapshot(
-            workspace, write_targets, resolved
-        )
+        originals = self._store.snapshot(workspace, write_targets, resolved)
         try:
-            if not self.preconditions_hold(workspace, plan, resolved, self._store):
+            with stage_timer("mutation_preconditions"):
+                preconditions_ok = self.preconditions_hold(workspace, plan, resolved, self._store)
+            if not preconditions_ok:
                 return (), {}, "MUTATION_PRECONDITION_FAILED"
-            touched = self._applier.apply(workspace, plan, config)
-            clean, output = self._ledger_validator.check(workspace, config)
+            with stage_timer("mutation_replay"):
+                touched = self._applier.apply(workspace, plan, config)
+            with stage_timer("final_validation"):
+                clean, output = self._ledger_validator.check(workspace, config)
             if not clean:
                 self._store.restore(workspace, originals, resolved)
                 return touched, {}, output
@@ -82,16 +85,22 @@ class MutationExecutor:
                 if applied.files[path] != original
             )
             if not changed_paths:
-                return touched, {
-                    "ok": False,
-                    "error": "No validated ledger changes to publish",
-                    "push": None,
-                }, ""
-            for rel_path in changed_paths:
-                self._formatter.format(workspace, _repo_path(workspace, rel_path))
-            git = git_service.commit_and_push(
-                workspace, plan.commit_message, repo_url, github_token, changed_paths
-            )
+                return (
+                    touched,
+                    {
+                        "ok": False,
+                        "error": "No validated ledger changes to publish",
+                        "push": None,
+                    },
+                    "",
+                )
+            with stage_timer("format"):
+                for rel_path in changed_paths:
+                    self._formatter.format(workspace, _repo_path(workspace, rel_path))
+            with stage_timer("commit_and_publish"):
+                git = git_service.commit_and_push(
+                    workspace, plan.commit_message, repo_url, github_token, changed_paths
+                )
             if not git.get("ok"):
                 self._store.restore(workspace, originals, resolved)
                 self._reset_index(workspace, tuple(originals.files))
