@@ -35,6 +35,7 @@ def _classify_action_risk(action_type: str, validation: dict[str, object]) -> di
     reasons: list[str] = []
     risk = "normal"
     txn_count = validation.get("transaction_count")
+    reconciliation_count = validation.get("balance_reconciliation_count")
     if (
         action_type in {"bulk_commit", "change_set"}
         and isinstance(txn_count, int)
@@ -45,8 +46,13 @@ def _classify_action_risk(action_type: str, validation: dict[str, object]) -> di
     if action_type == "update_transaction":
         risk = "elevated"
         reasons.append("historical_update")
-    if action_type == "balance_reconciliation":
-        risk = "elevated"
+    if action_type == "balance_reconciliation" or (
+        action_type == "change_set"
+        and isinstance(reconciliation_count, int)
+        and reconciliation_count > 0
+    ):
+        if risk == "normal":
+            risk = "elevated"
         reasons.append("balance_reconciliation")
     if action_type == "delete_transaction":
         risk = "high"

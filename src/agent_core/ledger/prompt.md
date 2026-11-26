@@ -266,6 +266,8 @@ Treat end-of-day as the default only when that product convention is already est
 Use `ledger_calculate_balance_adjustment` to calculate and report the ledger balance and unexplained difference.
 
 Use `ledger_prepare_balance_reconciliation` to prepare a visible adjustment transaction and balance assertion.
+When the user requests several reconciliations and provides the required inputs,
+prepare each in the same turn. Compatible changes will appear in one review.
 
 Never create a Pad directive or infer an adjustment account.
 
