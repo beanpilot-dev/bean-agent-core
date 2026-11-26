@@ -652,16 +652,32 @@ async def test_stream_emits_structured_approval_event_for_text_block_tool_result
 
 
 @pytest.mark.asyncio
-async def test_stream_combines_two_prepared_openings_before_review(monkeypatch, ledger_workspace):
+@pytest.mark.parametrize("scenario", ["open", "reconcile", "duplicate_checkpoint"])
+async def test_stream_coordinates_prepared_actions_before_review(
+    monkeypatch, ledger_workspace, scenario
+):
     from dataclasses import asdict
 
     from agent_core.services.ledger import LedgerService
     from agent_core.services.pending_actions import PendingActionService
 
-    actions = [
-        asdict(LedgerService().prepare_open(str(ledger_workspace), name, "CNY", "2020-01-01"))
-        for name in ["Assets:Test:One", "Assets:Test:Two"]
-    ]
+    ledger = LedgerService()
+    path = str(ledger_workspace)
+    if scenario == "open":
+        actions = [
+            asdict(ledger.prepare_open(path, name, "CNY", "2020-01-01"))
+            for name in ["Assets:Test:One", "Assets:Test:Two"]
+        ]
+    else:
+        targets = [("Assets:Cash", "9900"), ("Assets:Bank:Checking", "5100")]
+        if scenario == "duplicate_checkpoint":
+            targets = [("Assets:Bank:Checking", "5000")] * 2
+        actions = [
+            asdict(ledger.prepare_balance_reconciliation(
+                path, "2026-05-31", account, amount, "CNY", "Equity:Opening-Balances"
+            ))
+            for account, amount in targets
+        ]
 
     class Graph:
         async def ainvoke(self, graph_input, config):
@@ -672,7 +688,7 @@ async def test_stream_combines_two_prepared_openings_before_review(monkeypatch, 
                         ToolMessage(content=json.dumps(action), tool_call_id=f"call-{index}")
                         for index, action in enumerate(actions)
                     ],
-                    AIMessage(content="Review both openings."),
+                    AIMessage(content="Review both changes."),
                 ]
             }
 
@@ -682,12 +698,19 @@ async def test_stream_combines_two_prepared_openings_before_review(monkeypatch, 
     chunks = [
         chunk
         async for chunk in agent.stream(
-            query="Open two accounts", prior=[], model="scripted", workspace=str(ledger_workspace)
+            query="Prepare two changes", prior=[], model="scripted", workspace=path
         )
     ]
     approvals = [
         chunk["pending_action"] for chunk in chunks if chunk.get("type") == "approval_required"
     ]
+    if scenario == "duplicate_checkpoint":
+        assert not approvals
+        history = next(chunk for chunk in chunks if chunk.get("type") == "history_snapshot")
+        assert history["messages"][-1]["role"] == "assistant"
+        assert "failed validation together" in history["messages"][-1]["content"]
+        assert chunks[-2]["require_user_input"] is False
+        return
     assert len(approvals) == 1
     assert approvals[0]["action_type"] == "change_set"
     assert len(approvals[0]["display"]["items"]) == 2

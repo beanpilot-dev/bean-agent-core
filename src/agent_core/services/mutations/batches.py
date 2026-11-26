@@ -12,6 +12,10 @@ from .targets import sealed_write_set_matches
 from .validator import MutationValidator
 
 
+class IncompatibleChangeSetError(ValueError):
+    """Individually valid actions cannot be presented as one approval."""
+
+
 def _verified_plan(action: dict[str, Any], config: LedgerConfig | None) -> MutationPlan:
     if PendingActionService.verify_pending_action(action):
         raise ValueError("Invalid approval contract")
@@ -65,12 +69,18 @@ def coordinate_prepared_actions(
 ) -> list[dict[str, Any]]:
     """Seal one ordered plan before same-turn proposals reach user review.
 
-    Only native append/open/close proposals can be combined here. Historical
-    edits, deletions and other specialized policies keep their own contracts.
+    Combine eligible append/open/close proposals, including reconciliations.
+    Historical edits and deletions keep their own contracts.
     """
     if len(actions) < 2 or any(
         action.get("action_type")
-        not in {"open_account", "commit_transaction", "change_set", "close_account"}
+        not in {
+            "open_account",
+            "commit_transaction",
+            "change_set",
+            "close_account",
+            "balance_reconciliation",
+        }
         for action in actions
     ):
         return actions
@@ -83,6 +93,13 @@ def coordinate_prepared_actions(
         return actions
     if any(not MutationExecutor.preconditions_hold(workspace, plan, config) for plan in plans):
         raise ValueError("Prepared group is stale")
+    checkpoints: set[str] = set()
+    for member in plans:
+        for fact in member.semantic_facts:
+            if fact.kind == "checkpoint_state":
+                if fact.subject in checkpoints:
+                    raise IncompatibleChangeSetError("Duplicate balance checkpoint")
+                checkpoints.add(fact.subject)
     plan = MutationPlan.from_operations(
         [operation for member in plans for operation in member.operations],
         commit_message="Apply approved ledger change set",
@@ -92,7 +109,7 @@ def coordinate_prepared_actions(
     )
     validation = MutationValidator().validate(workspace, plan, config)
     if validation.failure:
-        raise ValueError("Combined change set failed validation")
+        raise IncompatibleChangeSetError("Combined change set failed validation")
     sealed = MutationCoordinator.seal(workspace, plan, config)
     items: list[dict[str, Any]] = []
     for action in actions:
@@ -100,6 +117,8 @@ def coordinate_prepared_actions(
         members = display.get("items")
         if isinstance(members, list):
             items.extend(dict(member) for member in members)
+        elif action["action_type"] == "balance_reconciliation":
+            items.append({**display, "type": action["action_type"]})
         else:
             items.append(
                 {
@@ -127,6 +146,9 @@ def coordinate_prepared_actions(
             "transaction_count": sum(operation.kind == "append" for operation in plan.operations),
             "account_closure_count": sum(
                 operation.kind == "close" for operation in plan.operations
+            ),
+            "balance_reconciliation_count": sum(
+                item.get("type") == "balance_reconciliation" for item in items
             ),
         },
         continue_after_approval=bool(continuations),

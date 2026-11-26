@@ -184,6 +184,7 @@ class BalanceReconciliationPreparationHandler:
                 "kind": "balance_reconciliation_preview",
                 "title": title,
                 "summary": summary,
+                "account": account,
                 "observed_date": observed_date,
                 "cutoff": cutoff,
                 "assertion_date": assertion_date,

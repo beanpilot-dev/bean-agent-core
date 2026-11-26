@@ -3,6 +3,7 @@
 import subprocess
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -12,11 +13,17 @@ from agent_core.main import app
 from agent_core.services.approvals.contracts import PendingActionService
 from agent_core.services.ledger import LedgerService
 from agent_core.services.mutations.batches import (
+    IncompatibleChangeSetError,
     check_independent_batch,
     coordinate_prepared_actions,
 )
 from agent_core.services.operations.pending_actions import PendingActionOperationHandler
-from agent_core.services.types import ApplyReceipt, IntegrityFailed, InvariantViolation
+from agent_core.services.types import (
+    ApplyReceipt,
+    IntegrityFailed,
+    InvariantViolation,
+    PendingAction,
+)
 from agent_core.services.workspace import LocalGitService
 
 
@@ -26,6 +33,105 @@ def opens(workspace: str) -> list[dict]:
         asdict(service.prepare_open(workspace, name, "CNY", "2020-01-01"))
         for name in ["Assets:Test:One", "Assets:Test:Two"]
     ]
+
+
+def reconciliation(workspace: str, account: str, amount: str) -> dict:
+    action = LedgerService().prepare_balance_reconciliation(
+        workspace, "2026-05-31", account, amount, "CNY", "Equity:Opening-Balances"
+    )
+    assert isinstance(action, PendingAction)
+    return asdict(action)
+
+
+def test_four_reconciliations_on_one_sidecar_publish_once(
+    bare_ledger_repo: Path, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "reconciliation-workspace"
+    git = LocalGitService(str(bare_ledger_repo))
+    git.clone(str(workspace), "ignored")
+    path = str(workspace)
+    ledger = LedgerService()
+    targets = {
+        "Assets:Cash": "9900",
+        "Assets:Bank:Checking": "5100",
+        "Expenses:Food:Dining": "90",
+        "Expenses:Transport:Gas": "25",
+    }
+    actions = [reconciliation(path, account, amount) for account, amount in targets.items()]
+    assert check_independent_batch(actions) == "BATCH_REPREPARE_REQUIRED"
+    [composite] = coordinate_prepared_actions(path, actions)
+    assert PendingActionService.verify_pending_action(composite) is None
+    assert composite["policy"]["risk"] == "elevated"
+    assert composite["policy"]["reasons"] == ["balance_reconciliation"]
+    assert composite["validation"]["balance_reconciliation_count"] == 4
+    assert len(composite["execution_spec"]["mutation_plan"]["operations"]) == 4
+    items = composite["display"]["items"]
+    assert [item["account"] for item in items] == list(targets)
+    for index, (item, action) in enumerate(zip(items, actions, strict=True)):
+        assert item == {
+            **action["display"],
+            "type": "balance_reconciliation",
+            "operation_index": index,
+        }
+
+    sidecar = f"data/agent_inc/{date.today():%Y-%m}.beancount"
+    original = (workspace / sidecar).read_bytes()
+    assert b" balance " not in original
+    result = ledger.apply_pending_action(path, composite, "ignored", git)
+    assert isinstance(result, ApplyReceipt)
+    remote_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=bare_ledger_repo, text=True
+    ).strip()
+    assert remote_head == result.receipt["commit_sha"]
+    content = subprocess.check_output(
+        ["git", "show", f"HEAD:{sidecar}"], cwd=bare_ledger_repo, text=True
+    )
+    assert content.count("Balance reconciliation adjustment") == 4
+    assert content.count(" balance ") == 4
+    for account, amount in targets.items():
+        assert any(
+            line.split() == ["2026-06-01", "balance", account, amount, "CNY"]
+            for line in content.splitlines()
+        )
+    repeated = ledger.apply_pending_action(path, composite, "ignored", git)
+    assert isinstance(repeated, InvariantViolation)
+    assert repeated.invariant == "MUTATION_PRECONDITION_FAILED"
+    assert subprocess.check_output(
+        ["git", "rev-list", "--count", "HEAD"], cwd=bare_ledger_repo, text=True
+    ).strip() == "2"
+
+
+def test_duplicate_zero_adjustment_checkpoint_rejected(ledger_workspace: Path) -> None:
+    path = str(ledger_workspace)
+    action = reconciliation(path, "Assets:Bank:Checking", "5000")
+    with pytest.raises(IncompatibleChangeSetError, match="Duplicate balance checkpoint"):
+        coordinate_prepared_actions(path, [action, action])
+
+
+@pytest.mark.parametrize("posting_account", ["Assets:Cash", "Assets:Bank:Checking"])
+def test_combined_transaction_and_reconciliation_validate_together(
+    ledger_workspace: Path, posting_account: str
+) -> None:
+    path = str(ledger_workspace)
+    service = LedgerService()
+    transaction = service.prepare_commit(
+        path,
+        f'2026-05-31 * "Purchase"\n  Expenses:Food:Dining  10 CNY\n  {posting_account}  -10 CNY',
+        "Record purchase",
+    )
+    assert isinstance(transaction, PendingAction)
+    approve = [asdict(transaction), reconciliation(path, "Assets:Bank:Checking", "5100")]
+    if posting_account == "Assets:Cash":
+        [composite] = coordinate_prepared_actions(path, approve)
+        assert [item["type"] for item in composite["display"]["items"]] == [
+            "commit_transaction", "balance_reconciliation"
+        ]
+    else:
+        month_file = ledger_workspace / f"data/agent_inc/{date.today():%Y-%m}.beancount"
+        original = month_file.read_bytes()
+        with pytest.raises(IncompatibleChangeSetError, match="failed validation"):
+            coordinate_prepared_actions(path, approve)
+        assert month_file.read_bytes() == original
 
 
 def test_shared_opens_publish_together_once(bare_ledger_repo: Path, tmp_path: Path) -> None:
@@ -121,9 +227,12 @@ def test_account_closes_preserve_elevated_review(ledger_workspace: Path) -> None
         asdict(service.prepare_account_close(path, name, "2026-06-01"))
         for name in ["Assets:Test:One", "Assets:Test:Two"]
     ]
+    actions.append(reconciliation(path, "Assets:Bank:Checking", "5100"))
     composite = coordinate_prepared_actions(path, actions)[0]
     assert composite["policy"]["requires_elevated_review"] is True
+    assert composite["policy"]["risk"] == "high"
     assert "account_closure" in composite["policy"]["reasons"]
+    assert "balance_reconciliation" in composite["policy"]["reasons"]
     result = service.apply_pending_action(path, composite, "fixture", object())
     assert isinstance(result, IntegrityFailed)
 

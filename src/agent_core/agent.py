@@ -20,7 +20,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from agent_core.services.activity import ActivityCallbackHandler, ActivityEmitter
-from agent_core.services.mutations.batches import coordinate_prepared_actions
+from agent_core.services.mutations.batches import (
+    IncompatibleChangeSetError,
+    coordinate_prepared_actions,
+)
+from agent_core.services.operations.blocking import run_blocking
 from agent_core.services.tool_ports import (
     WorkflowToolDependenciesFactory,
     create_workflow_tool_dependencies,
@@ -588,9 +592,24 @@ class PersonalFinanceAgent:
 
             require_input = self._requires_user_input(result)
             tool_names = _tool_names(result)
-            pending_actions = coordinate_prepared_actions(
-                workspace, _pending_actions(result), ledger_config
-            )
+            pending_actions = _pending_actions(result)
+            try:
+                if len(pending_actions) > 1:
+                    pending_actions = await run_blocking(
+                        coordinate_prepared_actions, workspace, pending_actions, ledger_config
+                    )
+            except IncompatibleChangeSetError:
+                pending_actions = []
+                require_input = False
+                response = (
+                    "这些变更合在一起未通过校验，账本未写入。请检查变更之间是否冲突，再生成新的预览。"
+                    if preferred_language == "zh-CN"
+                    else "These changes failed validation together. Nothing was written. "
+                    "Check for conflicting changes and ask for a new preview."
+                )
+                result["messages"][-1] = result["messages"][-1].model_copy(
+                    update={"content": response}
+                )
             if activity_emitter:
                 yield activity_emitter.emit(
                     category="workflow",
